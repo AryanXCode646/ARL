@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict
+
 from pydantic import BaseModel, Field
 
 
@@ -13,5 +14,5 @@ class EvaluationScenario(BaseModel):
     seed: int = Field(..., description="Deterministic random seed for the scenario")
     environment_overrides: Dict[str, Any] = Field(
         default_factory=dict,
-        description="Environment parameters specifically overridden for this scenario"
+        description="Environment parameters specifically overridden for this scenario",
     )

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional
+
 import typer
 from rich.console import Console
 from rich.panel import Panel
@@ -58,24 +59,36 @@ def info() -> None:
     table.add_column("Milestone Name", style="magenta")
     table.add_column("Status", style="green")
 
-    table.add_row("Phase 1", "Repository Foundation and Architecture Skeleton", "[bold green]COMPLETED[/bold green]")
-    table.add_row("Phase 2", "Environment Abstraction and Registry", "[bold green]COMPLETED[/bold green]")
+    table.add_row(
+        "Phase 1",
+        "Repository Foundation and Architecture Skeleton",
+        "[bold green]COMPLETED[/bold green]",
+    )
+    table.add_row(
+        "Phase 2", "Environment Abstraction and Registry", "[bold green]COMPLETED[/bold green]"
+    )
     table.add_row("Phase 3", "Procedurally Generated GridWorld", "[yellow]PLANNED[/yellow]")
     table.add_row("Phase 4", "PPO Training Engine (SB3 Wrapper)", "[yellow]PLANNED[/yellow]")
     table.add_row("Phase 5", "Evaluation Engine and Standard Metrics", "[yellow]PLANNED[/yellow]")
     table.add_row("Phase 6", "Continuous 2D Navigation", "[yellow]PLANNED[/yellow]")
     table.add_row("Phase 7", "Curriculum Learning", "[yellow]PLANNED[/yellow]")
     table.add_row("Phase 8", "Traffic Signal Environment", "[yellow]PLANNED[/yellow]")
-    table.add_row("Phase 9", "Mathematical Drone Navigation Environment", "[yellow]PLANNED[/yellow]")
+    table.add_row(
+        "Phase 9", "Mathematical Drone Navigation Environment", "[yellow]PLANNED[/yellow]"
+    )
     table.add_row("Phase 10", "Drone Disturbances and Constraints", "[yellow]PLANNED[/yellow]")
-    table.add_row("Phase 11-17", "Research Baselines, Hardening & Final Audit", "[yellow]PLANNED[/yellow]")
+    table.add_row(
+        "Phase 11-17", "Research Baselines, Hardening & Final Audit", "[yellow]PLANNED[/yellow]"
+    )
 
     console.print(table)
 
 
 @config_app.command(name="validate")
 def validate_config(
-    path: Path = typer.Argument(..., help="Path to YAML configuration file to validate", exists=False)
+    path: Path = typer.Argument(
+        ..., help="Path to YAML configuration file to validate", exists=False
+    ),
 ) -> None:
     """Validate an experiment YAML configuration file against the schema."""
     try:
@@ -136,7 +149,7 @@ def list_envs() -> None:
 
 @env_app.command(name="inspect")
 def inspect_env(
-    name: str = typer.Argument(..., help="Name of registered or Gymnasium environment to inspect")
+    name: str = typer.Argument(..., help="Name of registered or Gymnasium environment to inspect"),
 ) -> None:
     """Inspect observation and action spaces of an environment."""
     try:
@@ -169,7 +182,9 @@ def inspect_env(
 
 @app.command()
 def train(
-    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Path to training configuration YAML")
+    config: Optional[Path] = typer.Option(
+        None, "--config", "-c", help="Path to training configuration YAML"
+    ),
 ) -> None:
     """Start an agent training run (Scheduled for Phase 4: PPO Training Engine)."""
     console.print(
@@ -182,8 +197,12 @@ def train(
 
 @app.command()
 def evaluate(
-    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Path to evaluation configuration YAML"),
-    model: Optional[Path] = typer.Option(None, "--model", "-m", help="Path to model weights artifact"),
+    config: Optional[Path] = typer.Option(
+        None, "--config", "-c", help="Path to evaluation configuration YAML"
+    ),
+    model: Optional[Path] = typer.Option(
+        None, "--model", "-m", help="Path to model weights artifact"
+    ),
 ) -> None:
     """Evaluate a trained agent (Scheduled for Phase 5: Evaluation Engine)."""
     console.print(

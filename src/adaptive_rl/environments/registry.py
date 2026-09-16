@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from typing import Any, Callable, Dict, List, Optional, Union
+
 import gymnasium as gym
+
 from adaptive_rl.environments.metadata import EnvironmentMetadata
 
 EnvironmentFactory = Callable[..., gym.Env]
@@ -11,6 +13,7 @@ EnvironmentFactory = Callable[..., gym.Env]
 
 class RegistryError(Exception):
     """Exception raised for environment registry operations."""
+
     pass
 
 

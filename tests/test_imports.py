@@ -1,7 +1,9 @@
 """Tests verifying package and module importability."""
 
 import importlib
+
 import pytest
+
 import adaptive_rl
 
 

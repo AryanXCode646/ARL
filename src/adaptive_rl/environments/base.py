@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import abstractmethod
 from typing import Any, Dict, Optional, Tuple, TypeVar
+
 import gymnasium as gym
 from gymnasium import spaces
 

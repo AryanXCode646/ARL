@@ -1,7 +1,9 @@
 """Tests verifying Typer CLI commands and execution."""
 
 from pathlib import Path
+
 from typer.testing import CliRunner
+
 from adaptive_rl.cli import app
 from adaptive_rl.environments.registry import register, registry
 from adaptive_rl.environments.testing import DummyTestEnv
@@ -65,7 +67,11 @@ def test_cli_env_list_empty() -> None:
 def test_cli_env_list_with_registered_env() -> None:
     """Verify adaptive-rl env list displays registered environment metadata."""
     registry.clear()
-    register("cli_dummy", lambda: DummyTestEnv(), metadata={"observation_type": "box", "action_type": "discrete"})
+    register(
+        "cli_dummy",
+        lambda: DummyTestEnv(),
+        metadata={"observation_type": "box", "action_type": "discrete"},
+    )
     result = runner.invoke(app, ["env", "list"])
     assert result.exit_code == 0
     assert "cli_dummy" in result.output

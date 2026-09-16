@@ -1,18 +1,14 @@
 """Tests verifying environment registration, factory behavior, and Gymnasium compatibility."""
 
-from typing import Any
+import gymnasium as gym
 import numpy as np
 import pytest
-import gymnasium as gym
 from gymnasium.utils.env_checker import check_env
 
-from adaptive_rl.environments.base import AdaptiveRLEnv
 from adaptive_rl.environments.metadata import EnvironmentMetadata
 from adaptive_rl.environments.registry import (
     EnvironmentRegistry,
     RegistryError,
-    create_environment,
-    get,
     list_environments,
     make_env,
     register,
@@ -193,6 +189,7 @@ def test_global_convenience_functions() -> None:
     """Verify module-level convenience functions (register, make_env, list_environments)."""
     # Clean global registry for isolated test
     from adaptive_rl.environments.registry import registry
+
     registry.clear()
 
     register("global_dummy", lambda: DummyTestEnv(), metadata={"observation_type": "box"})
