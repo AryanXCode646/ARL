@@ -24,10 +24,10 @@ AdaptiveRL is developed incrementally across verifiable phases.
 
 | Phase | Milestone | Status | Description |
 | :--- | :--- | :--- | :--- |
-| **Phase 1** | **Repository Foundation & Skeleton** | **Current** | Project structure, packaging, YAML configuration schemas, honest interfaces, and CLI. |
-| Phase 2 | Environment Abstraction & Registry | *Upcoming* | Gymnasium environment wrapper contract, registry, and factory. |
-| Phase 3 | Procedural GridWorld | *Planned* | First concrete environment: procedurally generated 2D grid navigation. |
-| Phase 4 | PPO Training Engine | *Planned* | Stable-Baselines3 PPO adapter and end-to-end training loop. |
+| **Phase 1** | **Repository Foundation & Skeleton** | **Completed** | Project structure, packaging, YAML configuration schemas, honest interfaces, and CLI. |
+| **Phase 2** | **Environment Abstraction & Registry** | **Completed** | Gymnasium environment wrapper contract, registry, and factory. |
+| **Phase 3** | **Procedural GridWorld** | **Current** | Procedurally generated 2D grid navigation with BFS path verification and ASCII rendering. |
+| Phase 4 | PPO Training Engine | *Upcoming* | Stable-Baselines3 PPO adapter and end-to-end training loop. |
 | Phase 5 | Evaluation Engine & Standard Metrics | *Planned* | 100-episode benchmarking, success rate, and collision tracking. |
 | Phase 6 | Continuous 2D Navigation | *Planned* | Continuous velocity control with ray-based obstacle sensing. |
 | Phase 7 | Curriculum Learning | *Planned* | Staged obstacle density and disturbance curriculum. |
@@ -114,24 +114,45 @@ adaptive-rl version
 # Inspect development roadmap and completed phases
 adaptive-rl info
 
-# Validate an experiment configuration file
-adaptive-rl config validate configs/ppo.yaml
-```
+# List and inspect registered environments
+adaptive-rl env list
+adaptive-rl env inspect gridworld
 
-Example validation output:
-```text
-✓ Configuration is valid!
-• Experiment: cartpole_ppo_baseline
-• Seed: 42
-• Algorithm: ppo (LR: 0.0003, Gamma: 0.99)
-• Environment: CartPole-v1 (Max steps: 500)
-• Training: 50,000 steps (Checkpoint freq: 10000)
-• Evaluation: 20 episodes
+# Run an interactive or simulated rollout
+adaptive-rl env run gridworld --steps 15 --seed 42
 ```
 
 ---
 
-## 6. Running Tests
+## 6. Procedural GridWorld Environment
+
+AdaptiveRL provides a procedurally generated 2D grid navigation environment compliant with the Farama Gymnasium contract.
+
+* **Observation Space:** `Box(4,)` containing normalized coordinates `[agent_x, agent_y, goal_x, goal_y]`.
+* **Action Space:** `Discrete(4)` corresponding to `UP (0)`, `DOWN (1)`, `LEFT (2)`, `RIGHT (3)`.
+* **Rewards:** `+100.0` for reaching goal, `-100.0` for obstacle collision, `-1.0` per step.
+* **Solvability Guarantee:** Breadth-First Search (BFS) path verification guarantees a valid collision-free path exists for every generated obstacle layout.
+
+### Python Example
+
+```python
+from adaptive_rl.environments import make_env
+
+# Instantiate via factory with custom dimensions and obstacle count
+env = make_env("gridworld", width=6, height=5, num_obstacles=3, max_steps=50)
+
+obs, info = env.reset(seed=42)
+print("Initial observation:", obs)
+env.render()
+
+# Step through the environment
+obs, reward, terminated, truncated, info = env.step(1)  # DOWN
+env.close()
+```
+
+---
+
+## 7. Running Tests
 
 Execute the automated test suite with `pytest`:
 ```bash
@@ -144,12 +165,13 @@ pytest --cov=adaptive_rl tests/
 
 ---
 
-## 7. Contributing
+## 8. Contributing
 
 We welcome contributions! Please review [CONTRIBUTING.md](CONTRIBUTING.md) for branch naming conventions, quality gates, and code formatting standards before opening a pull request.
 
 ---
 
-## 8. License
+## 9. License
 
 This project is licensed under the [MIT License](LICENSE).
+

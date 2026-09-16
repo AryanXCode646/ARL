@@ -34,7 +34,7 @@ app.add_typer(config_app, name="config")
 
 env_app = typer.Typer(
     name="env",
-    help="Environment discovery and inspection commands.",
+    help="Environment discovery, inspection, and simulation commands.",
     no_args_is_help=True,
 )
 app.add_typer(env_app, name="env")
@@ -47,7 +47,7 @@ def version() -> None:
     """Show the installed AdaptiveRL version and phase status."""
     console.print(
         f"[bold green]AdaptiveRL[/bold green] version [bold cyan]{adaptive_rl.__version__}[/bold cyan] "
-        f"([yellow]Phase 2: Environment Abstraction & Registry[/yellow])"
+        f"([yellow]Phase 3: Procedural GridWorld[/yellow])"
     )
 
 
@@ -67,7 +67,9 @@ def info() -> None:
     table.add_row(
         "Phase 2", "Environment Abstraction and Registry", "[bold green]COMPLETED[/bold green]"
     )
-    table.add_row("Phase 3", "Procedurally Generated GridWorld", "[yellow]PLANNED[/yellow]")
+    table.add_row(
+        "Phase 3", "Procedurally Generated GridWorld", "[bold green]COMPLETED[/bold green]"
+    )
     table.add_row("Phase 4", "PPO Training Engine (SB3 Wrapper)", "[yellow]PLANNED[/yellow]")
     table.add_row("Phase 5", "Evaluation Engine and Standard Metrics", "[yellow]PLANNED[/yellow]")
     table.add_row("Phase 6", "Continuous 2D Navigation", "[yellow]PLANNED[/yellow]")
@@ -155,16 +157,26 @@ def inspect_env(
     try:
         env = make_env(name)
         obs, info = env.reset()
+
+        panel_content = [
+            f"[bold green]Environment '{name}' verified successfully![/bold green]\n",
+            f"• [bold]Type:[/bold] {type(env).__name__}",
+            f"• [bold]Observation Space:[/bold] {env.observation_space}",
+            f"• [bold]Action Space:[/bold] {env.action_space}",
+            f"• [bold]Initial Observation Shape:[/bold] {getattr(obs, 'shape', 'discrete/scalar')}",
+            f"• [bold]Reset Info:[/bold] {info}",
+        ]
+
+        if hasattr(env, "render"):
+            rendered = env.render()
+            if rendered:
+                panel_content.append(f"\n[bold]Initial Layout:[/bold]\n{rendered}")
+
         env.close()
 
         console.print(
             Panel.fit(
-                f"[bold green]Environment '{name}' verified successfully![/bold green]\n\n"
-                f"• [bold]Type:[/bold] {type(env).__name__}\n"
-                f"• [bold]Observation Space:[/bold] {env.observation_space}\n"
-                f"• [bold]Action Space:[/bold] {env.action_space}\n"
-                f"• [bold]Initial Observation Shape:[/bold] {getattr(obs, 'shape', 'discrete/scalar')}\n"
-                f"• [bold]Reset Info:[/bold] {info}",
+                "\n".join(panel_content),
                 title=f"Environment Inspection: {name}",
                 border_style="cyan",
             )
@@ -180,6 +192,64 @@ def inspect_env(
         raise typer.Exit(code=1)
 
 
+@env_app.command(name="run")
+def run_env(
+    name: str = typer.Argument("gridworld", help="Environment to execute"),
+    steps: int = typer.Option(10, "--steps", "-s", help="Number of steps to simulate"),
+    seed: int = typer.Option(42, "--seed", help="Random seed for environment reset"),
+) -> None:
+    """Simulate an environment episode with random actions and textual rendering."""
+    try:
+        env = make_env(name)
+        obs, info = env.reset(seed=seed)
+        console.print(f"[bold green]Starting simulation for '{name}' (seed={seed})[/bold green]\n")
+
+        if hasattr(env, "render"):
+            rendered = env.render()
+            if rendered:
+                console.print(Panel(str(rendered), title="Initial State"))
+
+        total_reward = 0.0
+        step_count = 0
+
+        for s in range(1, steps + 1):
+            action = env.action_space.sample()
+            obs, reward, terminated, truncated, step_info = env.step(action)
+            total_reward += float(reward)
+            step_count += 1
+            action_desc = step_info.get("action_name", str(action))
+            console.print(
+                f"Step {s:02d}: Action={action_desc:<5} -> Reward={reward:+6.1f} | Terminated={terminated} | Truncated={truncated}"
+            )
+
+            if terminated or truncated:
+                outcome = (
+                    "GOAL REACHED!"
+                    if step_info.get("success")
+                    else ("COLLISION!" if step_info.get("collision") else "MAX STEPS REACHED")
+                )
+                console.print(f"\n[bold yellow]Episode ended at step {s}: {outcome}[/bold yellow]")
+                if hasattr(env, "render"):
+                    rendered = env.render()
+                    if rendered:
+                        console.print(Panel(str(rendered), title="Final State"))
+                break
+
+        console.print(
+            Panel.fit(
+                f"[bold]Total Steps:[/bold] {step_count}\n"
+                f"[bold]Cumulative Reward:[/bold] {total_reward:+.1f}\n"
+                f"[bold]Final Observation:[/bold] {obs}",
+                title="Simulation Summary",
+                border_style="green",
+            )
+        )
+        env.close()
+    except RegistryError as err:
+        console.print(f"[bold red]Failed to run environment:[/bold red] {err}")
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def train(
     config: Optional[Path] = typer.Option(
@@ -189,8 +259,8 @@ def train(
     """Start an agent training run (Scheduled for Phase 4: PPO Training Engine)."""
     console.print(
         "[bold yellow]Training engine is scheduled for Phase 4 (PPO Adapter & Trainer).[/bold yellow]\n"
-        "In Phase 2, environment abstraction, Gymnasium contracts, and registry factories are active.\n"
-        "To inspect environments, run: [bold cyan]adaptive-rl env list[/bold cyan] or [bold cyan]adaptive-rl env inspect <name>[/bold cyan]"
+        "In Phase 3, GridWorld and environment discovery are active.\n"
+        "To inspect or test GridWorld, run: [bold cyan]adaptive-rl env run gridworld[/bold cyan]"
     )
     raise typer.Exit(code=0)
 
@@ -207,7 +277,7 @@ def evaluate(
     """Evaluate a trained agent (Scheduled for Phase 5: Evaluation Engine)."""
     console.print(
         "[bold yellow]Evaluation engine is scheduled for Phase 5 (Evaluation Engine and Standard Metrics).[/bold yellow]\n"
-        "In Phase 2, environment abstraction, Gymnasium contracts, and registry factories are active."
+        "In Phase 3, GridWorld and environment discovery are active."
     )
     raise typer.Exit(code=0)
 

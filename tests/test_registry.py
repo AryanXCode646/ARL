@@ -201,3 +201,6 @@ def test_global_convenience_functions() -> None:
 
     # Clean up after test
     registry.clear()
+    from adaptive_rl.environments import register_default_environments
+
+    register_default_environments()
