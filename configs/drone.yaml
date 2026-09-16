@@ -1,0 +1,33 @@
+name: "drone_navigation_3d_ppo"
+seed: 999
+
+algorithm:
+  name: "ppo"
+  learning_rate: 0.0003
+  gamma: 0.99
+  batch_size: 128
+  parameters:
+    n_steps: 2048
+    clip_range: 0.2
+    ent_coef: 0.01
+
+environment:
+  name: "drone"
+  max_steps: 300
+  parameters:
+    bounds: [50.0, 50.0, 25.0]
+    num_obstacles: 8
+    target_radius: 1.5
+    collision_radius: 0.8
+
+training:
+  total_timesteps: 250000
+  checkpoint_freq: 25000
+  log_interval: 10
+
+evaluation:
+  eval_episodes: 50
+  deterministic: true
+
+output_dir: "experiments/results"
+log_dir: "experiments/logs"
