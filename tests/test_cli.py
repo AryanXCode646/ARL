@@ -27,16 +27,17 @@ def test_cli_version() -> None:
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
     assert "AdaptiveRL" in result.output
-    assert "Phase 2" in result.output
+    assert "Phase 3" in result.output
 
 
 def test_cli_info() -> None:
-    """Verify adaptive-rl info displays the roadmap table with Phase 1 and 2 completed."""
+    """Verify adaptive-rl info displays the roadmap table with completed phases."""
     result = runner.invoke(app, ["info"])
     assert result.exit_code == 0
     assert "Roadmap" in result.output
     assert "Phase 1" in result.output
     assert "Phase 2" in result.output
+    assert "Phase 3" in result.output
 
 
 def test_cli_config_validate_success() -> None:
@@ -58,24 +59,33 @@ def test_cli_config_validate_failure(tmp_path: Path) -> None:
 
 def test_cli_env_list_empty() -> None:
     """Verify adaptive-rl env list displays informative notice when empty."""
+    from adaptive_rl.environments import register_default_environments
+
     registry.clear()
-    result = runner.invoke(app, ["env", "list"])
-    assert result.exit_code == 0
-    assert "Gymnasium environments" in result.output
+    try:
+        result = runner.invoke(app, ["env", "list"])
+        assert result.exit_code == 0
+        assert "Gymnasium environments" in result.output
+    finally:
+        register_default_environments()
 
 
 def test_cli_env_list_with_registered_env() -> None:
     """Verify adaptive-rl env list displays registered environment metadata."""
+    from adaptive_rl.environments import register_default_environments
+
     registry.clear()
-    register(
-        "cli_dummy",
-        lambda: DummyTestEnv(),
-        metadata={"observation_type": "box", "action_type": "discrete"},
-    )
-    result = runner.invoke(app, ["env", "list"])
-    assert result.exit_code == 0
-    assert "cli_dummy" in result.output
-    registry.clear()
+    try:
+        register(
+            "cli_dummy",
+            lambda: DummyTestEnv(),
+            metadata={"observation_type": "box", "action_type": "discrete"},
+        )
+        result = runner.invoke(app, ["env", "list"])
+        assert result.exit_code == 0
+        assert "cli_dummy" in result.output
+    finally:
+        register_default_environments()
 
 
 def test_cli_env_inspect_success() -> None:
@@ -92,6 +102,17 @@ def test_cli_env_inspect_failure() -> None:
     result = runner.invoke(app, ["env", "inspect", "NonExistentEnv-v999"])
     assert result.exit_code == 1
     assert "Environment inspection failed" in result.output
+
+
+def test_cli_env_run_gridworld() -> None:
+    """Verify adaptive-rl env run executes GridWorld rollouts and displays metrics."""
+    result = runner.invoke(app, ["env", "run", "gridworld", "--steps", "10", "--seed", "42"])
+    assert result.exit_code == 0
+    assert "Starting simulation for 'gridworld'" in result.output
+    assert "Simulation Summary" in result.output
+    assert "Total Steps:" in result.output
+    assert "Cumulative Reward:" in result.output
+
 
 
 def test_cli_train_honest_notice() -> None:
