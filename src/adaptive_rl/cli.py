@@ -47,7 +47,7 @@ def version() -> None:
     """Show the installed AdaptiveRL version and phase status."""
     console.print(
         f"[bold green]AdaptiveRL[/bold green] version [bold cyan]{adaptive_rl.__version__}[/bold cyan] "
-        f"([yellow]Phase 4: PPO Training Engine[/yellow])"
+        f"([yellow]Phase 5: Evaluation Engine & Metrics[/yellow])"
     )
 
 
@@ -73,7 +73,9 @@ def info() -> None:
     table.add_row(
         "Phase 4", "PPO Training Engine (SB3 Wrapper)", "[bold green]COMPLETED[/bold green]"
     )
-    table.add_row("Phase 5", "Evaluation Engine and Standard Metrics", "[yellow]PLANNED[/yellow]")
+    table.add_row(
+        "Phase 5", "Evaluation Engine and Standard Metrics", "[bold green]COMPLETED[/bold green]"
+    )
     table.add_row("Phase 6", "Continuous 2D Navigation", "[yellow]PLANNED[/yellow]")
     table.add_row("Phase 7", "Curriculum Learning", "[yellow]PLANNED[/yellow]")
     table.add_row("Phase 8", "Traffic Signal Environment", "[yellow]PLANNED[/yellow]")
@@ -326,19 +328,107 @@ def train(
 @app.command()
 def evaluate(
     config: Optional[Path] = typer.Option(
-        None, "--config", "-c", help="Path to evaluation configuration YAML"
+        None, "--config", "-c", help="Path to experiment configuration YAML"
     ),
     model: Optional[Path] = typer.Option(
-        None, "--model", "-m", help="Path to model weights artifact"
+        None, "--model", "-m", help="Path to model weights artifact (.zip)"
+    ),
+    episodes: Optional[int] = typer.Option(
+        None, "--episodes", "-e", help="Number of evaluation episodes"
+    ),
+    deterministic: bool = typer.Option(
+        True, "--deterministic/--stochastic", help="Use deterministic action selection"
+    ),
+    output_report: Optional[Path] = typer.Option(
+        None, "--output-report", "-o", help="Optional path to export JSON metrics report"
     ),
 ) -> None:
-    """Evaluate a trained agent (Scheduled for Phase 5: Evaluation Engine)."""
+    """Evaluate a trained agent over multiple benchmark episodes."""
+    if config is None:
+        default_config = Path("configs/gridworld_ppo.yaml")
+        if not default_config.exists():
+            default_config = Path("configs/ppo.yaml")
+        if default_config.exists():
+            config = default_config
+        else:
+            console.print(
+                "[bold red]No configuration file provided.[/bold red] Specify --config <path>"
+            )
+            raise typer.Exit(code=1)
+
+    try:
+        exp_config = load_config(config)
+    except ConfigError as err:
+        console.print(f"[bold red]Configuration error:[/bold red] {err}")
+        raise typer.Exit(code=1)
+
+    num_episodes = episodes or exp_config.evaluation.eval_episodes
+    det = deterministic if episodes is not None else exp_config.evaluation.deterministic
+
+    # Resolve model path
+    if model is None:
+        candidate = exp_config.output_dir / "models" / f"{exp_config.name}_final.zip"
+        if candidate.exists():
+            model = candidate
+        else:
+            console.print(
+                f"[bold red]No model weights provided.[/bold red] Pass --model <path> or train first to generate {candidate}"
+            )
+            raise typer.Exit(code=1)
+
     console.print(
-        "[bold yellow]Evaluation engine is scheduled for Phase 5 (Evaluation Engine and Standard Metrics).[/bold yellow]\n"
-        "In Phase 4, PPO training, callbacks, and checkpointing are active.\n"
-        "To train an agent, run: [bold cyan]adaptive-rl train --config configs/ppo.yaml[/bold cyan]"
+        Panel.fit(
+            f"[bold green]Starting Evaluation: {exp_config.name}[/bold green]\n\n"
+            f"• [bold]Model:[/bold] {model}\n"
+            f"• [bold]Environment:[/bold] {exp_config.environment.name}\n"
+            f"• [bold]Episodes:[/bold] {num_episodes}\n"
+            f"• [bold]Deterministic:[/bold] {det}",
+            title="Evaluation Engine",
+            border_style="cyan",
+        )
     )
-    raise typer.Exit(code=0)
+
+    from adaptive_rl.algorithms.ppo import PPOAlgorithm
+    from adaptive_rl.environments.registry import make_env
+    from adaptive_rl.evaluation.evaluator import Evaluator
+
+    try:
+        env = make_env(
+            exp_config.environment.name,
+            **exp_config.environment.parameters,
+        )
+        algo = PPOAlgorithm.from_pretrained(model, env=env)
+        evaluator = Evaluator(algorithm=algo, env=env)
+
+        metrics = evaluator.evaluate(
+            num_episodes=num_episodes,
+            deterministic=det,
+            base_seed=exp_config.seed,
+        )
+
+        table = Table(title=f"Benchmark Results ({num_episodes} episodes)")
+        table.add_column("Metric", style="cyan")
+        table.add_column("Value", style="green", justify="right")
+
+        table.add_row("Mean Reward", f"{metrics.mean_reward:.2f} ± {metrics.std_reward:.2f}")
+        table.add_row("Min / Max Reward", f"{metrics.min_reward:.2f} / {metrics.max_reward:.2f}")
+        table.add_row("Success Rate", f"{metrics.success_rate * 100:.1f}%")
+        table.add_row("Collision Rate", f"{metrics.collision_rate * 100:.1f}%")
+        table.add_row(
+            "Mean Episode Length",
+            f"{metrics.mean_episode_length:.1f} ± {metrics.std_episode_length:.1f}",
+        )
+
+        console.print(table)
+
+        if output_report is not None:
+            saved_path = evaluator.save_report(metrics, output_report)
+            console.print(f"\n[bold green]Report saved to:[/bold green] {saved_path}")
+
+        env.close()
+    except Exception as err:
+        console.print(f"[bold red]Evaluation failed with error:[/bold red] {err}")
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

@@ -27,9 +27,9 @@ AdaptiveRL is developed incrementally across verifiable phases.
 | **Phase 1** | **Repository Foundation & Skeleton** | **Completed** | Project structure, packaging, YAML configuration schemas, honest interfaces, and CLI. |
 | **Phase 2** | **Environment Abstraction & Registry** | **Completed** | Gymnasium environment wrapper contract, registry, and factory. |
 | **Phase 3** | **Procedural GridWorld** | **Completed** | Procedurally generated 2D grid navigation with BFS path verification and ASCII rendering. |
-| **Phase 4** | **PPO Training Engine** | **Current** | Stable-Baselines3 PPO adapter, metric callbacks, checkpointing, and end-to-end trainer. |
-| Phase 5 | Evaluation Engine & Standard Metrics | *Upcoming* | 100-episode benchmarking, success rate, and collision tracking. |
-| Phase 6 | Continuous 2D Navigation | *Planned* | Continuous velocity control with ray-based obstacle sensing. |
+| **Phase 4** | **PPO Training Engine** | **Completed** | Stable-Baselines3 PPO adapter, metric callbacks, checkpointing, and end-to-end trainer. |
+| **Phase 5** | **Evaluation Engine & Standard Metrics** | **Current** | Multi-episode benchmarking, success/collision tracking, scenario testing, and JSON reports. |
+| Phase 6 | Continuous 2D Navigation | *Upcoming* | Continuous velocity control with ray-based obstacle sensing. |
 | Phase 7 | Curriculum Learning | *Planned* | Staged obstacle density and disturbance curriculum. |
 | Phase 8 | Traffic Signal Environment | *Planned* | Non-spatial queue management demonstrating framework multi-domain versatility. |
 | Phase 9-10| Autonomous 3D Drone Environment | *Planned* | 3D kinematics, wind disturbances, dynamic obstacles, and energy constraints. |
@@ -187,7 +187,50 @@ print(f"Saved {len(result.checkpoints)} periodic checkpoints.")
 
 ---
 
-## 8. Running Tests
+## 8. Evaluation Engine & Standard Metrics
+
+AdaptiveRL provides a standardized evaluation benchmark engine to measure policy performance across fixed episode sets and configurable scenarios, with automatic export to JSON reports.
+
+* **Standard Metrics Tracked:** Mean episodic return ± standard deviation, min/max returns, success rate, collision rate, and mean episode length ± standard deviation.
+* **Deterministic Seeding:** Guarantees bitwise-reproducible evaluation trajectories across experiment runs.
+* **Scenario Testing:** Benchmarks agents across curated challenge scenarios (e.g. varying obstacle densities).
+
+### Evaluation via CLI
+
+```bash
+# Evaluate a trained model over 20 deterministic episodes
+adaptive-rl evaluate --config configs/gridworld_ppo.yaml --model experiments/results/models/gridworld_ppo_baseline_final.zip --episodes 20
+
+# Export structured JSON metrics report
+adaptive-rl evaluate --config configs/gridworld_ppo.yaml --model experiments/results/models/gridworld_ppo_baseline_final.zip --episodes 20 --output-report experiments/results/eval_report.json
+```
+
+### Evaluation via Python API
+
+```python
+from adaptive_rl.algorithms.ppo import PPOAlgorithm
+from adaptive_rl.environments.registry import make_env
+from adaptive_rl.evaluation import Evaluator, EvaluationScenario
+
+# 1. Instantiate environment and loaded agent
+env = make_env("gridworld", width=6, height=5, num_obstacles=3)
+algo = PPOAlgorithm.from_pretrained("experiments/results/models/gridworld_ppo_baseline_final.zip", env=env)
+
+# 2. Run multi-episode evaluation
+evaluator = Evaluator(algorithm=algo, env=env)
+metrics = evaluator.evaluate(num_episodes=20, deterministic=True, base_seed=42)
+
+print(f"Mean Return: {metrics.mean_reward:.2f} ± {metrics.std_reward:.2f}")
+print(f"Success Rate: {metrics.success_rate * 100:.1f}%")
+print(f"Collision Rate: {metrics.collision_rate * 100:.1f}%")
+
+# 3. Export JSON report
+evaluator.save_report(metrics, "experiments/results/eval_report.json")
+```
+
+---
+
+## 9. Running Tests
 
 Execute the automated test suite with `pytest`:
 ```bash
@@ -200,14 +243,15 @@ pytest --cov=adaptive_rl tests/
 
 ---
 
-## 9. Contributing
+## 10. Contributing
 
 We welcome contributions! Please review [CONTRIBUTING.md](CONTRIBUTING.md) for branch naming conventions, quality gates, and code formatting standards before opening a pull request.
 
 ---
 
-## 10. License
+## 11. License
 
 This project is licensed under the [MIT License](LICENSE).
+
 
 

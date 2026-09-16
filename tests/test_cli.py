@@ -27,7 +27,7 @@ def test_cli_version() -> None:
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
     assert "AdaptiveRL" in result.output
-    assert "Phase 4" in result.output
+    assert "Phase 5" in result.output
 
 
 def test_cli_info() -> None:
@@ -39,6 +39,7 @@ def test_cli_info() -> None:
     assert "Phase 2" in result.output
     assert "Phase 3" in result.output
     assert "Phase 4" in result.output
+    assert "Phase 5" in result.output
 
 
 def test_cli_config_validate_success() -> None:
@@ -154,8 +155,26 @@ log_dir: "{tmp_path / "logs"}"
     assert "Total Timesteps Trained: 64" in result.output
 
 
-def test_cli_evaluate_honest_notice() -> None:
-    """Verify adaptive-rl evaluate displays honest notice about Phase 5 scheduling."""
-    result = runner.invoke(app, ["evaluate"])
-    assert result.exit_code == 0
-    assert "Phase 5" in result.output
+def test_cli_evaluate_missing_model(tmp_path: Path) -> None:
+    """Verify adaptive-rl evaluate displays informative error when model file is missing."""
+    config_path = tmp_path / "eval_cfg.yaml"
+    config_path.write_text(
+        """
+name: "no_model_test"
+seed: 42
+algorithm:
+  name: "ppo"
+environment:
+  name: "gridworld"
+  max_steps: 10
+training:
+  total_timesteps: 64
+evaluation:
+  eval_episodes: 2
+output_dir: "non_existent_results_dir"
+""",
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["evaluate", "--config", str(config_path)])
+    assert result.exit_code == 1
+    assert "No model weights provided" in result.output
