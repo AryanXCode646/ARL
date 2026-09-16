@@ -8,17 +8,20 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Dict
+
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
 class ConfigError(Exception):
     """Exception raised for configuration parsing or validation failures."""
+
     pass
 
 
 class AlgorithmConfig(BaseModel):
     """Configuration parameters for the reinforcement learning algorithm."""
+
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., description="Algorithm name, e.g. 'ppo' or 'sac'")
@@ -26,42 +29,49 @@ class AlgorithmConfig(BaseModel):
     gamma: float = Field(0.99, ge=0.0, le=1.0, description="Discount factor")
     batch_size: int = Field(64, gt=0, description="Minibatch size")
     parameters: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="Additional algorithm-specific hyperparameters"
+        default_factory=dict, description="Additional algorithm-specific hyperparameters"
     )
 
 
 class EnvironmentConfig(BaseModel):
     """Configuration parameters for the Gymnasium environment."""
+
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., description="Registered environment name, e.g. 'gridworld'")
     max_steps: int = Field(100, gt=0, description="Maximum steps per episode")
     parameters: Dict[str, Any] = Field(
         default_factory=dict,
-        description="Environment-specific parameters (e.g. grid size, obstacle count)"
+        description="Environment-specific parameters (e.g. grid size, obstacle count)",
     )
 
 
 class TrainingConfig(BaseModel):
     """Configuration parameters for the training loop."""
+
     model_config = ConfigDict(extra="forbid")
 
     total_timesteps: int = Field(10000, gt=0, description="Total environment steps to train")
-    checkpoint_freq: int = Field(2000, ge=0, description="Frequency of saving model checkpoints (0 = disabled)")
+    checkpoint_freq: int = Field(
+        2000, ge=0, description="Frequency of saving model checkpoints (0 = disabled)"
+    )
     log_interval: int = Field(10, gt=0, description="Frequency of logging metrics")
 
 
 class EvaluationConfig(BaseModel):
     """Configuration parameters for evaluation and benchmarking."""
+
     model_config = ConfigDict(extra="forbid")
 
     eval_episodes: int = Field(10, gt=0, description="Number of evaluation episodes")
-    deterministic: bool = Field(True, description="Whether to use deterministic actions in evaluation")
+    deterministic: bool = Field(
+        True, description="Whether to use deterministic actions in evaluation"
+    )
 
 
 class ExperimentConfig(BaseModel):
     """Top-level configuration schema for an AdaptiveRL experiment."""
+
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., description="Unique experiment identifier")
@@ -69,14 +79,16 @@ class ExperimentConfig(BaseModel):
     algorithm: AlgorithmConfig
     environment: EnvironmentConfig
     training: TrainingConfig
-    evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
+    evaluation: EvaluationConfig = Field(
+        default_factory=lambda: EvaluationConfig(eval_episodes=10, deterministic=True)
+    )
     output_dir: Path = Field(
         default_factory=lambda: Path("experiments/results"),
-        description="Directory for saving models and evaluations"
+        description="Directory for saving models and evaluations",
     )
     log_dir: Path = Field(
         default_factory=lambda: Path("experiments/logs"),
-        description="Directory for logging and tensorboard metrics"
+        description="Directory for logging and tensorboard metrics",
     )
 
 
@@ -103,7 +115,9 @@ def load_config(config_path: str | Path) -> ExperimentConfig:
         raise ConfigError(f"Failed to parse YAML file at {path}: {exc}") from exc
 
     if not isinstance(raw_data, dict):
-        raise ConfigError(f"Configuration file {path} must contain a YAML mapping/dictionary, got {type(raw_data).__name__}")
+        raise ConfigError(
+            f"Configuration file {path} must contain a YAML mapping/dictionary, got {type(raw_data).__name__}"
+        )
 
     try:
         return ExperimentConfig.model_validate(raw_data)
@@ -114,9 +128,7 @@ def load_config(config_path: str | Path) -> ExperimentConfig:
             msg = err.get("msg", "Invalid value")
             formatted_errors.append(f"  - [{loc}]: {msg}")
         errors_str = "\n".join(formatted_errors)
-        raise ConfigError(
-            f"Configuration validation failed for {path}:\n{errors_str}"
-        ) from exc
+        raise ConfigError(f"Configuration validation failed for {path}:\n{errors_str}") from exc
 
 
 def save_config(config: ExperimentConfig, target_path: str | Path) -> None:

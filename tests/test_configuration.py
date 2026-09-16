@@ -1,8 +1,9 @@
 """Tests verifying configuration schema validation, loading, and serialization."""
 
 from pathlib import Path
+
 import pytest
-from pydantic import ValidationError
+
 from adaptive_rl.config import (
     ConfigError,
     ExperimentConfig,

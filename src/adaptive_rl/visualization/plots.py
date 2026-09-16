@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import List, Union
+from typing import List
 
 
 class PlotManager:

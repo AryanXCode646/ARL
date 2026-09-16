@@ -89,3 +89,27 @@ The environment registry acts as a dynamic service locator and factory:
 ### 2.8 Experiment Lifecycle Management
 * Every experiment run produces a self-contained artifact bundle in `experiments/results/` and `experiments/logs/`.
 * The saved configuration file guarantees that any experiment can be reproduced by another researcher with a single CLI command.
+
+### 2.9 Environment Abstraction & Factory Flow (Environment → Registry → Factory → Training Engine)
+
+The relationship between environments and the training engine follows a strict unidirectional dependency flow mediated by the registry and factory:
+
+```
++------------------+         registers         +------------------------+
+| Concrete Env     | ----------------------->  |  Environment Registry  |
+| (e.g. GridWorld) |                           |  (Name -> Factory Map) |
++------------------+                           +-----------+------------+
+                                                           | resolves
+                                                           v
++------------------+       instantiates        +------------------------+
+| Training Engine  | <------------------------ |  Environment Factory   |
+| (Trainer)        |                           |  (make_env / create)   |
++------------------+                           +------------------------+
+```
+
+#### Why the Training Engine Must Depend on the Interface Rather Than Concrete Environments:
+1. **Zero Domain Coupling:** The training engine (`Trainer`) requires only that the target environment implements `gymnasium.Env` (`reset() -> (obs, info)`, `step(action) -> (obs, reward, terminated, truncated, info)`). It has zero knowledge of grid cells, lidar rays, traffic signals, or quadrotor equations of motion.
+2. **Pluggable Architecture:** Any new environment (e.g. `TrafficEnv` or `DroneNavigationEnv`) can be plugged in simply by defining the Gymnasium subclass and registering it with `register("env_name", factory)`. No code in the training engine, algorithm wrappers, or checkpointing routines needs to change.
+3. **Seamless Benchmark Portability:** Standard third-party environments (such as Gymnasium's `CartPole-v1`, `Pendulum-v1`, or `BipedalWalker-v3`) can be trained using the exact same CLI command and training engine without wrapping or rewriting them.
+4. **Isolated Testability:** Test suites can use lightweight dummy environments (like `DummyTestEnv`) to test the registry, vectorization, and training loops rapidly without incurring heavy simulation overhead.
+

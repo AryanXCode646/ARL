@@ -16,11 +16,13 @@ class CheckpointManager:
 
     def record_checkpoint(self, path: str | Path, step: int, metric_value: float) -> None:
         """Track saved checkpoint metadata in manager history."""
-        self._history.append({
-            "path": str(path),
-            "step": step,
-            "metric_value": metric_value,
-        })
+        self._history.append(
+            {
+                "path": str(path),
+                "step": step,
+                "metric_value": metric_value,
+            }
+        )
 
     def list_checkpoints(self) -> List[Dict[str, Any]]:
         """Return recorded checkpoint history."""
