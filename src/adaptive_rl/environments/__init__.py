@@ -3,6 +3,7 @@
 from adaptive_rl.environments.base import AdaptiveRLEnv
 from adaptive_rl.environments.gridworld.grid import GridWorldEnv
 from adaptive_rl.environments.metadata import EnvironmentMetadata
+from adaptive_rl.environments.navigation.navigation2d import ContinuousNavigation2DEnv
 from adaptive_rl.environments.registry import (
     EnvironmentRegistry,
     RegistryError,
@@ -36,12 +37,45 @@ def register_default_environments() -> None:
             ),
         )
 
+    if "navigation" not in list_environments():
+        register(
+            "navigation",
+            lambda **kwargs: ContinuousNavigation2DEnv(**kwargs),
+            metadata=EnvironmentMetadata(
+                name="navigation",
+                description="Continuous 2D navigation environment with multi-directional LiDAR rangefinders.",
+                observation_type="box",
+                action_type="continuous",
+                version="0.1.0",
+                max_episode_steps=200,
+                reward_range=(-100.0, 100.0),
+                tags=["continuous", "navigation", "lidar", "obstacle_avoidance"],
+            ),
+        )
 
-# Automatically register standard GridWorld environment with metadata
+    if "navigation_2d" not in list_environments():
+        register(
+            "navigation_2d",
+            lambda **kwargs: ContinuousNavigation2DEnv(**kwargs),
+            metadata=EnvironmentMetadata(
+                name="navigation_2d",
+                description="Continuous 2D navigation environment with multi-directional LiDAR rangefinders.",
+                observation_type="box",
+                action_type="continuous",
+                version="0.1.0",
+                max_episode_steps=200,
+                reward_range=(-100.0, 100.0),
+                tags=["continuous", "navigation", "lidar", "obstacle_avoidance"],
+            ),
+        )
+
+
+# Automatically register standard environments with metadata
 register_default_environments()
 
 __all__ = [
     "AdaptiveRLEnv",
+    "ContinuousNavigation2DEnv",
     "DummyTestEnv",
     "EnvironmentMetadata",
     "EnvironmentRegistry",

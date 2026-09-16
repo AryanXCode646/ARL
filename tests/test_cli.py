@@ -27,7 +27,7 @@ def test_cli_version() -> None:
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
     assert "AdaptiveRL" in result.output
-    assert "Phase 5" in result.output
+    assert "Phase 6" in result.output
 
 
 def test_cli_info() -> None:
@@ -40,6 +40,7 @@ def test_cli_info() -> None:
     assert "Phase 3" in result.output
     assert "Phase 4" in result.output
     assert "Phase 5" in result.output
+    assert "Phase 6" in result.output
 
 
 def test_cli_config_validate_success() -> None:
@@ -111,6 +112,16 @@ def test_cli_env_run_gridworld() -> None:
     result = runner.invoke(app, ["env", "run", "gridworld", "--steps", "10", "--seed", "42"])
     assert result.exit_code == 0
     assert "Starting simulation for 'gridworld'" in result.output
+    assert "Simulation Summary" in result.output
+    assert "Total Steps:" in result.output
+    assert "Cumulative Reward:" in result.output
+
+
+def test_cli_env_run_navigation() -> None:
+    """Verify adaptive-rl env run executes continuous Navigation rollouts and ASCII rendering."""
+    result = runner.invoke(app, ["env", "run", "navigation", "--steps", "5", "--seed", "42"])
+    assert result.exit_code == 0
+    assert "Starting simulation for 'navigation'" in result.output
     assert "Simulation Summary" in result.output
     assert "Total Steps:" in result.output
     assert "Cumulative Reward:" in result.output
