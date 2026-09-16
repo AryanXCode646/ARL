@@ -26,14 +26,15 @@ AdaptiveRL is developed incrementally across verifiable phases.
 | :--- | :--- | :--- | :--- |
 | **Phase 1** | **Repository Foundation & Skeleton** | **Completed** | Project structure, packaging, YAML configuration schemas, honest interfaces, and CLI. |
 | **Phase 2** | **Environment Abstraction & Registry** | **Completed** | Gymnasium environment wrapper contract, registry, and factory. |
-| **Phase 3** | **Procedural GridWorld** | **Current** | Procedurally generated 2D grid navigation with BFS path verification and ASCII rendering. |
-| Phase 4 | PPO Training Engine | *Upcoming* | Stable-Baselines3 PPO adapter and end-to-end training loop. |
-| Phase 5 | Evaluation Engine & Standard Metrics | *Planned* | 100-episode benchmarking, success rate, and collision tracking. |
+| **Phase 3** | **Procedural GridWorld** | **Completed** | Procedurally generated 2D grid navigation with BFS path verification and ASCII rendering. |
+| **Phase 4** | **PPO Training Engine** | **Current** | Stable-Baselines3 PPO adapter, metric callbacks, checkpointing, and end-to-end trainer. |
+| Phase 5 | Evaluation Engine & Standard Metrics | *Upcoming* | 100-episode benchmarking, success rate, and collision tracking. |
 | Phase 6 | Continuous 2D Navigation | *Planned* | Continuous velocity control with ray-based obstacle sensing. |
 | Phase 7 | Curriculum Learning | *Planned* | Staged obstacle density and disturbance curriculum. |
 | Phase 8 | Traffic Signal Environment | *Planned* | Non-spatial queue management demonstrating framework multi-domain versatility. |
 | Phase 9-10| Autonomous 3D Drone Environment | *Planned* | 3D kinematics, wind disturbances, dynamic obstacles, and energy constraints. |
 | Phase 11-17| Research Baselines & Hardening | *Planned* | Generalization benchmarks, classical planners (A*, RRT*), and CI hardening. |
+
 
 > [!NOTE]
 > In accordance with Phase 1 constraints, concrete reinforcement learning training and concrete environment physics are scheduled for subsequent phases. Current APIs represent honest structural interfaces.
@@ -152,7 +153,41 @@ env.close()
 
 ---
 
-## 7. Running Tests
+## 7. PPO Training Engine
+
+AdaptiveRL features an end-to-end PPO training engine integrating Stable-Baselines3 with automated metric logging callbacks and model checkpoint management.
+
+### Training via CLI
+
+```bash
+# Train on GridWorld with PPO for 5,000 steps
+adaptive-rl train --config configs/gridworld_ppo.yaml --timesteps 5000
+
+# Train on standard CartPole baseline
+adaptive-rl train --config configs/ppo.yaml --timesteps 10000
+```
+
+### Training via Python API
+
+```python
+from adaptive_rl.config import load_config
+from adaptive_rl.training import PPOTrainer
+
+# 1. Load experiment configuration
+config = load_config("configs/gridworld_ppo.yaml")
+
+# 2. Instantiate trainer and run optimization
+trainer = PPOTrainer(config=config)
+result = trainer.fit()
+
+print(f"Trained {result.total_timesteps} steps across {result.episodes_completed} episodes.")
+print(f"Final model saved to: {result.final_model_path}")
+print(f"Saved {len(result.checkpoints)} periodic checkpoints.")
+```
+
+---
+
+## 8. Running Tests
 
 Execute the automated test suite with `pytest`:
 ```bash
@@ -165,13 +200,14 @@ pytest --cov=adaptive_rl tests/
 
 ---
 
-## 8. Contributing
+## 9. Contributing
 
 We welcome contributions! Please review [CONTRIBUTING.md](CONTRIBUTING.md) for branch naming conventions, quality gates, and code formatting standards before opening a pull request.
 
 ---
 
-## 9. License
+## 10. License
 
 This project is licensed under the [MIT License](LICENSE).
+
 
