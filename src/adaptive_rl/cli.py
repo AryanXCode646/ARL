@@ -47,7 +47,7 @@ def version() -> None:
     """Show the installed AdaptiveRL version and phase status."""
     console.print(
         f"[bold green]AdaptiveRL[/bold green] version [bold cyan]{adaptive_rl.__version__}[/bold cyan] "
-        f"([yellow]Phase 5: Evaluation Engine & Metrics[/yellow])"
+        f"([yellow]Phase 6: Continuous 2D Navigation[/yellow])"
     )
 
 
@@ -76,7 +76,9 @@ def info() -> None:
     table.add_row(
         "Phase 5", "Evaluation Engine and Standard Metrics", "[bold green]COMPLETED[/bold green]"
     )
-    table.add_row("Phase 6", "Continuous 2D Navigation", "[yellow]PLANNED[/yellow]")
+    table.add_row(
+        "Phase 6", "Continuous 2D Navigation", "[bold green]COMPLETED[/bold green]"
+    )
     table.add_row("Phase 7", "Curriculum Learning", "[yellow]PLANNED[/yellow]")
     table.add_row("Phase 8", "Traffic Signal Environment", "[yellow]PLANNED[/yellow]")
     table.add_row(
@@ -297,15 +299,15 @@ def train(
             f"• [bold]Checkpoint Freq:[/bold] {exp_config.training.checkpoint_freq}\n"
             f"• [bold]Seed:[/bold] {exp_config.seed}\n"
             f"• [bold]Output Dir:[/bold] {exp_config.output_dir}",
-            title="PPO Training Pipeline",
+            title=f"{exp_config.algorithm.name.upper()} Training Pipeline",
             border_style="cyan",
         )
     )
 
-    from adaptive_rl.training import PPOTrainer
+    from adaptive_rl.training import get_trainer
 
     try:
-        trainer = PPOTrainer(config=exp_config)
+        trainer = get_trainer(config=exp_config)
         result = trainer.fit()
 
         console.print(

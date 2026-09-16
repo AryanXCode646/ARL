@@ -28,9 +28,9 @@ AdaptiveRL is developed incrementally across verifiable phases.
 | **Phase 2** | **Environment Abstraction & Registry** | **Completed** | Gymnasium environment wrapper contract, registry, and factory. |
 | **Phase 3** | **Procedural GridWorld** | **Completed** | Procedurally generated 2D grid navigation with BFS path verification and ASCII rendering. |
 | **Phase 4** | **PPO Training Engine** | **Completed** | Stable-Baselines3 PPO adapter, metric callbacks, checkpointing, and end-to-end trainer. |
-| **Phase 5** | **Evaluation Engine & Standard Metrics** | **Current** | Multi-episode benchmarking, success/collision tracking, scenario testing, and JSON reports. |
-| Phase 6 | Continuous 2D Navigation | *Upcoming* | Continuous velocity control with ray-based obstacle sensing. |
-| Phase 7 | Curriculum Learning | *Planned* | Staged obstacle density and disturbance curriculum. |
+| **Phase 5** | **Evaluation Engine & Standard Metrics** | **Completed** | Multi-episode benchmarking, success/collision tracking, scenario testing, and JSON reports. |
+| **Phase 6** | **Continuous 2D Navigation** | **Completed** | Continuous velocity control, 8-ray LiDAR rangefinders, circular obstacles, and SAC continuous actor-critic. |
+| Phase 7 | Curriculum Learning | *Upcoming* | Staged obstacle density and disturbance curriculum. |
 | Phase 8 | Traffic Signal Environment | *Planned* | Non-spatial queue management demonstrating framework multi-domain versatility. |
 | Phase 9-10| Autonomous 3D Drone Environment | *Planned* | 3D kinematics, wind disturbances, dynamic obstacles, and energy constraints. |
 | Phase 11-17| Research Baselines & Hardening | *Planned* | Generalization benchmarks, classical planners (A*, RRT*), and CI hardening. |
@@ -230,7 +230,54 @@ evaluator.save_report(metrics, "experiments/results/eval_report.json")
 
 ---
 
-## 9. Running Tests
+## 9. Continuous 2D Navigation & SAC Algorithm
+
+Phase 6 introduces continuous action space control and distance-based rangefinder (LiDAR) sensing.
+
+* **Continuous Action Space:** `Box(-1.0, 1.0, shape=(2,))` governing continuous 2D planar velocity $[v_x, v_y]$.
+* **14-Dimensional Observation Space:**
+  * Normalized agent coordinates $[x/W, y/H] \in [0, 1]^2$
+  * Normalized target goal coordinates $[g_x/W, g_y/H] \in [0, 1]^2$
+  * Relative target offset vector $[(g_x - x)/W, (g_y - y)/H] \in [-1, 1]^2$
+  * 8-Ray LiDAR distance readings normalized to $[0, 1]$ computed via analytical ray-casting against circular obstacles and arena perimeter walls.
+* **Collision Physics & Rewards:** Non-overlapping procedural circular obstacles with safety margins around start/goal. Terminal rewards: $+100.0$ for goal arrival, $-100.0$ for collision with obstacle/wall, plus dense progress shaping.
+* **Soft Actor-Critic (SAC) Engine:** SB3-backed `SACAlgorithm` wrapper and `SACTrainer` pipeline for sample-efficient continuous actor-critic optimization.
+
+### Continuous Navigation via CLI
+
+```bash
+# Simulate 10 continuous navigation steps with ASCII visualization
+adaptive-rl env run navigation --steps 10 --seed 42
+
+# Train SAC continuous control agent on navigation
+adaptive-rl train --config configs/navigation.yaml --timesteps 10000
+```
+
+### Continuous Navigation via Python API
+
+```python
+import numpy as np
+from adaptive_rl.environments import make_env
+from adaptive_rl.algorithms import SACAlgorithm
+
+# 1. Instantiate continuous navigation environment
+env = make_env("navigation", arena_width=20.0, arena_height=20.0, num_obstacles=5)
+obs, info = env.reset(seed=42)
+
+# 2. Train SAC agent
+agent = SACAlgorithm(env=env, learning_rate=3e-4, buffer_size=50000)
+agent.train(total_timesteps=10000)
+
+# 3. Predict continuous velocity action
+action, _ = agent.predict(obs, deterministic=True)
+obs, reward, terminated, truncated, info = env.step(action)
+print(f"Action: {action}, Reward: {reward:.2f}, Dist to Goal: {info['distance_to_goal']:.2f}")
+env.close()
+```
+
+---
+
+## 10. Running Tests
 
 Execute the automated test suite with `pytest`:
 ```bash
@@ -243,13 +290,13 @@ pytest --cov=adaptive_rl tests/
 
 ---
 
-## 10. Contributing
+## 11. Contributing
 
 We welcome contributions! Please review [CONTRIBUTING.md](CONTRIBUTING.md) for branch naming conventions, quality gates, and code formatting standards before opening a pull request.
 
 ---
 
-## 11. License
+## 12. License
 
 This project is licensed under the [MIT License](LICENSE).
 

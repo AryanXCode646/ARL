@@ -7,7 +7,13 @@ from adaptive_rl.training.callbacks import (
     SB3CallbackAdapter,
 )
 from adaptive_rl.training.checkpointing import CheckpointManager
-from adaptive_rl.training.trainer import BaseTrainer, PPOTrainer, TrainingResult
+from adaptive_rl.training.trainer import (
+    BaseTrainer,
+    PPOTrainer,
+    SACTrainer,
+    TrainingResult,
+    get_trainer,
+)
 
 __all__ = [
     "BaseCallback",
@@ -16,6 +22,8 @@ __all__ = [
     "CheckpointManager",
     "MetricLoggerCallback",
     "PPOTrainer",
+    "SACTrainer",
     "SB3CallbackAdapter",
     "TrainingResult",
+    "get_trainer",
 ]
