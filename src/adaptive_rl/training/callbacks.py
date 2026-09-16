@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 from abc import ABC
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+import numpy as np
+from stable_baselines3.common.callbacks import BaseCallback as SB3BaseCallback
+
+if TYPE_CHECKING:
+    from adaptive_rl.algorithms.base import BaseAlgorithm
+    from adaptive_rl.training.checkpointing import CheckpointManager
 
 
 class BaseCallback(ABC):
-    """Abstract base class for monitoring, logging, and evaluation callbacks during training."""
+    """Abstract base class for monitoring, logging, and checkpointing during training."""
 
     def on_training_start(self, locals_dict: Optional[Dict[str, Any]] = None) -> None:
         """Called before the first training step."""
@@ -16,15 +23,197 @@ class BaseCallback(ABC):
     def on_step(self, step: int, locals_dict: Optional[Dict[str, Any]] = None) -> bool:
         """Called after every environment step.
 
+        Args:
+            step: Current cumulative environment timestep.
+            locals_dict: Dictionary of local variables from the training loop.
+
         Returns:
             bool: True to continue training, False to abort early.
         """
         return True
 
-    def on_episode_end(self, episode: int, episode_reward: float, episode_length: int) -> None:
+    def on_episode_end(
+        self,
+        episode: int,
+        episode_reward: float,
+        episode_length: int,
+        info: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Called upon completion of an environment episode."""
         pass
 
     def on_training_end(self) -> None:
         """Called after the final training step has executed."""
         pass
+
+
+class MetricLoggerCallback(BaseCallback):
+    """Tracks and logs episodic metrics (rewards, lengths, collisions, success)."""
+
+    def __init__(self, window_size: int = 100) -> None:
+        """Initialize metric logger.
+
+        Args:
+            window_size: Number of recent episodes used to calculate rolling statistics.
+        """
+        self.window_size = window_size
+        self.episode_rewards: List[float] = []
+        self.episode_lengths: List[int] = []
+        self.total_episodes: int = 0
+        self.successes: int = 0
+        self.collisions: int = 0
+
+    def on_episode_end(
+        self,
+        episode: int,
+        episode_reward: float,
+        episode_length: int,
+        info: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Record episode outcomes."""
+        self.total_episodes += 1
+        self.episode_rewards.append(episode_reward)
+        self.episode_lengths.append(episode_length)
+
+        if info:
+            if info.get("success", False):
+                self.successes += 1
+            if info.get("collision", False):
+                self.collisions += 1
+
+    @property
+    def mean_reward(self) -> float:
+        """Rolling mean episodic reward."""
+        if not self.episode_rewards:
+            return 0.0
+        window = self.episode_rewards[-self.window_size :]
+        return float(np.mean(window))
+
+    @property
+    def mean_length(self) -> float:
+        """Rolling mean episode length."""
+        if not self.episode_lengths:
+            return 0.0
+        window = self.episode_lengths[-self.window_size :]
+        return float(np.mean(window))
+
+    @property
+    def success_rate(self) -> float:
+        """Proportion of completed episodes that achieved the goal."""
+        if self.total_episodes == 0:
+            return 0.0
+        return self.successes / self.total_episodes
+
+    @property
+    def collision_rate(self) -> float:
+        """Proportion of completed episodes that ended in collision."""
+        if self.total_episodes == 0:
+            return 0.0
+        return self.collisions / self.total_episodes
+
+
+class CheckpointCallback(BaseCallback):
+    """Periodically saves model checkpoints using CheckpointManager."""
+
+    def __init__(
+        self,
+        checkpoint_manager: CheckpointManager,
+        save_freq: int,
+        model: Optional[BaseAlgorithm] = None,
+        verbose: int = 0,
+    ) -> None:
+        """Initialize checkpoint callback.
+
+        Args:
+            checkpoint_manager: CheckpointManager instance.
+            save_freq: Number of environment steps between saves.
+            model: Optional BaseAlgorithm model reference to save.
+            verbose: Verbosity level.
+        """
+        self.manager = checkpoint_manager
+        self.save_freq = save_freq
+        self.model = model
+        self.verbose = verbose
+        self.last_save_step: int = 0
+
+    def set_model(self, model: BaseAlgorithm) -> None:
+        """Assign model reference to save."""
+        self.model = model
+
+    def on_step(self, step: int, locals_dict: Optional[Dict[str, Any]] = None) -> bool:
+        """Check save frequency and persist checkpoint."""
+        if self.save_freq > 0 and (step - self.last_save_step) >= self.save_freq:
+            self.last_save_step = step
+            if self.model is not None:
+                self.manager.save_checkpoint(
+                    model=self.model,
+                    step=step,
+                    metric_value=0.0,
+                )
+        return True
+
+
+class SB3CallbackAdapter(SB3BaseCallback):
+    """Adapter bridging AdaptiveRL BaseCallbacks to Stable-Baselines3 callbacks."""
+
+    def __init__(
+        self,
+        callbacks: List[BaseCallback],
+        algorithm: Optional[BaseAlgorithm] = None,
+        verbose: int = 0,
+    ) -> None:
+        """Initialize adapter with list of AdaptiveRL callbacks."""
+        super().__init__(verbose)
+        self.callbacks = callbacks
+        self.algorithm = algorithm
+        self._current_rewards: Dict[int, float] = {}
+        self._current_lengths: Dict[int, int] = {}
+        self._episode_count: int = 0
+
+    def _on_training_start(self) -> None:
+        """Propagate training start event."""
+        for cb in self.callbacks:
+            if isinstance(cb, CheckpointCallback) and self.algorithm is not None:
+                cb.set_model(self.algorithm)
+            cb.on_training_start(locals_dict=self.locals)
+
+    def _on_step(self) -> bool:
+        """Track steps and episode outcomes from SB3 training step."""
+        step = int(self.num_timesteps)
+
+        # Check for episode endings across vectorized / single environments
+        dones = self.locals.get("dones", [False])
+        infos = self.locals.get("infos", [{}])
+        rewards = self.locals.get("rewards", [0.0])
+
+        for i, done in enumerate(dones):
+            reward = float(rewards[i]) if i < len(rewards) else 0.0
+            info = infos[i] if i < len(infos) else {}
+
+            self._current_rewards[i] = self._current_rewards.get(i, 0.0) + reward
+            self._current_lengths[i] = self._current_lengths.get(i, 0) + 1
+
+            if done:
+                self._episode_count += 1
+                ep_reward = self._current_rewards.pop(i, 0.0)
+                ep_length = self._current_lengths.pop(i, 0)
+
+                for cb in self.callbacks:
+                    cb.on_episode_end(
+                        episode=self._episode_count,
+                        episode_reward=ep_reward,
+                        episode_length=ep_length,
+                        info=info,
+                    )
+
+        continue_training = True
+        for cb in self.callbacks:
+            if not cb.on_step(step=step, locals_dict=self.locals):
+                continue_training = False
+
+        return continue_training
+
+    def _on_training_end(self) -> None:
+        """Propagate training end event."""
+        for cb in self.callbacks:
+            cb.on_training_end()

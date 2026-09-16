@@ -47,7 +47,7 @@ def version() -> None:
     """Show the installed AdaptiveRL version and phase status."""
     console.print(
         f"[bold green]AdaptiveRL[/bold green] version [bold cyan]{adaptive_rl.__version__}[/bold cyan] "
-        f"([yellow]Phase 3: Procedural GridWorld[/yellow])"
+        f"([yellow]Phase 4: PPO Training Engine[/yellow])"
     )
 
 
@@ -70,7 +70,9 @@ def info() -> None:
     table.add_row(
         "Phase 3", "Procedurally Generated GridWorld", "[bold green]COMPLETED[/bold green]"
     )
-    table.add_row("Phase 4", "PPO Training Engine (SB3 Wrapper)", "[yellow]PLANNED[/yellow]")
+    table.add_row(
+        "Phase 4", "PPO Training Engine (SB3 Wrapper)", "[bold green]COMPLETED[/bold green]"
+    )
     table.add_row("Phase 5", "Evaluation Engine and Standard Metrics", "[yellow]PLANNED[/yellow]")
     table.add_row("Phase 6", "Continuous 2D Navigation", "[yellow]PLANNED[/yellow]")
     table.add_row("Phase 7", "Curriculum Learning", "[yellow]PLANNED[/yellow]")
@@ -255,14 +257,70 @@ def train(
     config: Optional[Path] = typer.Option(
         None, "--config", "-c", help="Path to training configuration YAML"
     ),
+    timesteps: Optional[int] = typer.Option(
+        None, "--timesteps", "-t", help="Override total training timesteps"
+    ),
+    seed: Optional[int] = typer.Option(
+        None, "--seed", "-s", help="Override experiment random seed"
+    ),
 ) -> None:
-    """Start an agent training run (Scheduled for Phase 4: PPO Training Engine)."""
+    """Train a reinforcement learning agent using PPO."""
+    if config is None:
+        default_config = Path("configs/ppo.yaml")
+        if default_config.exists():
+            config = default_config
+        else:
+            console.print(
+                "[bold red]No configuration file provided.[/bold red] Specify --config <path>"
+            )
+            raise typer.Exit(code=1)
+
+    try:
+        exp_config = load_config(config)
+    except ConfigError as err:
+        console.print(f"[bold red]Configuration error:[/bold red] {err}")
+        raise typer.Exit(code=1)
+
+    if timesteps is not None:
+        exp_config.training.total_timesteps = timesteps
+    if seed is not None:
+        exp_config.seed = seed
+
     console.print(
-        "[bold yellow]Training engine is scheduled for Phase 4 (PPO Adapter & Trainer).[/bold yellow]\n"
-        "In Phase 3, GridWorld and environment discovery are active.\n"
-        "To inspect or test GridWorld, run: [bold cyan]adaptive-rl env run gridworld[/bold cyan]"
+        Panel.fit(
+            f"[bold green]Starting Training: {exp_config.name}[/bold green]\n\n"
+            f"• [bold]Algorithm:[/bold] {exp_config.algorithm.name.upper()}\n"
+            f"• [bold]Environment:[/bold] {exp_config.environment.name}\n"
+            f"• [bold]Total Timesteps:[/bold] {exp_config.training.total_timesteps:,}\n"
+            f"• [bold]Checkpoint Freq:[/bold] {exp_config.training.checkpoint_freq}\n"
+            f"• [bold]Seed:[/bold] {exp_config.seed}\n"
+            f"• [bold]Output Dir:[/bold] {exp_config.output_dir}",
+            title="PPO Training Pipeline",
+            border_style="cyan",
+        )
     )
-    raise typer.Exit(code=0)
+
+    from adaptive_rl.training import PPOTrainer
+
+    try:
+        trainer = PPOTrainer(config=exp_config)
+        result = trainer.fit()
+
+        console.print(
+            Panel.fit(
+                f"[bold green]Training Completed Successfully![/bold green]\n\n"
+                f"• [bold]Total Timesteps Trained:[/bold] {result.total_timesteps:,}\n"
+                f"• [bold]Episodes Completed:[/bold] {result.episodes_completed}\n"
+                f"• [bold]Mean Reward (last window):[/bold] {result.mean_reward:.2f}\n"
+                f"• [bold]Saved Model:[/bold] {result.final_model_path}\n"
+                f"• [bold]Checkpoints Created:[/bold] {len(result.checkpoints)}",
+                title="Training Summary",
+                border_style="green",
+            )
+        )
+    except Exception as err:
+        console.print(f"[bold red]Training failed with error:[/bold red] {err}")
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -277,7 +335,8 @@ def evaluate(
     """Evaluate a trained agent (Scheduled for Phase 5: Evaluation Engine)."""
     console.print(
         "[bold yellow]Evaluation engine is scheduled for Phase 5 (Evaluation Engine and Standard Metrics).[/bold yellow]\n"
-        "In Phase 3, GridWorld and environment discovery are active."
+        "In Phase 4, PPO training, callbacks, and checkpointing are active.\n"
+        "To train an agent, run: [bold cyan]adaptive-rl train --config configs/ppo.yaml[/bold cyan]"
     )
     raise typer.Exit(code=0)
 

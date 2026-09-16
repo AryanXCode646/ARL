@@ -27,7 +27,7 @@ def test_cli_version() -> None:
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
     assert "AdaptiveRL" in result.output
-    assert "Phase 3" in result.output
+    assert "Phase 4" in result.output
 
 
 def test_cli_info() -> None:
@@ -38,6 +38,7 @@ def test_cli_info() -> None:
     assert "Phase 1" in result.output
     assert "Phase 2" in result.output
     assert "Phase 3" in result.output
+    assert "Phase 4" in result.output
 
 
 def test_cli_config_validate_success() -> None:
@@ -114,12 +115,43 @@ def test_cli_env_run_gridworld() -> None:
     assert "Cumulative Reward:" in result.output
 
 
-
-def test_cli_train_honest_notice() -> None:
-    """Verify adaptive-rl train displays honest notice about Phase 4 scheduling."""
-    result = runner.invoke(app, ["train"])
+def test_cli_train_execution(tmp_path: Path) -> None:
+    """Verify adaptive-rl train executes PPO training with overridden timesteps."""
+    test_config = tmp_path / "test_ppo.yaml"
+    test_config.write_text(
+        f"""
+name: "cli_test_run"
+seed: 42
+algorithm:
+  name: "ppo"
+  learning_rate: 0.0003
+  gamma: 0.99
+  batch_size: 32
+  parameters:
+    n_steps: 64
+environment:
+  name: "gridworld"
+  max_steps: 20
+  parameters:
+    width: 5
+    height: 5
+    num_obstacles: 2
+training:
+  total_timesteps: 64
+  checkpoint_freq: 0
+  log_interval: 10
+evaluation:
+  eval_episodes: 2
+output_dir: "{tmp_path / "results"}"
+log_dir: "{tmp_path / "logs"}"
+""",
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["train", "--config", str(test_config), "--timesteps", "64"])
     assert result.exit_code == 0
-    assert "Phase 4" in result.output
+    assert "Starting Training: cli_test_run" in result.output
+    assert "Training Completed Successfully!" in result.output
+    assert "Total Timesteps Trained: 64" in result.output
 
 
 def test_cli_evaluate_honest_notice() -> None:

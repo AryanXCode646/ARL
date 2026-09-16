@@ -172,7 +172,12 @@ class GridWorldEnv(AdaptiveRLEnv[np.ndarray, int]):
             raise ValueError(f"Invalid action {action}. Valid actions are 0, 1, 2, 3.")
 
         self._current_step += 1
-        dx, dy = self.ACTION_TO_DELTA[action]
+        act_int = (
+            int(np.asarray(action).item())
+            if isinstance(action, (np.ndarray, np.generic))
+            else int(action)
+        )
+        dx, dy = self.ACTION_TO_DELTA[act_int]
         target_x = self._agent_pos[0] + dx
         target_y = self._agent_pos[1] + dy
 
@@ -184,7 +189,8 @@ class GridWorldEnv(AdaptiveRLEnv[np.ndarray, int]):
         terminated = False
         truncated = False
         info = self._get_info()
-        info["action_name"] = self.ACTION_NAMES[action]
+        info["action_name"] = self.ACTION_NAMES[act_int]
+        info["action_taken"] = act_int
 
         # Case 1: Obstacle collision
         if new_pos in self._obstacles:
