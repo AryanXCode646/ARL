@@ -73,17 +73,17 @@ class GeneralizationReport(BaseModel):
     test_metrics: EvaluationMetrics = Field(
         ..., description="Performance on unseen test distribution"
     )
-    generalization_gap_success: float = Field(
-        ...,
-        description="Drop in success rate: train_success_rate - test_success_rate",
+    generalization_gap_success: Optional[float] = Field(
+        default=None,
+        description="Drop in success rate: train_success_rate - test_success_rate (or None if undefined)",
     )
     generalization_gap_reward: float = Field(
         ...,
         description="Drop in mean reward: train_mean_reward - test_mean_reward",
     )
-    relative_success_retention: float = Field(
-        ...,
-        description="Ratio of test success rate to train success rate (1.0 = perfect transfer)",
+    relative_success_retention: Optional[float] = Field(
+        default=None,
+        description="Ratio of test success rate to train success rate (1.0 = perfect transfer, or None if undefined)",
     )
     environment_parameters: Dict[str, Any] = Field(
         default_factory=dict,
@@ -222,14 +222,20 @@ class GeneralizationEvaluator:
             distribution.test_seeds, deterministic=deterministic
         )
 
-        gap_success = float(train_metrics.success_rate - test_metrics.success_rate)
-        gap_reward = float(train_metrics.mean_reward - test_metrics.mean_reward)
+        if train_metrics.success_rate is not None and test_metrics.success_rate is not None:
+            gap_success: Optional[float] = float(
+                train_metrics.success_rate - test_metrics.success_rate
+            )
+            retention: Optional[float] = (
+                float(test_metrics.success_rate / train_metrics.success_rate)
+                if train_metrics.success_rate > 0.0
+                else (1.0 if test_metrics.success_rate == 0.0 else 0.0)
+            )
+        else:
+            gap_success = None
+            retention = None
 
-        retention = (
-            float(test_metrics.success_rate / train_metrics.success_rate)
-            if train_metrics.success_rate > 0.0
-            else (1.0 if test_metrics.success_rate == 0.0 else 0.0)
-        )
+        gap_reward = float(train_metrics.mean_reward - test_metrics.mean_reward)
 
         algo_name = getattr(self.algorithm, "name", type(self.algorithm).__name__)
 

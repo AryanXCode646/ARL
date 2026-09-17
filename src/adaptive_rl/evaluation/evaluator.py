@@ -95,8 +95,25 @@ class Evaluator(BaseEvaluator):
 
         rewards: List[float] = []
         lengths: List[int] = []
-        successes = 0
-        collisions = 0
+
+        # Flags tracking whether environments expose specific metrics
+        has_success_info = False
+        has_collision_info = False
+        has_overflow_info = False
+        is_traffic_env = False
+
+        # Per-episode outcomes
+        episode_successes: List[bool] = []
+        episode_collisions: List[bool] = []
+        episode_overflows: List[bool] = []
+        episode_truncations: List[bool] = []
+
+        # Traffic telemetry accumulators
+        all_step_queues: List[int] = []
+        all_step_mean_waits: List[float] = []
+        ep_max_waits: List[int] = []
+        ep_final_departures: List[int] = []
+        ep_final_delays: List[float] = []
 
         from adaptive_rl.evaluation.seeding import derive_evaluation_seed
 
@@ -107,28 +124,90 @@ class Evaluator(BaseEvaluator):
             ep_length = 0
             done = False
 
-            ep_success = False
-            ep_collision = False
+            ep_had_collision = False
+            ep_had_overflow = False
+            ep_step_max_waits: List[int] = []
+            last_step_info: Dict[str, Any] = dict(info or {})
+            last_terminated = False
+            last_truncated = False
+
+            # Reset policy if policy provides episode-level reset (e.g. PlannerPolicy)
+            if hasattr(self.algorithm, "reset_policy"):
+                self.algorithm.reset_policy()
 
             while not done:
                 action, _ = self.algorithm.predict(obs, deterministic=deterministic)
                 obs, reward, terminated, truncated, step_info = self.env.step(action)
                 ep_reward += float(reward)
                 ep_length += 1
+                last_step_info = step_info
+                last_terminated = terminated
+                last_truncated = truncated
 
-                if step_info.get("success", False):
-                    ep_success = True
-                if step_info.get("collision", False):
-                    ep_collision = True
+                # Track collision
+                if "collision" in step_info:
+                    has_collision_info = True
+                    if step_info["collision"]:
+                        ep_had_collision = True
+
+                # Track overflow
+                if (
+                    "overflow" in step_info
+                    or "had_overflow" in step_info
+                    or "step_overflow" in step_info
+                ):
+                    has_overflow_info = True
+                    if (
+                        step_info.get("overflow")
+                        or step_info.get("had_overflow")
+                        or step_info.get("step_overflow")
+                    ):
+                        ep_had_overflow = True
+
+                # Track traffic telemetry
+                if "total_queue" in step_info:
+                    is_traffic_env = True
+                    all_step_queues.append(int(step_info["total_queue"]))
+                    if "max_wait" in step_info:
+                        ep_step_max_waits.append(int(step_info["max_wait"]))
+                    if "mean_wait" in step_info:
+                        all_step_mean_waits.append(float(step_info["mean_wait"]))
+
+                # Check if environment provides success flag
+                if "success" in step_info:
+                    has_success_info = True
 
                 done = terminated or truncated
 
             rewards.append(ep_reward)
             lengths.append(ep_length)
-            if ep_success:
-                successes += 1
-            if ep_collision:
-                collisions += 1
+            episode_truncations.append(last_truncated)
+
+            if has_collision_info:
+                episode_collisions.append(ep_had_collision)
+
+            if has_overflow_info:
+                episode_overflows.append(ep_had_overflow)
+
+            # Determine EPISODE-LEVEL success outcome:
+            # Success must be an episode-level outcome, never latched from a transient intermediate step.
+            if is_traffic_env:
+                # Traffic contract: Episode succeeded iff no queue overflow occurred and final queue was controlled.
+                # An overflowed or early-terminated episode is NEVER successful.
+                traffic_success = (
+                    (not ep_had_overflow)
+                    and (not last_terminated)
+                    and bool(last_step_info.get("success", False))
+                )
+                episode_successes.append(traffic_success)
+                has_success_info = True
+                ep_max_waits.append(max(ep_step_max_waits) if ep_step_max_waits else 0)
+                ep_final_departures.append(int(last_step_info.get("cumulative_departures", 0)))
+                ep_final_delays.append(float(last_step_info.get("cumulative_delay", 0.0)))
+            elif has_success_info:
+                # Goal-directed navigation contract: Success requires reaching goal at termination without collision.
+                goal_success = (not ep_had_collision) and bool(last_step_info.get("success", False))
+                episode_successes.append(goal_success)
 
         mean_rew = float(np.mean(rewards))
         std_rew = float(np.std(rewards))
@@ -137,22 +216,66 @@ class Evaluator(BaseEvaluator):
         mean_len = float(np.mean(lengths))
         std_len = float(np.std(lengths))
 
+        success_rate: Optional[float] = (
+            float(sum(episode_successes) / num_episodes) if has_success_info else None
+        )
+        collision_rate: Optional[float] = (
+            float(sum(episode_collisions) / num_episodes) if has_collision_info else None
+        )
+        overflow_rate: Optional[float] = (
+            float(sum(episode_overflows) / num_episodes) if has_overflow_info else None
+        )
+        truncation_rate: Optional[float] = float(sum(episode_truncations) / num_episodes)
+
+        additional: Dict[str, Any] = {
+            "all_rewards": rewards,
+            "all_lengths": lengths,
+            "deterministic": deterministic,
+            "base_seed": base_seed,
+            "truncation_rate": truncation_rate,
+        }
+
+        # Preserve centralized traffic telemetry if environment is traffic
+        if is_traffic_env:
+            # Documented aggregation rules:
+            # - mean_queue_length: Mean of per-timestep total queue lengths averaged across all evaluation timesteps.
+            # - mean_max_wait_time: Mean of per-episode maximum vehicle waiting times across all evaluation episodes.
+            # - mean_wait_time: Mean of per-timestep mean vehicle waiting times averaged across all evaluation timesteps.
+            # - mean_total_departures: Mean cumulative vehicle departures per episode across all evaluation episodes.
+            # - total_departures: Total vehicle departures summed across all evaluation episodes.
+            # - cumulative_delay: Mean cumulative vehicle delay per episode across all evaluation episodes.
+            # - overflow_rate: Fraction of evaluation episodes in which at least one queue overflow occurred.
+            additional["mean_queue_length"] = (
+                float(np.mean(all_step_queues)) if all_step_queues else 0.0
+            )
+            additional["mean_max_wait_time"] = float(np.mean(ep_max_waits)) if ep_max_waits else 0.0
+            additional["mean_wait_time"] = (
+                float(np.mean(all_step_mean_waits)) if all_step_mean_waits else 0.0
+            )
+            additional["mean_total_departures"] = (
+                float(np.mean(ep_final_departures)) if ep_final_departures else 0.0
+            )
+            additional["total_departures"] = (
+                int(np.sum(ep_final_departures)) if ep_final_departures else 0
+            )
+            additional["cumulative_delay"] = (
+                float(np.mean(ep_final_delays)) if ep_final_delays else 0.0
+            )
+            additional["overflow_rate"] = overflow_rate
+
         return EvaluationMetrics(
             episodes=num_episodes,
             mean_reward=mean_rew,
             std_reward=std_rew,
             min_reward=min_rew,
             max_reward=max_rew,
-            success_rate=successes / num_episodes,
-            collision_rate=collisions / num_episodes,
+            success_rate=success_rate,
+            collision_rate=collision_rate,
+            overflow_rate=overflow_rate,
+            truncation_rate=truncation_rate,
             mean_episode_length=mean_len,
             std_episode_length=std_len,
-            additional_metrics={
-                "all_rewards": rewards,
-                "all_lengths": lengths,
-                "deterministic": deterministic,
-                "base_seed": base_seed,
-            },
+            additional_metrics=additional,
         )
 
     def evaluate_scenarios(
