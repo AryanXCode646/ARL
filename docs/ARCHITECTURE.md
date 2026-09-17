@@ -113,3 +113,136 @@ The relationship between environments and the training engine follows a strict u
 3. **Seamless Benchmark Portability:** Standard third-party environments (such as Gymnasium's `CartPole-v1`, `Pendulum-v1`, or `BipedalWalker-v3`) can be trained using the exact same CLI command and training engine without wrapping or rewriting them.
 4. **Isolated Testability:** Test suites can use lightweight dummy environments (like `DummyTestEnv`) to test the registry, vectorization, and training loops rapidly without incurring heavy simulation overhead.
 
+---
+
+## 3. Baselines, Registries, and Experiment Management
+
+### 3.1 Planner Layer (`adaptive_rl.planners`)
+
+Classical navigation planners are implemented as a distinct layer separate from
+RL algorithms. This separation respects the fundamental difference between:
+
+- **RL policies**: Learned, stochastic, model-free, generalize through interaction.
+- **Classical planners**: Deterministic, model-based, compute solutions per-instance.
+
+```
+make_planner(name, **params) [Authoritative Factory]
+  ├── AStarPlanner (BasePlanner subclass: discrete 2D grid search)
+  └── RRTStarPlanner (sampling-based continuous 2D motion planner)
+
+PlannerAdapter(planner, env) [Composition Adapter]
+  ├── Evaluates AStarPlanner on GridWorldEnv layouts
+  └── Evaluates RRTStarPlanner on ContinuousNavigation2DEnv layouts
+```
+
+Planners expose geometric metrics (path length, planning time, path efficiency) and success rate.
+For offline planners operating on static obstacle layouts, dynamic execution metrics (`collision_rate`, `episode_length`, `episode_return`) are strictly set to `None` (not applicable/unmeasured), never defaulted to fake `0.0`.
+The `PlannerAdapter` runs the planner on the same environment layouts as RL evaluation,
+enabling direct cross-paradigm benchmarking.
+
+### 3.2 Algorithm Registry (`adaptive_rl.algorithms.registry`)
+
+The `AlgorithmRegistry` mirrors the `EnvironmentRegistry` design:
+- Both RL algorithms (PPO, SAC) and planners (A*, RRT*) are registered.
+- RL algorithms are registered with lazy factory wrappers to preserve clean separation between base installation and the optional `[rl]` dependency stack.
+- Each registration includes typed `AlgorithmMetadata` with capability flags.
+- `AlgorithmKind.RL_POLICY` vs `AlgorithmKind.PLANNER` prevents type confusion.
+- CLI commands (`adaptive-rl algorithm list`, `algorithm inspect <name>`) expose the registry.
+
+```python
+from adaptive_rl.algorithms.registry import algorithm_registry, AlgorithmKind
+
+rl_algos = algorithm_registry.list_by_kind(AlgorithmKind.RL_POLICY)  # ['ppo', 'sac']
+planners = algorithm_registry.list_by_kind(AlgorithmKind.PLANNER)  # ['astar', 'rrt_star']
+```
+
+### 3.3 Experiment Manager (`adaptive_rl.experiments.manager`)
+
+`ExperimentManager` provides reproducible experiment orchestration with two-tier provenance:
+
+```
+run(config) → ExperimentResult
+  ├── Compute deterministic config_sha256 (canonical config digest)
+  ├── Generate base_experiment_id (date + env + algo + seed)
+  ├── Resolve atomic non-colliding output directory and run_id
+  ├── Record provenance (git commit, Python, packages, platform, config_sha256, run_id)
+  ├── Save config.yaml copy
+  ├── Run training (RL) or planning (make_planner)
+  ├── Evaluate performance (StandardizedExperimentMetrics)
+  ├── Save metrics.json + metrics.csv
+  └── Save manifest.json
+```
+
+Every experiment is self-contained, cryptographically verifiable from `config_sha256`, and independently reproducible from its `config.yaml` copy.
+
+### 3.4 Benchmarking Framework (`adaptive_rl.benchmarking`)
+
+`BenchmarkRunner` extends `ExperimentManager` with multi-seed execution:
+- Runs the same configuration across N seeds.
+- Aggregates statistics (mean ± std, min, max) per metric.
+- Supports two-arm comparisons (ablations).
+- Saves `ComparisonReport` as JSON.
+
+### 3.5 Dashboard (`adaptive_rl.visualization.dashboard`)
+
+The terminal dashboard uses `rich` (already a project dependency) to render
+experiment results from saved artifacts:
+
+- **Overview**: All experiments with status, algorithm, environment, seed, timestamp.
+- **Detail**: Metrics for a single experiment, including a text sparkline for reward.
+- **Comparison**: Side-by-side metric table for multiple experiments.
+
+No external plotting libraries are required. The dashboard is purely text-based,
+works over SSH, and does not require a graphical environment.
+
+---
+
+## 4. Complete Module Reference
+
+```
+src/adaptive_rl/
+├── __init__.py               — Package root and version
+├── cli.py                    — Typer CLI (all commands)
+├── config.py                 — Pydantic configuration schemas
+├── algorithms/
+│   ├── base.py               — BaseAlgorithm abstract interface
+│   ├── ppo.py                — SB3 PPO wrapper
+│   ├── sac.py                — SB3 SAC wrapper
+│   └── registry.py           — AlgorithmRegistry
+├── planners/
+│   ├── base.py               — BasePlanner + PlannerResult
+│   ├── astar.py              — A* planner implementation
+│   └── adapter.py            — PlannerAdapter for GridWorldEnv
+├── environments/
+│   ├── base.py               — AdaptiveRLEnv abstract base
+│   ├── registry.py           — EnvironmentRegistry
+│   ├── metadata.py           — EnvironmentMetadata
+│   ├── seeded_wrapper.py     — TrainingDistributionWrapper
+│   ├── testing.py            — DummyTestEnv
+│   ├── gridworld/            — GridWorld environment
+│   ├── navigation/           — ContinuousNavigation2D
+│   ├── traffic/              — TrafficSignalEnv
+│   └── drone/                — DroneNavigation3D + DroneDisturbance3D
+├── training/
+│   ├── trainer.py            — PPOTrainer, SACTrainer, get_trainer
+│   ├── callbacks.py          — MetricLoggerCallback, CheckpointCallback
+│   └── checkpointing.py      — CheckpointManager
+├── evaluation/
+│   ├── evaluator.py          — Evaluator, BaseEvaluator
+│   ├── metrics.py            — EvaluationMetrics
+│   ├── generalization.py     — GeneralizationReport, GeneralizationDistribution
+│   └── scenarios.py          — EvaluationScenario
+├── experiments/
+│   ├── runner.py             — BaseExperimentRunner
+│   ├── generalization_runner.py — GeneralizationExperimentRunner
+│   └── manager.py            — ExperimentManager
+├── benchmarking/
+│   └── __init__.py           — BenchmarkRunner, AggregateStats
+├── curriculum/               — Curriculum learning
+├── rewards/                  — Reward function interfaces
+├── models/                   — Model artifact management
+└── visualization/
+    ├── plots.py              — PlotManager (text summaries)
+    ├── renderer.py           — BaseRenderer
+    └── dashboard.py          — Rich terminal dashboard
+```
