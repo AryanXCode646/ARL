@@ -446,10 +446,57 @@ def _register_defaults(target_registry: Optional[AlgorithmRegistry] = None) -> N
 _register_defaults()
 
 # Public convenience API (mirrors environment registry pattern)
-register_algorithm = algorithm_registry.register
-get_algorithm_factory = algorithm_registry.get_factory
-get_algorithm_metadata = algorithm_registry.get_metadata
-list_algorithms = algorithm_registry.list_algorithms
-list_algorithms_by_kind = algorithm_registry.list_by_kind
-list_all_algorithm_metadata = algorithm_registry.list_all_metadata
-reset_algorithm_defaults = algorithm_registry.reset_defaults
+def register_algorithm(
+    name: str,
+    factory: Callable[..., Any],
+    metadata: Optional[AlgorithmMetadata] = None,
+) -> None:
+    """Register an algorithm in the global algorithm registry."""
+    algorithm_registry.register(name, factory, metadata)
+
+
+def get_algorithm_factory(name: str) -> Callable[..., Any]:
+    """Retrieve the factory callable for a registered algorithm from the global registry."""
+    return algorithm_registry.get_factory(name)
+
+
+def get_algorithm_metadata(name: str) -> AlgorithmMetadata:
+    """Retrieve metadata for a registered algorithm from the global registry."""
+    return algorithm_registry.get_metadata(name)
+
+
+def list_algorithms() -> list[str]:
+    """List names of all registered algorithms in the global registry."""
+    return algorithm_registry.list_algorithms()
+
+
+def list_algorithms_by_kind(kind: AlgorithmKind | str) -> list[str]:
+    """List registered algorithms of a specific kind from the global registry."""
+    return algorithm_registry.list_by_kind(kind)
+
+
+def list_all_algorithm_metadata() -> dict[str, AlgorithmMetadata]:
+    """Return a mapping of all registered algorithm names to metadata copies."""
+    return algorithm_registry.list_all_metadata()
+
+
+def reset_algorithm_defaults() -> None:
+    """Reset the global algorithm registry to default built-in algorithms."""
+    algorithm_registry.reset_defaults()
+
+
+__all__ = [
+    "AlgorithmKind",
+    "AlgorithmMetadata",
+    "AlgorithmRegistry",
+    "AlgorithmRegistryError",
+    "RegisteredAlgorithm",
+    "algorithm_registry",
+    "get_algorithm_factory",
+    "get_algorithm_metadata",
+    "list_algorithms",
+    "list_algorithms_by_kind",
+    "list_all_algorithm_metadata",
+    "register_algorithm",
+    "reset_algorithm_defaults",
+]

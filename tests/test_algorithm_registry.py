@@ -13,6 +13,7 @@ from adaptive_rl.algorithms.registry import (
     AlgorithmMetadata,
     AlgorithmRegistry,
     AlgorithmRegistryError,
+    _register_defaults,
     _safe_import_algorithm,
     algorithm_registry,
     get_algorithm_factory,
@@ -327,6 +328,41 @@ class TestOptionalAlgorithmHandling:
                 with pytest.raises(RuntimeError, match="Syntax defect inside module"):
                     _safe_import_algorithm("adaptive_rl.planning.astar", "AStarPlanner")
 
+    def test_default_registration_omits_missing_planner(self) -> None:
+        """When planner modules are unavailable, default registration registers RL but omits planners."""
+        isolated_reg = AlgorithmRegistry()
+        with patch("adaptive_rl.algorithms.registry._safe_import_algorithm", return_value=None):
+            _register_defaults(isolated_reg)
+
+        algos = isolated_reg.list_algorithms()
+        assert "ppo" in algos
+        assert "sac" in algos
+        assert "astar" not in algos
+        assert "rrt_star" not in algos
+
+        # Querying the missing planner strictly raises AlgorithmRegistryError
+        with pytest.raises(AlgorithmRegistryError, match="Unknown algorithm 'astar'"):
+            isolated_reg.get_factory("astar")
+        with pytest.raises(AlgorithmRegistryError, match="Unknown algorithm 'astar'"):
+            isolated_reg.get_metadata("astar")
+
+    def test_default_registration_propagates_broken_planner_import(self) -> None:
+        """When an installed planner module raises an import error, default registration propagates it."""
+        isolated_reg = AlgorithmRegistry()
+        with patch("importlib.util.find_spec", return_value=True):
+            with patch("importlib.import_module", side_effect=ImportError("broken dependency in planner")):
+                with pytest.raises(ImportError, match="broken dependency in planner"):
+                    _register_defaults(isolated_reg)
+
+    def test_safe_import_algorithm_fallback_resolution(self) -> None:
+        """_safe_import_algorithm falls back to fallback_module when primary is missing."""
+        cls = _safe_import_algorithm(
+            "nonexistent.primary.module",
+            "AStarPlanner",
+            fallback_module="adaptive_rl.planning.astar",
+        )
+        assert cls is AStarPlanner
+
 
 # ---------------------------------------------------------------------------
 # Global default registry & Real implementation integration tests
@@ -448,3 +484,24 @@ class TestGlobalAlgorithmRegistryIntegration:
         algos2 = list_algorithms()
         assert "ppo" in algos2
         assert "sac" in algos2
+
+    def test_convenience_functions_exported(self) -> None:
+        """Verify all convenience functions are defined and exported in both modules."""
+        import adaptive_rl.algorithms as algo_pkg
+        import adaptive_rl.algorithms.registry as reg_mod
+
+        for name in [
+            "register_algorithm",
+            "get_algorithm_factory",
+            "get_algorithm_metadata",
+            "list_algorithms",
+            "list_algorithms_by_kind",
+            "list_all_algorithm_metadata",
+            "reset_algorithm_defaults",
+        ]:
+            assert hasattr(algo_pkg, name), f"{name} not in adaptive_rl.algorithms"
+            assert hasattr(reg_mod, name), f"{name} not in adaptive_rl.algorithms.registry"
+            assert callable(getattr(algo_pkg, name))
+            assert callable(getattr(reg_mod, name))
+            assert name in algo_pkg.__all__
+            assert name in reg_mod.__all__
