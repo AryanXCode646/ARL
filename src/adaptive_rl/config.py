@@ -19,8 +19,19 @@ from adaptive_rl.algorithms.registry import (
     algorithm_registry,
 )
 
-# Canonical set of classical planner algorithm names
-PLANNER_ALGORITHMS: Set[str] = {"astar", "rrt_star", "rrt*"}
+
+def _get_canonical_planner_algorithms() -> Set[str]:
+    """Derive registered classical planner algorithm names from AlgorithmRegistry."""
+    try:
+        planners = set(algorithm_registry.list_by_kind(AlgorithmKind.PLANNER))
+        planners.add("rrt*")  # Syntactic alias for rrt_star
+        return planners
+    except Exception:
+        return {"astar", "rrt_star", "rrt*"}
+
+
+# Canonical set of classical planner algorithm names derived from AlgorithmRegistry
+PLANNER_ALGORITHMS: Set[str] = _get_canonical_planner_algorithms()
 
 
 class ConfigError(Exception):
@@ -223,10 +234,13 @@ class AlgorithmConfig(BaseModel):
     @property
     def is_planner(self) -> bool:
         """Return True if this configuration is for a classical planner."""
+        raw_name = self.name.lower()
+        if raw_name == "rrt*":
+            raw_name = "rrt_star"
         try:
-            return algorithm_registry.get_metadata(self.name.lower()).kind == AlgorithmKind.PLANNER
+            return algorithm_registry.get_metadata(raw_name).kind == AlgorithmKind.PLANNER
         except Exception:
-            return self.name.lower() in PLANNER_ALGORITHMS
+            return raw_name in _get_canonical_planner_algorithms()
 
 
 class EnvironmentConfig(BaseModel):
