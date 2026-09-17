@@ -27,6 +27,17 @@ class AlgorithmKind(str, Enum):
     PLANNER = "planner"
 
 
+def _copy_container(val: Any) -> Any:
+    """Recursively copy nested dictionaries, lists, and sets."""
+    if isinstance(val, dict):
+        return {k: _copy_container(v) for k, v in val.items()}
+    if isinstance(val, list):
+        return [_copy_container(v) for v in val]
+    if isinstance(val, set):
+        return {_copy_container(v) for v in val}
+    return val
+
+
 @dataclass
 class AlgorithmMetadata:
     """Metadata record for a registered algorithm or planner.
@@ -60,8 +71,8 @@ class AlgorithmMetadata:
             action_space=self.action_space,
             trainable=self.trainable,
             class_name=self.class_name,
-            hyperparameters=dict(self.hyperparameters),
-            tags=list(self.tags),
+            hyperparameters=_copy_container(self.hyperparameters),
+            tags=_copy_container(self.tags),
         )
 
 
@@ -148,16 +159,43 @@ class AlgorithmRegistry:
                     f"metadata name '{metadata.name}'."
                 )
             meta_record = metadata.copy()
+            meta_record.name = clean
         else:
-            meta_record = AlgorithmMetadata(
-                name=clean,
-                kind=AlgorithmKind.RL_POLICY,
-                description=f"Algorithm '{clean}' (no metadata provided).",
-            )
+            meta_record = self._infer_metadata(clean, factory)
 
         self._registry[clean] = RegisteredAlgorithm(
             factory=factory,
             metadata=meta_record,
+        )
+
+    def _infer_metadata(self, clean: str, factory: Callable[..., Any]) -> AlgorithmMetadata:
+        """Safely infer metadata when unambiguous, or raise AlgorithmRegistryError."""
+        if isinstance(factory, type):
+            from adaptive_rl.algorithms.base import BaseAlgorithm
+            from adaptive_rl.planning.base import BasePlanner, PlannerPolicy
+
+            if issubclass(factory, (BasePlanner, PlannerPolicy)):
+                return AlgorithmMetadata(
+                    name=clean,
+                    kind=AlgorithmKind.PLANNER,
+                    description=f"Deterministic planner '{clean}'.",
+                    action_space="discrete",
+                    trainable=False,
+                    class_name=factory.__name__,
+                )
+            elif issubclass(factory, BaseAlgorithm):
+                return AlgorithmMetadata(
+                    name=clean,
+                    kind=AlgorithmKind.RL_POLICY,
+                    description=f"RL policy algorithm '{clean}'.",
+                    action_space="discrete, continuous",
+                    trainable=True,
+                    class_name=factory.__name__,
+                )
+
+        raise AlgorithmRegistryError(
+            f"Cannot infer algorithm metadata for '{clean}'. "
+            "Explicit AlgorithmMetadata must be provided during registration."
         )
 
     def get_factory(self, name: str) -> Callable[..., Any]:
@@ -243,6 +281,14 @@ class AlgorithmRegistry:
         """Clear all registered algorithms (primarily for test isolation)."""
         self._registry.clear()
 
+    def reset_defaults(self) -> None:
+        """Clear and re-register default built-in algorithms (PPO, SAC, and available planners).
+
+        Primarily intended for test isolation and resetting registry state.
+        """
+        self.clear()
+        _register_defaults(self)
+
 
 def _safe_import_algorithm(
     primary_module: str,
@@ -275,13 +321,14 @@ def _safe_import_algorithm(
 algorithm_registry = AlgorithmRegistry()
 
 
-def _register_defaults() -> None:
+def _register_defaults(target_registry: Optional[AlgorithmRegistry] = None) -> None:
     """Register the built-in algorithms into the global registry with real implementations."""
+    reg = target_registry if target_registry is not None else algorithm_registry
     from adaptive_rl.algorithms.ppo import PPOAlgorithm
     from adaptive_rl.algorithms.sac import SACAlgorithm
 
-    if "ppo" not in algorithm_registry.list_algorithms():
-        algorithm_registry.register(
+    if "ppo" not in reg.list_algorithms():
+        reg.register(
             "ppo",
             PPOAlgorithm,
             AlgorithmMetadata(
@@ -310,8 +357,8 @@ def _register_defaults() -> None:
             ),
         )
 
-    if "sac" not in algorithm_registry.list_algorithms():
-        algorithm_registry.register(
+    if "sac" not in reg.list_algorithms():
+        reg.register(
             "sac",
             SACAlgorithm,
             AlgorithmMetadata(
@@ -346,8 +393,8 @@ def _register_defaults() -> None:
         "AStarPlanner",
         fallback_module="adaptive_rl.planning.astar",
     )
-    if astar_class is not None and "astar" not in algorithm_registry.list_algorithms():
-        algorithm_registry.register(
+    if astar_class is not None and "astar" not in reg.list_algorithms():
+        reg.register(
             "astar",
             astar_class,
             AlgorithmMetadata(
@@ -370,8 +417,8 @@ def _register_defaults() -> None:
         "RRTStarPlanner",
         fallback_module="adaptive_rl.planning.rrt",
     )
-    if rrt_star_class is not None and "rrt_star" not in algorithm_registry.list_algorithms():
-        algorithm_registry.register(
+    if rrt_star_class is not None and "rrt_star" not in reg.list_algorithms():
+        reg.register(
             "rrt_star",
             rrt_star_class,
             AlgorithmMetadata(
@@ -399,9 +446,57 @@ def _register_defaults() -> None:
 _register_defaults()
 
 # Public convenience API (mirrors environment registry pattern)
-register_algorithm = algorithm_registry.register
-get_algorithm_factory = algorithm_registry.get_factory
-get_algorithm_metadata = algorithm_registry.get_metadata
-list_algorithms = algorithm_registry.list_algorithms
-list_algorithms_by_kind = algorithm_registry.list_by_kind
-list_all_algorithm_metadata = algorithm_registry.list_all_metadata
+def register_algorithm(
+    name: str,
+    factory: Callable[..., Any],
+    metadata: Optional[AlgorithmMetadata] = None,
+) -> None:
+    """Register an algorithm in the global algorithm registry."""
+    algorithm_registry.register(name, factory, metadata)
+
+
+def get_algorithm_factory(name: str) -> Callable[..., Any]:
+    """Retrieve the factory callable for a registered algorithm from the global registry."""
+    return algorithm_registry.get_factory(name)
+
+
+def get_algorithm_metadata(name: str) -> AlgorithmMetadata:
+    """Retrieve metadata for a registered algorithm from the global registry."""
+    return algorithm_registry.get_metadata(name)
+
+
+def list_algorithms() -> list[str]:
+    """List names of all registered algorithms in the global registry."""
+    return algorithm_registry.list_algorithms()
+
+
+def list_algorithms_by_kind(kind: AlgorithmKind | str) -> list[str]:
+    """List registered algorithms of a specific kind from the global registry."""
+    return algorithm_registry.list_by_kind(kind)
+
+
+def list_all_algorithm_metadata() -> dict[str, AlgorithmMetadata]:
+    """Return a mapping of all registered algorithm names to metadata copies."""
+    return algorithm_registry.list_all_metadata()
+
+
+def reset_algorithm_defaults() -> None:
+    """Reset the global algorithm registry to default built-in algorithms."""
+    algorithm_registry.reset_defaults()
+
+
+__all__ = [
+    "AlgorithmKind",
+    "AlgorithmMetadata",
+    "AlgorithmRegistry",
+    "AlgorithmRegistryError",
+    "RegisteredAlgorithm",
+    "algorithm_registry",
+    "get_algorithm_factory",
+    "get_algorithm_metadata",
+    "list_algorithms",
+    "list_algorithms_by_kind",
+    "list_all_algorithm_metadata",
+    "register_algorithm",
+    "reset_algorithm_defaults",
+]
