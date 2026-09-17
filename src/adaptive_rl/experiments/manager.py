@@ -18,8 +18,10 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
+from pydantic import BaseModel
 import yaml
 
 from adaptive_rl.algorithms import (
@@ -200,6 +202,18 @@ def _get_package_version(package: str) -> str:
         return "not_installed"
 
 
+def _sanitize_path_component(name: str) -> str:
+    """Sanitize a string for safe usage in filesystem directory names.
+
+    Replaces non-alphanumeric, non-hyphen, non-underscore characters with '_',
+    collapses consecutive underscores, and strips leading/trailing periods,
+    slashes, and underscores to prevent directory traversal attacks.
+    """
+    sanitized = re.sub(r"[^a-zA-Z0-9_\-]", "_", str(name).strip())
+    sanitized = re.sub(r"_+", "_", sanitized).strip("._-")
+    return sanitized or "unknown"
+
+
 def _make_experiment_id(config: ExperimentConfig) -> str:
     """Generate a deterministic, filesystem-safe experiment identifier.
 
@@ -221,9 +235,9 @@ def _make_experiment_id(config: ExperimentConfig) -> str:
     serialized = json.dumps(data, sort_keys=True, default=str)
     config_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:8]
 
-    env = config.environment.name.lower().replace(" ", "_")
-    algo = config.algorithm.name.lower().replace(" ", "_")
-    seed = config.seed
+    env = _sanitize_path_component(config.environment.name.lower())
+    algo = _sanitize_path_component(config.algorithm.name.lower())
+    seed = int(config.seed)
     return f"{env}_{algo}_seed{seed}_{config_hash}"
 
 
@@ -234,36 +248,132 @@ def _make_run_id() -> str:
     return f"run_{ts}_{rand}"
 
 
+def _apply_config_override(config: ExperimentConfig, key: str, value: Any) -> None:
+    """Apply an individual configuration override to an ExperimentConfig instance.
+
+    Supports dot-notated paths (e.g. 'training.total_timesteps', 'algorithm.learning_rate',
+    'environment.parameters.width', 'evaluation.eval_episodes') as well as top-level and
+    convenience field names (e.g. 'seed', 'total_timesteps', 'learning_rate').
+    """
+    if "." in key:
+        parts = key.split(".")
+        target: Any = config
+        for part in parts[:-1]:
+            if isinstance(target, BaseModel):
+                if hasattr(target, part):
+                    target = getattr(target, part)
+                else:
+                    raise ValueError(f"Unknown config section '{part}' in override '{key}'")
+            elif isinstance(target, dict):
+                if part not in target:
+                    target[part] = {}
+                target = target[part]
+            else:
+                raise ValueError(f"Cannot traverse into '{type(target).__name__}' for override '{key}'")
+
+        last_part = parts[-1]
+        if isinstance(target, BaseModel):
+            if hasattr(target, last_part):
+                field_info = type(target).model_fields.get(last_part)
+                if field_info is not None and field_info.annotation is not None:
+                    target_type = field_info.annotation
+                    try:
+                        if target_type in (int, float, str, bool) and not isinstance(value, target_type):
+                            value = target_type(value)
+                    except (ValueError, TypeError):
+                        pass
+                setattr(target, last_part, value)
+            else:
+                raise ValueError(f"Unknown field '{last_part}' in override '{key}'")
+        elif isinstance(target, dict):
+            target[last_part] = value
+        else:
+            raise ValueError(f"Cannot set field on '{type(target).__name__}' for override '{key}'")
+    else:
+        # Top-level or convenience aliases
+        if hasattr(config, key):
+            field_info = type(config).model_fields.get(key)
+            if field_info is not None and field_info.annotation is not None:
+                target_type = field_info.annotation
+                try:
+                    if target_type in (int, float, str, bool) and not isinstance(value, target_type):
+                        value = target_type(value)
+                except (ValueError, TypeError):
+                    pass
+            setattr(config, key, value)
+        elif hasattr(config.training, key):
+            setattr(config.training, key, value)
+        elif hasattr(config.algorithm, key):
+            setattr(config.algorithm, key, value)
+        elif hasattr(config.environment, key):
+            setattr(config.environment, key, value)
+        elif hasattr(config.evaluation, key):
+            setattr(config.evaluation, key, value)
+        else:
+            raise ValueError(f"Unknown configuration override key: '{key}'")
+
+
+def _apply_overrides(config: ExperimentConfig, overrides: Dict[str, Any]) -> ExperimentConfig:
+    """Apply all overrides to a deep copy of config, returning the modified effective config."""
+    effective = config.model_copy(deep=True)
+    for k, v in overrides.items():
+        _apply_config_override(effective, k, v)
+    return effective
+
+
 def _resolve_planner_policy(factory: Any, env: Any, kwargs: Optional[Dict[str, Any]] = None) -> Any:
     """Resolve a PlannerPolicy adapter for the given planner factory and environment."""
     from adaptive_rl.planning.base import PlannerPolicy
 
     params = dict(kwargs or {})
+    unwrapped_env = getattr(env, "unwrapped", env)
 
-    # If the factory itself is a PlannerPolicy subclass
+    # 1. If factory itself is a PlannerPolicy subclass
     if isinstance(factory, type) and issubclass(factory, PlannerPolicy):
         return factory(env=env, **params)
 
+    # 2. If factory is an instance that already implements PlannerPolicy or predict()
+    if isinstance(factory, PlannerPolicy) or (not isinstance(factory, type) and hasattr(factory, "predict")):
+        return factory
+
     factory_name = getattr(factory, "__name__", str(factory))
 
-    # A* Planner policy adapter
-    if hasattr(factory, "from_gridworld") or factory_name == "AStarPlanner":
-        from adaptive_rl.planning.astar import AStarPlannerPolicy
+    # 3. If factory or instance provides a policy conversion method
+    if hasattr(factory, "as_policy"):
+        return factory.as_policy(env=env, **params)
+    if hasattr(factory, "to_policy"):
+        return factory.to_policy(env=env, **params)
 
-        planner = factory(**params) if params else None
+    # 4. A* Planner policy adapter
+    if hasattr(factory, "from_gridworld") or factory_name == "AStarPlanner":
+        from adaptive_rl.planning.astar import AStarPlanner, AStarPlannerPolicy
+
+        planner = None
+        if isinstance(factory, type) and issubclass(factory, AStarPlanner):
+            if hasattr(factory, "from_gridworld") and hasattr(unwrapped_env, "obstacles"):
+                planner = factory.from_gridworld(unwrapped_env)
+        if planner is None and params:
+            planner = factory(**params)
         return AStarPlannerPolicy(planner=planner, env=env)
 
-    # RRT / RRT* Planner policy adapter
+    # 5. RRT / RRT* Planner policy adapter
     if hasattr(factory, "from_navigation_env") or "RRT" in factory_name:
-        from adaptive_rl.planning.rrt import RRTPlannerPolicy
+        from adaptive_rl.planning.rrt import RRTPlanner, RRTPlannerPolicy, RRTStarPlanner
 
-        planner = factory(**params) if params else None
+        planner = None
+        if isinstance(factory, type) and issubclass(factory, (RRTPlanner, RRTStarPlanner)):
+            if hasattr(factory, "from_navigation_env") and hasattr(unwrapped_env, "bounds"):
+                planner = factory.from_navigation_env(unwrapped_env)
+        if planner is None and params:
+            planner = factory(**params)
         return RRTPlannerPolicy(planner=planner, env=env)
 
-    # Generic planner: check if it already provides predict
-    planner = factory(**params)
+    # 6. Generic planner instance/factory
+    planner = factory(**params) if isinstance(factory, type) else factory
     if hasattr(planner, "predict"):
         return planner
+    if hasattr(planner, "as_policy"):
+        return planner.as_policy(env=env)
 
     raise ValueError(f"No policy adapter found for planner '{factory_name}'")
 
@@ -377,15 +487,8 @@ class ExperimentManager:
         if seed_override is not None:
             overrides["seed"] = seed_override
 
-        # Deep copy to ensure source_config is never mutated
-        effective_config = source_config.model_copy(deep=True)
-        if "training.total_timesteps" in overrides:
-            effective_config.training.total_timesteps = overrides["training.total_timesteps"]
-        if "seed" in overrides:
-            effective_config.seed = overrides["seed"]
-
         return self.run(
-            config=effective_config,
+            config=source_config,
             config_path=config_p,
             overrides=overrides,
             source_config=source_config,
@@ -401,7 +504,7 @@ class ExperimentManager:
         """Run a complete experiment from an ExperimentConfig.
 
         Args:
-            config: Effective experiment configuration.
+            config: Initial experiment configuration.
             config_path: Optional original config file path (for manifest).
             overrides: Optional dictionary of runtime overrides applied.
             source_config: Optional source configuration before overrides.
@@ -409,21 +512,64 @@ class ExperimentManager:
         Returns:
             ExperimentResult containing all metadata, metrics, and artifacts.
         """
-        # Ensure working with an independent copy
-        effective_config = config.model_copy(deep=True)
+        # Ensure working with an independent copy for source_config
         if source_config is None:
-            source_config = effective_config.model_copy(deep=True)
+            source_config = config.model_copy(deep=True)
 
         overrides_dict = dict(overrides or {})
-        experiment_id = _make_experiment_id(effective_config)
 
-        # Atomic and race-safe run directory creation
+        # Apply all overrides to produce the authoritative effective_config
+        try:
+            effective_config = _apply_overrides(config, overrides_dict)
+        except Exception as exc:
+            exp_id = f"failed_override_{uuid.uuid4().hex[:8]}"
+            run_id = _make_run_id()
+            err_dir = self.base_output_dir / exp_id / run_id
+            err_dir.mkdir(parents=True, exist_ok=True)
+            manifest = ExperimentManifest(
+                experiment_id=exp_id,
+                run_id=run_id,
+                created_at=datetime.now(timezone.utc).isoformat(),
+                algorithm=getattr(getattr(config, "algorithm", None), "name", "unknown"),
+                environment=getattr(getattr(config, "environment", None), "name", "unknown"),
+                seed=getattr(config, "seed", -1),
+                config_path=str(config_path or ""),
+                source_config=source_config.model_dump(mode="json") if isinstance(source_config, ExperimentConfig) else dict(source_config),
+                overrides=overrides_dict,
+                effective_config={},
+                training_timesteps=None,
+                git_commit=None,
+                git_error=None,
+                python_version=sys.version,
+                platform_info=f"{platform.system()} {platform.release()} {platform.machine()}",
+                package_versions={},
+                evaluation_status="failed",
+                notes=f"Configuration override failed: {exc}",
+            )
+            manifest.save(err_dir / "manifest.json")
+            return ExperimentResult(
+                experiment_id=exp_id,
+                run_id=run_id,
+                output_dir=err_dir,
+                manifest=manifest,
+                success=False,
+                error_message=f"Configuration override failed: {exc}",
+            )
+
+        experiment_id = _make_experiment_id(effective_config)
+        base_resolved = self.base_output_dir.resolve()
+
+        # Atomic and race-safe run directory creation with path manipulation guards
         max_attempts = 10
         output_dir: Optional[Path] = None
         run_id = ""
         for attempt in range(max_attempts):
             run_id = _make_run_id()
-            candidate_dir = self.base_output_dir / experiment_id / run_id
+            candidate_dir = (self.base_output_dir / experiment_id / run_id).resolve()
+            if not candidate_dir.is_relative_to(base_resolved):
+                raise ValueError(
+                    f"Path traversal detected: '{candidate_dir}' escapes base directory '{base_resolved}'."
+                )
             try:
                 candidate_dir.mkdir(parents=True, exist_ok=False)
                 output_dir = candidate_dir
@@ -481,8 +627,9 @@ class ExperimentManager:
                 "pydantic": _get_package_version("pydantic"),
             },
         )
-        manifest.artifact_paths["config"] = str(effective_config_path)
-        manifest.artifact_paths["source_config"] = str(source_config_path)
+        # Store relative artifact paths for complete filesystem portability
+        manifest.artifact_paths["config"] = "config.yaml"
+        manifest.artifact_paths["source_config"] = "source_config.yaml"
 
         # Algorithm resolution strictly via AlgorithmRegistry (PR #82)
         algo_name = effective_config.algorithm.name.strip().lower()
@@ -556,7 +703,11 @@ class ExperimentManager:
             training_result = trainer.fit()
 
             model_path = training_result.final_model_path
-            manifest.artifact_paths["model"] = str(model_path)
+            if model_path is not None and Path(model_path).exists():
+                try:
+                    manifest.artifact_paths["model"] = Path(model_path).relative_to(output_dir).as_posix()
+                except ValueError:
+                    manifest.artifact_paths["model"] = Path(model_path).name
             manifest.training_timesteps = training_result.total_timesteps
 
             # Evaluation
@@ -581,20 +732,26 @@ class ExperimentManager:
             metrics_path = output_dir / "metrics.json"
             with open(metrics_path, "w", encoding="utf-8") as f:
                 json.dump(metrics, f, indent=2, default=str)
-            manifest.artifact_paths["metrics"] = str(metrics_path)
+            manifest.artifact_paths["metrics"] = "metrics.json"
 
             # Save CSV
             csv_path = output_dir / "metrics.csv"
             self._save_metrics_csv(metrics, csv_path)
-            manifest.artifact_paths["metrics_csv"] = str(csv_path)
+            manifest.artifact_paths["metrics_csv"] = "metrics.csv"
 
             # Full evaluation report
             eval_path = output_dir / "evaluation.json"
             evaluator.save_report(eval_metrics, eval_path)
-            manifest.artifact_paths["evaluation"] = str(eval_path)
+            manifest.artifact_paths["evaluation"] = "evaluation.json"
 
             env.close()
 
+        except KeyboardInterrupt:
+            manifest.evaluation_status = "interrupted"
+            manifest.notes = "Execution interrupted by user (KeyboardInterrupt)."
+            manifest_path = output_dir / "manifest.json"
+            manifest.save(manifest_path)
+            raise
         except Exception as exc:
             success = False
             error_msg = str(exc)
@@ -654,20 +811,26 @@ class ExperimentManager:
             metrics_path = output_dir / "metrics.json"
             with open(metrics_path, "w", encoding="utf-8") as f:
                 json.dump(metrics, f, indent=2, default=str)
-            manifest.artifact_paths["metrics"] = str(metrics_path)
+            manifest.artifact_paths["metrics"] = "metrics.json"
 
             # Save CSV
             csv_path = output_dir / "metrics.csv"
             self._save_metrics_csv(metrics, csv_path)
-            manifest.artifact_paths["metrics_csv"] = str(csv_path)
+            manifest.artifact_paths["metrics_csv"] = "metrics.csv"
 
             # Full evaluation report
             eval_path = output_dir / "evaluation.json"
             evaluator.save_report(eval_metrics, eval_path)
-            manifest.artifact_paths["evaluation"] = str(eval_path)
+            manifest.artifact_paths["evaluation"] = "evaluation.json"
 
             env.close()
 
+        except KeyboardInterrupt:
+            manifest.evaluation_status = "interrupted"
+            manifest.notes = "Execution interrupted by user (KeyboardInterrupt)."
+            manifest_path = output_dir / "manifest.json"
+            manifest.save(manifest_path)
+            raise
         except Exception as exc:
             success = False
             error_msg = str(exc)
@@ -809,6 +972,21 @@ class ExperimentManager:
         metrics_path_str = manifest_data.get("artifact_paths", {}).get("metrics")
         if metrics_path_str:
             metrics_path = Path(metrics_path_str)
+            if not metrics_path.is_absolute():
+                run_dir = (
+                    self.base_output_dir
+                    / manifest_data.get("experiment_id", "")
+                    / manifest_data.get("run_id", "")
+                )
+                metrics_path = run_dir / metrics_path
+            elif not metrics_path.exists():
+                run_dir = (
+                    self.base_output_dir
+                    / manifest_data.get("experiment_id", "")
+                    / manifest_data.get("run_id", "")
+                )
+                metrics_path = run_dir / metrics_path.name
+
             if metrics_path.exists():
                 try:
                     with open(metrics_path, encoding="utf-8") as f:

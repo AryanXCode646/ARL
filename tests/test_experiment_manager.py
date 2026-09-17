@@ -90,6 +90,23 @@ class TestExperimentIDGeneration:
         config2.training.total_timesteps = 50000
         assert _make_experiment_id(config1) != _make_experiment_id(config2)
 
+    def test_path_manipulation_defense(self) -> None:
+        """Malicious environment or algorithm names with directory traversal components are sanitized."""
+        config = _make_minimal_config()
+        config.environment.name = "../../etc/passwd"
+        config.algorithm.name = "../malicious/algo"
+        exp_id = _make_experiment_id(config)
+        assert ".." not in exp_id
+        assert "/" not in exp_id
+        assert "\\" not in exp_id
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ExperimentManager(base_output_dir=Path(tmpdir))
+            # Environment doesn't exist, will fail during algorithm/env setup,
+            # but the output directory created must be strictly inside tmpdir
+            res = manager.run(config=config)
+            assert res.output_dir.is_relative_to(Path(tmpdir).resolve())
+
 
 # ---------------------------------------------------------------------------
 # Run uniqueness & Concurrency
@@ -193,6 +210,40 @@ evaluation:
 
             manager.run(config=config, overrides={"seed": 100})
             assert config.seed == original_seed
+
+    def test_all_advertised_overrides_modify_effective_config(self) -> None:
+        """Every advertised override actually modifies effective_config."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ExperimentManager(base_output_dir=Path(tmpdir))
+            config = _make_minimal_config(algo="astar", env="gridworld", seed=42)
+            overrides = {
+                "training.total_timesteps": 500,
+                "seed": 99,
+                "algorithm.learning_rate": 0.001,
+                "environment.max_steps": 25,
+                "evaluation.eval_episodes": 3,
+            }
+            res = manager.run(config=config, overrides=overrides)
+            assert res.success
+            assert res.manifest.overrides == overrides
+            assert res.manifest.effective_config["training"]["total_timesteps"] == 500
+            assert res.manifest.effective_config["seed"] == 99
+            assert res.manifest.effective_config["algorithm"]["learning_rate"] == 0.001
+            assert res.manifest.effective_config["environment"]["max_steps"] == 25
+            assert res.manifest.effective_config["evaluation"]["eval_episodes"] == 3
+            # Source config preserved
+            assert res.manifest.source_config["seed"] == 42
+            assert res.manifest.source_config["training"]["total_timesteps"] == 1
+
+    def test_invalid_override_fails_cleanly(self) -> None:
+        """Invalid or unknown override keys produce clean failures rather than false manifests."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ExperimentManager(base_output_dir=Path(tmpdir))
+            config = _make_minimal_config()
+            res = manager.run(config=config, overrides={"unknown.nonexistent.key": "val"})
+            assert not res.success
+            assert res.manifest.evaluation_status == "failed"
+            assert "Configuration override failed" in res.manifest.notes
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +360,106 @@ class TestExperimentExecution:
             assert (result.output_dir / "metrics.json").exists()
             assert (result.output_dir / "manifest.json").exists()
             assert result.manifest.training_timesteps is not None
+
+    def test_run_rl_sac_experiment(self) -> None:
+        """ExperimentManager runs real SAC training and evaluation end-to-end on continuous navigation."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ExperimentManager(base_output_dir=Path(tmpdir))
+            config = ExperimentConfig(
+                name="sac_test",
+                seed=42,
+                algorithm=AlgorithmConfig(
+                    name="sac",
+                    learning_rate=3e-4,
+                    gamma=0.99,
+                    batch_size=32,
+                    parameters={"buffer_size": 1000, "learning_starts": 10},
+                ),
+                environment=EnvironmentConfig(name="navigation", max_steps=15),
+                training=TrainingConfig(total_timesteps=20, checkpoint_freq=0, log_interval=10),
+                evaluation=EvaluationConfig(eval_episodes=2, deterministic=True),
+            )
+
+            result = manager.run(config=config)
+            assert result.success, f"SAC experiment failed: {result.error_message}"
+            assert "model" in result.manifest.artifact_paths
+            model_rel = result.manifest.artifact_paths["model"]
+            assert (result.output_dir / model_rel).exists()
+            assert (result.output_dir / "metrics.json").exists()
+            assert result.manifest.artifact_paths["metrics"] == "metrics.json"
+
+    def test_artifact_paths_are_portable_relative_paths(self) -> None:
+        """All manifest artifact paths are relative strings, ensuring cross-machine portability."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ExperimentManager(base_output_dir=Path(tmpdir))
+            config = _make_minimal_config(algo="astar", env="gridworld")
+            res = manager.run(config=config)
+            assert res.success
+
+            for name, path_str in res.manifest.artifact_paths.items():
+                p = Path(path_str)
+                assert not p.is_absolute(), f"Artifact '{name}' has absolute path: {path_str}"
+                # Must resolve relative to output_dir
+                assert (res.output_dir / p).exists(), f"Artifact '{name}' does not exist at {res.output_dir / p}"
+
+
+# ---------------------------------------------------------------------------
+# Failure & Interruption Modes
+# ---------------------------------------------------------------------------
+
+
+class TestFailureAndInterruptionModes:
+    """Tests proving failure, crash, and interruption behaviors are faithfully recorded."""
+
+    def test_rl_training_failure_records_failed_manifest(self) -> None:
+        """RL training crash saves failure manifest and returns unsuccessful ExperimentResult."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ExperimentManager(base_output_dir=Path(tmpdir))
+            config = _make_minimal_config(algo="ppo", env="gridworld")
+
+            with patch("adaptive_rl.training.get_trainer") as mock_trainer_getter:
+                mock_trainer = mock_trainer_getter.return_value
+                mock_trainer.fit.side_effect = RuntimeError("Simulated training crash: CUDA out of memory")
+
+                res = manager.run(config=config)
+                assert not res.success
+                assert "Simulated training crash" in res.error_message
+                assert (res.output_dir / "manifest.json").exists()
+                assert res.manifest.evaluation_status == "failed"
+                assert "Simulated training crash" in res.manifest.notes
+
+    def test_planner_execution_failure_records_failed_manifest(self) -> None:
+        """Planner execution crash saves failure manifest and returns unsuccessful ExperimentResult."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ExperimentManager(base_output_dir=Path(tmpdir))
+            config = _make_minimal_config(algo="astar", env="gridworld")
+
+            with patch("adaptive_rl.experiments.manager._resolve_planner_policy") as mock_resolve:
+                mock_resolve.side_effect = ValueError("Corrupt planner parameters")
+
+                res = manager.run(config=config)
+                assert not res.success
+                assert "Corrupt planner parameters" in res.error_message
+                assert (res.output_dir / "manifest.json").exists()
+                assert res.manifest.evaluation_status == "failed"
+
+    def test_keyboard_interrupt_preserves_interrupted_manifest(self) -> None:
+        """KeyboardInterrupt marks manifest as interrupted on disk before re-raising."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ExperimentManager(base_output_dir=Path(tmpdir))
+            config = _make_minimal_config(algo="ppo", env="gridworld")
+
+            with patch("adaptive_rl.training.get_trainer") as mock_trainer_getter:
+                mock_trainer = mock_trainer_getter.return_value
+                mock_trainer.fit.side_effect = KeyboardInterrupt()
+
+                with pytest.raises(KeyboardInterrupt):
+                    manager.run(config=config)
+
+            # Check that manifest was saved with 'interrupted' status
+            experiments = manager.list_experiments()
+            assert len(experiments) == 1
+            assert experiments[0]["evaluation_status"] == "interrupted"
 
 
 # ---------------------------------------------------------------------------
