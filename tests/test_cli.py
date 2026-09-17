@@ -18,6 +18,7 @@ def test_cli_help() -> None:
     assert "AdaptiveRL" in result.output
     assert "config" in result.output
     assert "env" in result.output
+    assert "curriculum" in result.output
     assert "train" in result.output
     assert "evaluate" in result.output
 
@@ -27,7 +28,7 @@ def test_cli_version() -> None:
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
     assert "AdaptiveRL" in result.output
-    assert "Phase 6" in result.output
+    assert "Phase 7" in result.output
 
 
 def test_cli_info() -> None:
@@ -41,6 +42,7 @@ def test_cli_info() -> None:
     assert "Phase 4" in result.output
     assert "Phase 5" in result.output
     assert "Phase 6" in result.output
+    assert "Phase 7" in result.output
 
 
 def test_cli_config_validate_success() -> None:

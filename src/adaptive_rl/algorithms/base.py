@@ -16,7 +16,7 @@ class BaseAlgorithm(ABC):
     """
 
     @abstractmethod
-    def train(self, total_timesteps: int) -> None:
+    def train(self, total_timesteps: int, callback: Any = None) -> None:
         """Train the algorithm for the specified number of timesteps."""
         pass
 
