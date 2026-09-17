@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
-# Import lightweight metadata module eagerly (no circular deps)
 from adaptive_rl.experiments.metadata import (
     EpisodeRecord,
     ExperimentMetadata,
     save_episodes_csv,
 )
+from adaptive_rl.experiments.manager import ExperimentManager, ExperimentManifest, ExperimentResult
 from adaptive_rl.experiments.runner import BaseExperimentRunner
 
 __all__ = [
     "BaseExperimentRunner",
     "EpisodeRecord",
     "ExperimentMetadata",
+    "ExperimentManager",
+    "ExperimentManifest",
+    "ExperimentResult",
     "GeneralizationExperimentRunner",
     "save_episodes_csv",
 ]
