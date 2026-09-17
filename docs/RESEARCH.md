@@ -178,16 +178,28 @@ be presented as scientific conclusions.
 
 ### 6.2 Metrics Reported
 
-| Metric | Unit | Source |
-|:-------|:-----|:-------|
-| `success_rate` | fraction [0, 1] | Episode info `success` flag |
-| `collision_rate` | fraction [0, 1] | Episode info `collision` flag |
-| `mean_reward` | reward units | Cumulative per-episode reward |
-| `std_reward` | reward units | Standard deviation over episodes |
-| `mean_episode_length` | steps | Steps per episode |
-| `mean_path_length` | steps | A* path length (steps, not reward) |
-| `mean_planning_time` | seconds | Wall-clock per-episode planning time |
-| `generalization_gap` | fraction | train_success − test_success |
+| Metric | Unit | Source | Aggregation Definition |
+|:-------|:-----|:-------|:-----------------------|
+| `success_rate` | fraction [0, 1] | Episode termination info | Fraction of episodes successfully completing task objective without failure |
+| `collision_rate` | fraction [0, 1] | Episode info `collision` | Fraction of episodes ending in obstacle collision |
+| `mean_reward` | reward units | Environment step reward | Cumulative per-episode reward return |
+| `std_reward` | reward units | Environment step reward | Standard deviation over evaluation episodes |
+| `mean_episode_length` | steps | Episode length | Steps elapsed per episode |
+| `mean_path_length` | steps | Planner trajectory | Geometric path length (discrete steps or continuous units) |
+| `mean_planning_time` | seconds | Wall-clock timer | Wall-clock per-instance planning time |
+| `generalization_gap` | fraction | Evaluation metrics | Difference between train and test distribution success rates |
+| `mean_queue_length` | vehicles | Traffic approach queues | Mean of per-timestep total queue lengths pooled across all evaluation timesteps |
+| `mean_max_wait_time` | steps | Traffic queued vehicles | Mean across evaluation episodes of the per-episode maximum vehicle wait time |
+| `mean_wait_time` | steps | Traffic queued vehicles | Mean of per-timestep mean vehicle wait times pooled across all evaluation timesteps |
+| `mean_total_departures` | vehicles | Traffic green departures | Mean cumulative vehicle departures per episode across all evaluation episodes |
+| `total_departures` | vehicles | Traffic green departures | Total vehicle departures summed across all evaluation episodes |
+| `cumulative_delay` | vehicle-steps | Traffic queued vehicles | Mean cumulative vehicle delay per episode across all evaluation episodes |
+| `overflow_rate` | fraction [0, 1] | Traffic intersection | Fraction of evaluation episodes experiencing at least one queue overflow |
+
+#### 6.2.1 Traffic Intersection Success Contract
+For the `TrafficSignalEnv` benchmark, success is strictly an episode-level outcome evaluated at termination:
+$$\text{Success} = (\text{Total Queue at Completion} \le \text{Threshold}) \land (\neg \text{Had Overflow}) \land (\neg \text{Early Terminated})$$
+Any episode that experienced queue overflow at any point during its duration is irrevocably classified as failed, regardless of subsequent queue clearance.
 
 ### 6.3 Honest Language
 

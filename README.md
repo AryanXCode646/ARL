@@ -566,7 +566,52 @@ adaptive-rl generalization --config configs/generalization_navigation.yaml --tra
 
 ---
 
-## 15. Running Tests
+## 15. Implementation Status & Scientific Claim Classification
+
+To maintain the highest standards of research integrity, every capability in AdaptiveRL is explicitly classified into one of four empirical verification tiers:
+
+| Component / Capability | Category | Status | Verification Details |
+|:-----------------------|:---------|:-------|:---------------------|
+| `GridWorldEnv` (discrete 2D) | Environment | **Implemented & Tested** | Comprehensive Gym checkers, collision & goal contracts (`test_gridworld.py`) |
+| `ContinuousNavigation2DEnv` | Environment | **Implemented & Tested** | Continuous dynamics, ray-casting LiDAR, obstacle boundary tests (`test_navigation.py`) |
+| `TrafficSignalEnv` | Environment | **Implemented & Tested** | Poisson arrivals, queue overflow prevention, multi-objective rewards (`test_traffic.py`) |
+| `Drone3DEnv` | Environment | **Implemented & Tested** | 3D quadrotor acceleration model, spherical LiDAR, goal distance rewards (`test_drone.py`) |
+| `DisturbedDrone3DEnv` | Environment | **Implemented & Tested** | Ornstein-Uhlenbeck gusts, altitude shear, battery SoC depletion (`test_drone_disturbances.py`) |
+| PPO Policy Adapter | Algorithm | **Implemented & Tested** | Integration with SB3 PPO, discrete/continuous spaces, checkpointing (`test_ppo.py`) |
+| SAC Policy Adapter | Algorithm | **Implemented & Tested** | Continuous control on navigation and drone environments (`test_planners.py`) |
+| A* Search Planner | Algorithm | **Implemented & Tested** | Admissible Manhattan/Euclidean heuristics, deterministic path finding (`test_planners.py`) |
+| RRT* Motion Planner | Algorithm | **Implemented & Tested** | Continuous 2D sampling, steer function, local tree rewiring (`test_planners.py`) |
+| `AlgorithmRegistry` | Architecture | **Implemented & Tested** | Authoritative algorithm registration, type metadata, introspection (`test_algorithm_registry.py`) |
+| `ExperimentManager` | Orchestration | **Implemented & Tested** | Execution orchestration, effective config persistence, artifact emission (`test_experiment_manager.py`) |
+| Standardized Metrics | Metrics | **Implemented & Tested** | Null vs zero separation, JSON/CSV round-trip, traffic aggregation (`test_standardized_metrics.py`) |
+| Seeding Protocol | Reproducibility | **Implemented & Tested** | Deterministic seed derivation, seed=0 preservation, manifest audit (`test_evaluation_seeding.py`) |
+| Disjoint Generalization | Benchmark | **Implemented & Tested** | Zero train/test seed overlap assertion, generalization gap calculation (`test_generalization.py`) |
+| Long-Horizon Convergence (>100k steps) | Research | **Not yet validated** | Training loops are functional; systematic scaling benchmarks require compute allocations |
+| Formal Asymptotic Optimality of RRT* | Algorithm | **Not yet validated** | Current implementation uses a fixed connection radius approximation; not shrinking radius |
+
+---
+
+## 16. Provenance Metadata vs. Bitwise Reproducibility
+
+AdaptiveRL draws a fundamental methodological distinction between **execution provenance tracking** and **bitwise floating-point reproducibility**:
+
+1. **Provenance Tracking (Guaranteed)**:
+   - Every experiment run captures an immutable `manifest.json` recording:
+     - Exact Git commit SHA, active branch name, and uncommitted dirty working-tree status.
+     - Python interpreter version, operating system, kernel, and CPU architecture.
+     - Exact pinned installed package versions (`gymnasium`, `torch`, `stable-baselines3`, `pydantic`).
+     - Source YAML configuration and effective merged runtime overrides.
+     - Base random seeds and per-episode evaluation seed sequences.
+   - This ensures complete research transparency, enabling external researchers to inspect the exact configuration and codebase state of every trial.
+
+2. **Bitwise Reproducibility (Caveats & Scoping)**:
+   - **Deterministic Components**: Classical planners (A*) and procedural environment generation (GridWorld, Navigation obstacle placement) are **bitwise deterministic** given identical seeds.
+   - **Non-Bitwise Components**: Neural network training using PyTorch (PPO, SAC) is **not guaranteed to be bitwise identical** across different hardware architectures (e.g. CPU vs GPU, different CUDA compute capabilities) or different BLAS/MKL thread pool reductions due to non-associative floating-point summation.
+   - **Research Standard**: To address stochastic variance, AdaptiveRL enforces **multi-seed benchmarking** (`adaptive-rl benchmark --seeds ...`), reporting mean, standard deviation, and range distributions rather than claiming single-seed bitwise equivalence.
+
+---
+
+## 17. Running Tests
 
 Execute the automated test suite with `pytest`:
 ```bash
@@ -579,13 +624,13 @@ pytest --cov=adaptive_rl tests/
 
 ---
 
-## 16. Contributing
+## 18. Contributing
 
 We welcome contributions! Please review [CONTRIBUTING.md](CONTRIBUTING.md) for branch naming conventions, quality gates, and code formatting standards before opening a pull request.
 
 ---
 
-## 17. License
+## 19. License
 
 This project is licensed under the [MIT License](LICENSE).
 
