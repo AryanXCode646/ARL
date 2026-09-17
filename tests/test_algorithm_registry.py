@@ -20,7 +20,6 @@ from adaptive_rl.algorithms.registry import (
     get_algorithm_metadata,
     list_algorithms,
     list_algorithms_by_kind,
-    list_all_algorithm_metadata,
     reset_algorithm_defaults,
 )
 from adaptive_rl.algorithms.sac import SACAlgorithm
@@ -206,7 +205,9 @@ class TestRegistryDataIntegrity:
 
     def test_invalid_metadata_type_rejected(self) -> None:
         """Non-AlgorithmMetadata objects are rejected during registration."""
-        with pytest.raises(AlgorithmRegistryError, match="must be an instance of AlgorithmMetadata"):
+        with pytest.raises(
+            AlgorithmRegistryError, match="must be an instance of AlgorithmMetadata"
+        ):
             self.registry.register("my_algo", _dummy_factory, metadata={"name": "my_algo"})  # type: ignore
 
 
@@ -223,23 +224,37 @@ class TestListByKind:
 
     def test_list_by_kind_filters_and_sorts(self) -> None:
         """Verify list_by_kind filters by AlgorithmKind and returns sorted names."""
-        self.registry.register("sac", _dummy_factory, AlgorithmMetadata("sac", AlgorithmKind.RL_POLICY))
-        self.registry.register("ppo", _dummy_factory, AlgorithmMetadata("ppo", AlgorithmKind.RL_POLICY))
-        self.registry.register("rrt_star", _dummy_factory, AlgorithmMetadata("rrt_star", AlgorithmKind.PLANNER))
-        self.registry.register("astar", _dummy_factory, AlgorithmMetadata("astar", AlgorithmKind.PLANNER))
+        self.registry.register(
+            "sac", _dummy_factory, AlgorithmMetadata("sac", AlgorithmKind.RL_POLICY)
+        )
+        self.registry.register(
+            "ppo", _dummy_factory, AlgorithmMetadata("ppo", AlgorithmKind.RL_POLICY)
+        )
+        self.registry.register(
+            "rrt_star", _dummy_factory, AlgorithmMetadata("rrt_star", AlgorithmKind.PLANNER)
+        )
+        self.registry.register(
+            "astar", _dummy_factory, AlgorithmMetadata("astar", AlgorithmKind.PLANNER)
+        )
 
         rl_algos = self.registry.list_by_kind(AlgorithmKind.RL_POLICY)
         planners = self.registry.list_by_kind(AlgorithmKind.PLANNER)
 
         assert rl_algos == ["ppo", "sac"]
         assert planners == ["astar", "rrt_star"]
-        assert all(self.registry.get_metadata(name).kind == AlgorithmKind.RL_POLICY for name in rl_algos)
-        assert all(self.registry.get_metadata(name).kind == AlgorithmKind.PLANNER for name in planners)
+        assert all(
+            self.registry.get_metadata(name).kind == AlgorithmKind.RL_POLICY for name in rl_algos
+        )
+        assert all(
+            self.registry.get_metadata(name).kind == AlgorithmKind.PLANNER for name in planners
+        )
 
     def test_list_by_kind_empty_or_unmatched(self) -> None:
         """Empty registry or non-matching/invalid kind returns an empty list."""
         assert self.registry.list_by_kind(AlgorithmKind.RL_POLICY) == []
-        self.registry.register("ppo", _dummy_factory, AlgorithmMetadata("ppo", AlgorithmKind.RL_POLICY))
+        self.registry.register(
+            "ppo", _dummy_factory, AlgorithmMetadata("ppo", AlgorithmKind.RL_POLICY)
+        )
         assert self.registry.list_by_kind(AlgorithmKind.PLANNER) == []
         assert self.registry.list_by_kind("invalid_kind") == []  # type: ignore
 
@@ -324,7 +339,9 @@ class TestOptionalAlgorithmHandling:
     def test_safe_import_algorithm_propagates_unexpected_error(self) -> None:
         """_safe_import_algorithm propagates genuine runtime/syntax errors within installed modules."""
         with patch("importlib.util.find_spec", return_value=True):
-            with patch("importlib.import_module", side_effect=RuntimeError("Syntax defect inside module")):
+            with patch(
+                "importlib.import_module", side_effect=RuntimeError("Syntax defect inside module")
+            ):
                 with pytest.raises(RuntimeError, match="Syntax defect inside module"):
                     _safe_import_algorithm("adaptive_rl.planning.astar", "AStarPlanner")
 
@@ -350,7 +367,9 @@ class TestOptionalAlgorithmHandling:
         """When an installed planner module raises an import error, default registration propagates it."""
         isolated_reg = AlgorithmRegistry()
         with patch("importlib.util.find_spec", return_value=True):
-            with patch("importlib.import_module", side_effect=ImportError("broken dependency in planner")):
+            with patch(
+                "importlib.import_module", side_effect=ImportError("broken dependency in planner")
+            ):
                 with pytest.raises(ImportError, match="broken dependency in planner"):
                     _register_defaults(isolated_reg)
 

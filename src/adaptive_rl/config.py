@@ -13,6 +13,12 @@ from typing import Any, Dict, Literal, Optional, Set
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from adaptive_rl.algorithms.registry import (
+    AlgorithmKind,
+    AlgorithmRegistryError,
+    algorithm_registry,
+)
+
 # Canonical set of classical planner algorithm names
 PLANNER_ALGORITHMS: Set[str] = {"astar", "rrt_star", "rrt*"}
 
@@ -172,7 +178,17 @@ class AlgorithmConfig(BaseModel):
             if raw_name == "rrt*":
                 raw_name = "rrt_star"
             data["name"] = raw_name
-            is_planner = raw_name in PLANNER_ALGORITHMS
+            # Query authoritative AlgorithmRegistry
+            try:
+                metadata = algorithm_registry.get_metadata(raw_name)
+            except AlgorithmRegistryError:
+                registered = ", ".join(algorithm_registry.list_algorithms())
+                raise ValueError(
+                    f"Unknown algorithm '{raw_name}'. Algorithms must be registered in the AlgorithmRegistry. "
+                    f"Available registered algorithms: {registered}"
+                )
+
+            is_planner = metadata.kind == AlgorithmKind.PLANNER
 
             rl_fields = ["learning_rate", "gamma", "batch_size"]
             present_rl = [f for f in rl_fields if f in data and data[f] is not None]
@@ -207,7 +223,10 @@ class AlgorithmConfig(BaseModel):
     @property
     def is_planner(self) -> bool:
         """Return True if this configuration is for a classical planner."""
-        return self.name.lower() in PLANNER_ALGORITHMS
+        try:
+            return algorithm_registry.get_metadata(self.name.lower()).kind == AlgorithmKind.PLANNER
+        except Exception:
+            return self.name.lower() in PLANNER_ALGORITHMS
 
 
 class EnvironmentConfig(BaseModel):
@@ -345,8 +364,7 @@ class ExperimentConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_algorithm_training_compatibility(self) -> ExperimentConfig:
-        algo_name = self.algorithm.name.lower()
-        is_planner = algo_name in PLANNER_ALGORITHMS
+        is_planner = self.algorithm.is_planner
         if not is_planner and self.training is None:
             raise ValueError(
                 f"Training configuration ('training') is required for RL algorithm '{self.algorithm.name}'. "
@@ -357,6 +375,37 @@ class ExperimentConfig(BaseModel):
                 f"Classical planner '{self.algorithm.name}' does not support a 'training' configuration block. "
                 "Planners execute direct path search without training. Remove the 'training' section."
             )
+
+        algo_name = self.algorithm.name.lower()
+        env_name = self.environment.name.lower()
+
+        # Incompatible algorithm and environment combinations:
+        if algo_name == "astar" and env_name not in ("gridworld", "dummy_test_env"):
+            raise ValueError(
+                f"Planner 'astar' is incompatible with environment '{self.environment.name}'. "
+                "A* requires a discrete grid environment such as 'gridworld'."
+            )
+        if algo_name == "rrt_star" and env_name not in (
+            "navigation",
+            "navigation_2d",
+            "continuous_navigation",
+        ):
+            raise ValueError(
+                f"Planner 'rrt_star' is incompatible with environment '{self.environment.name}'. "
+                "RRT* requires a continuous 2D navigation environment such as 'navigation'."
+            )
+        if algo_name == "sac" and env_name in (
+            "gridworld",
+            "traffic",
+            "traffic_signal",
+            "cartpole",
+            "cartpole-v1",
+            "cartpole-v0",
+        ):
+            raise ValueError(
+                f"Algorithm 'sac' requires a continuous action space and cannot run on discrete environment '{self.environment.name}'."
+            )
+
         return self
 
 

@@ -244,7 +244,7 @@ class AlgorithmRegistry:
         """Return sorted list of registered algorithm names."""
         return sorted(self._registry.keys())
 
-    def list_by_kind(self, kind: AlgorithmKind) -> List[str]:
+    def list_by_kind(self, kind: AlgorithmKind | str) -> List[str]:
         """Return sorted list of registered algorithm names matching a kind.
 
         Operates directly on the authoritative registered records.
@@ -276,6 +276,17 @@ class AlgorithmRegistry:
             True if trainable, False for deterministic planners.
         """
         return self.get_metadata(name).trainable
+
+    def is_planner(self, name: str) -> bool:
+        """Return True if the named algorithm is a classical planner.
+
+        Args:
+            name: Algorithm identifier.
+
+        Returns:
+            True if planner, False otherwise.
+        """
+        return self.get_metadata(name).kind == AlgorithmKind.PLANNER
 
     def clear(self) -> None:
         """Clear all registered algorithms (primarily for test isolation)."""
@@ -311,7 +322,9 @@ def _safe_import_algorithm(
             spec = None
         if spec is not None:
             mod = importlib.import_module(mod_path)
-            return getattr(mod, class_name)
+            attr = getattr(mod, class_name, None)
+            if isinstance(attr, type):
+                return attr
     return None
 
 
@@ -446,6 +459,7 @@ def _register_defaults(target_registry: Optional[AlgorithmRegistry] = None) -> N
 
 
 _register_defaults()
+
 
 # Public convenience API (mirrors environment registry pattern)
 def register_algorithm(
