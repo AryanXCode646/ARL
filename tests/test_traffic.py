@@ -540,3 +540,104 @@ def test_traffic_scenario_d_known_wait_values_and_aggregation() -> None:
     assert info2["max_wait"] == 2
     assert info2["mean_wait"] == 0.5  # (2 + 0 + 0 + 0) / 4 approaches
     env.close()
+
+
+def test_traffic_intermediate_controlled_state_not_episode_success() -> None:
+    """TEST A: Intermediate controlled state does NOT equal final episode success."""
+    env = TrafficSignalEnv(
+        arrival_rates=(0.0, 0.0, 0.0, 0.0),
+        departure_rate=2,
+        max_queue=20,
+        max_steps=5,
+        success_queue_threshold=10,
+    )
+    obs, info = env.reset(seed=42)
+    assert info["step_controlled"] is True
+    assert info["step_success"] is True
+    assert info["episode_success"] is False
+    assert info["success"] is False
+
+    # Take step 1 of 5 (intermediate step)
+    obs, reward, terminated, truncated, step_info = env.step(0)
+    assert terminated is False
+    assert truncated is False
+    assert step_info["step_controlled"] is True
+    assert step_info["step_success"] is True
+    # Crucial: Intermediate non-terminal step must NOT report episode success
+    assert step_info["episode_success"] is False
+    assert step_info["success"] is False
+    env.close()
+
+
+def test_traffic_overflow_always_produces_failure() -> None:
+    """TEST B: Overflow always produces episode_success=False and success=False."""
+    env = TrafficSignalEnv(
+        arrival_rates=(10.0, 10.0, 10.0, 10.0),
+        departure_rate=1,
+        max_queue=3,
+        max_steps=20,
+        terminate_on_overflow=True,
+    )
+    env.reset(seed=123)
+    _, _, terminated, truncated, info = env.step(0)
+    assert terminated is True
+    assert truncated is False
+    assert info["had_overflow"] is True
+    assert info["episode_success"] is False
+    assert info["success"] is False
+    env.close()
+
+
+def test_traffic_successful_horizon_completion() -> None:
+    """TEST C: Successful horizon completion produces episode_success=True and success=True."""
+    env = TrafficSignalEnv(
+        arrival_rates=(0.1, 0.1, 0.1, 0.1),
+        departure_rate=3,
+        max_queue=25,
+        max_steps=5,
+        success_queue_threshold=10,
+    )
+    env.reset(seed=42)
+    for _ in range(4):
+        _, _, term, trunc, step_info = env.step(0)
+        assert not term and not trunc
+        assert step_info["episode_success"] is False
+        assert step_info["success"] is False
+    _, _, term, trunc, final_info = env.step(0)
+    assert term is False
+    assert trunc is True
+    assert final_info["had_overflow"] is False
+    assert final_info["step_controlled"] is True
+    assert final_info["episode_success"] is True
+    assert final_info["success"] is True
+    env.close()
+
+
+def test_traffic_later_failure_cannot_be_masked_by_earlier_favorable_state() -> None:
+    """TEST E: A later failure cannot be masked by an earlier favorable state."""
+    env = TrafficSignalEnv(
+        arrival_rates=(0.0, 0.0, 0.0, 0.0),
+        departure_rate=1,
+        max_queue=5,
+        max_steps=10,
+        terminate_on_overflow=True,
+    )
+    # Start with empty queue (favorable)
+    env.reset(seed=42)
+    # Step 1: empty queue, favorable
+    _, _, term1, trunc1, info1 = env.step(0)
+    assert info1["step_controlled"] is True
+    assert info1["step_success"] is True
+    assert info1["episode_success"] is False
+    assert info1["success"] is False
+
+    # Now dynamically inject vehicle flood causing overflow on step 2
+    env.intersection.approaches[Approach.NORTH].queue.extend([0] * 10)
+    _, _, term2, trunc2, info2 = env.step(0)
+    assert term2 is True
+    assert info2["had_overflow"] is True
+    assert info2["step_controlled"] is False
+    assert info2["step_success"] is False
+    assert info2["episode_success"] is False
+    assert info2["success"] is False
+    env.close()
