@@ -8,7 +8,6 @@ registration integrity and implementation availability.
 
 from __future__ import annotations
 
-import copy
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
@@ -52,6 +51,19 @@ class AlgorithmMetadata:
     hyperparameters: Dict[str, Any] = field(default_factory=dict)
     tags: List[str] = field(default_factory=list)
 
+    def copy(self) -> AlgorithmMetadata:
+        """Create a defensive copy of this metadata record."""
+        return AlgorithmMetadata(
+            name=self.name,
+            kind=self.kind,
+            description=self.description,
+            action_space=self.action_space,
+            trainable=self.trainable,
+            class_name=self.class_name,
+            hyperparameters=dict(self.hyperparameters),
+            tags=list(self.tags),
+        )
+
 
 @dataclass(frozen=True)
 class RegisteredAlgorithm:
@@ -67,12 +79,6 @@ class RegisteredAlgorithm:
 
 class AlgorithmRegistryError(Exception):
     """Exception raised for algorithm registry operation failures."""
-
-    pass
-
-
-class AlgorithmUnavailableError(AlgorithmRegistryError):
-    """Exception raised when an algorithm is registered/recognized but unavailable in the environment."""
 
     pass
 
@@ -141,7 +147,7 @@ class AlgorithmRegistry:
                     f"Algorithm name mismatch: registration key '{clean}' does not match "
                     f"metadata name '{metadata.name}'."
                 )
-            meta_record = copy.deepcopy(metadata)
+            meta_record = metadata.copy()
         else:
             meta_record = AlgorithmMetadata(
                 name=clean,
@@ -194,7 +200,7 @@ class AlgorithmRegistry:
             raise AlgorithmRegistryError(
                 f"Unknown algorithm '{clean}'. Available registered algorithms: {available}"
             )
-        return copy.deepcopy(self._registry[clean].metadata)
+        return self._registry[clean].metadata.copy()
 
     def list_algorithms(self) -> List[str]:
         """Return sorted list of registered algorithm names."""
@@ -220,7 +226,7 @@ class AlgorithmRegistry:
 
     def list_all_metadata(self) -> Dict[str, AlgorithmMetadata]:
         """Return mapping of all registered algorithm names to metadata defensive copies."""
-        return {name: copy.deepcopy(entry.metadata) for name, entry in sorted(self._registry.items())}
+        return {name: entry.metadata.copy() for name, entry in sorted(self._registry.items())}
 
     def is_trainable(self, name: str) -> bool:
         """Return True if the named algorithm is a trainable RL policy.
@@ -237,14 +243,6 @@ class AlgorithmRegistry:
         """Clear all registered algorithms (primarily for test isolation)."""
         self._registry.clear()
 
-    def __contains__(self, name: str) -> bool:
-        """Check if an algorithm name is registered."""
-        return name.strip().lower() in self._registry
-
-    def __len__(self) -> int:
-        """Return the number of registered algorithms."""
-        return len(self._registry)
-
 
 def _safe_import_algorithm(
     primary_module: str,
@@ -253,23 +251,7 @@ def _safe_import_algorithm(
 ) -> Optional[type]:
     """Safely import an algorithm or planner class from preferred or fallback modules.
 
-    Distinguishes strictly between:
-    1. The module genuinely does not exist on disk/in environment (returns None).
-    2. The module exists on disk but failed to import due to a syntax error,
-       internal import error, or runtime defect (re-raises the exception so
-       genuine bugs are never hidden).
-
-    Args:
-        primary_module: Preferred module path (e.g. 'adaptive_rl.planners.astar').
-        class_name: Class name to import (e.g. 'AStarPlanner').
-        fallback_module: Secondary module path (e.g. 'adaptive_rl.planning.astar').
-
-    Returns:
-        The imported class, or None if neither module is present in the environment.
-
-    Raises:
-        ImportError: If a module exists on disk but crashes during import.
-        AttributeError: If a module exists on disk but does not define class_name.
+    Returns the imported class, or None if neither module is present in the environment.
     """
     import importlib
     import importlib.util
@@ -281,18 +263,9 @@ def _safe_import_algorithm(
             spec = importlib.util.find_spec(mod_path)
         except (ModuleNotFoundError, ValueError):
             spec = None
-        except Exception as err:
-            raise ImportError(f"Error inspecting module spec for '{mod_path}': {err}") from err
-
         if spec is not None:
-            # Module exists on disk. Any import/runtime failure is a real bug and must NOT be swallowed.
             mod = importlib.import_module(mod_path)
-            if not hasattr(mod, class_name):
-                raise AttributeError(
-                    f"Module '{mod_path}' exists on disk but does not define '{class_name}'."
-                )
             return getattr(mod, class_name)
-
     return None
 
 
@@ -307,7 +280,7 @@ def _register_defaults() -> None:
     from adaptive_rl.algorithms.ppo import PPOAlgorithm
     from adaptive_rl.algorithms.sac import SACAlgorithm
 
-    if "ppo" not in algorithm_registry:
+    if "ppo" not in algorithm_registry.list_algorithms():
         algorithm_registry.register(
             "ppo",
             PPOAlgorithm,
@@ -337,7 +310,7 @@ def _register_defaults() -> None:
             ),
         )
 
-    if "sac" not in algorithm_registry:
+    if "sac" not in algorithm_registry.list_algorithms():
         algorithm_registry.register(
             "sac",
             SACAlgorithm,
@@ -373,7 +346,7 @@ def _register_defaults() -> None:
         "AStarPlanner",
         fallback_module="adaptive_rl.planning.astar",
     )
-    if astar_class is not None and "astar" not in algorithm_registry:
+    if astar_class is not None and "astar" not in algorithm_registry.list_algorithms():
         algorithm_registry.register(
             "astar",
             astar_class,
@@ -397,7 +370,7 @@ def _register_defaults() -> None:
         "RRTStarPlanner",
         fallback_module="adaptive_rl.planning.rrt",
     )
-    if rrt_star_class is not None and "rrt_star" not in algorithm_registry:
+    if rrt_star_class is not None and "rrt_star" not in algorithm_registry.list_algorithms():
         algorithm_registry.register(
             "rrt_star",
             rrt_star_class,
