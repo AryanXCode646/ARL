@@ -34,7 +34,8 @@ AdaptiveRL is developed incrementally across verifiable phases.
 | **Phase 8** | **Traffic Signal Optimization** | **Completed** | Non-spatial 4-way intersection queue & delay optimization, signal transitions, and multi-objective rewards. |
 | **Phase 9** | **Autonomous 3D Drone Navigation** | **Completed** | 3D quadrotor translation kinematics, aerodynamic drag, 16-ray 3D spherical LiDAR, and SAC/PPO continuous control. |
 | **Phase 10** | **Drone Disturbances & Constraints** | **Completed** | Atmospheric wind fields, Ornstein-Uhlenbeck turbulence, battery depletion, dynamic 3D obstacles. |
-| Phase 11-17| Research Baselines & Hardening | *Planned* | Generalization benchmarks, classical planners (A*, RRT*), and CI hardening. |
+| **Phase 11** | **Generalization to Unseen Environments** | **Completed** | Strictly partitioned train/test seed distributions, zero-overlap validation, generalization gap tracking. |
+| Phase 12-17| Research Baselines & Hardening | *Planned* | Classical baselines (A*, RRT*), SAC algorithm registry, experiment manager, and dashboard. |
 
 ---
 
@@ -519,7 +520,32 @@ adaptive-rl train --config configs/drone_disturbed_ppo.yaml
 
 ---
 
-## 14. Running Tests
+## 14. Generalization to Unseen Environments Benchmark
+
+Phase 11 introduces rigorous empirical evaluation protocols to test whether trained reinforcement learning policies generalize to novel, unseen environment topologies or merely overfit to training layouts.
+
+### Key Capabilities:
+1. **Strict Train/Test Partitioning**:
+   - Training environments are strictly constrained using `TrainingDistributionWrapper`, guaranteeing zero exposure to test seeds during optimization.
+   - `GeneralizationDistribution` performs automated programmatic assertions ensuring $|D_{\text{train}} \cap D_{\text{test}}| = 0$.
+2. **Generalization Gap Metrics**:
+   - Quantifies performance degradation: $\Delta_{\text{success}} = S_{\text{train}} - S_{\text{unseen}}$ and $\Delta_{\text{reward}} = R_{\text{train}} - R_{\text{unseen}}$.
+   - Calculates relative success retention percentage ($S_{\text{test}} / S_{\text{train}}$).
+3. **Reproducible Experiment Runner**:
+   - `GeneralizationExperimentRunner` executes end-to-end training and evaluation, persisting structured JSON reports.
+
+### CLI Usage:
+```bash
+# Run generalization benchmark on GridWorld
+adaptive-rl generalization --config configs/generalization_gridworld.yaml
+
+# Run generalization benchmark on Continuous 2D Navigation
+adaptive-rl generalization --config configs/generalization_navigation.yaml --train-count 20 --test-count 20
+```
+
+---
+
+## 15. Running Tests
 
 Execute the automated test suite with `pytest`:
 ```bash
@@ -532,15 +558,16 @@ pytest --cov=adaptive_rl tests/
 
 ---
 
-## 15. Contributing
+## 16. Contributing
 
 We welcome contributions! Please review [CONTRIBUTING.md](CONTRIBUTING.md) for branch naming conventions, quality gates, and code formatting standards before opening a pull request.
 
 ---
 
-## 16. License
+## 17. License
 
 This project is licensed under the [MIT License](LICENSE).
+
 
 
 

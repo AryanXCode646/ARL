@@ -458,4 +458,3 @@ def test_disturbed_drone_curriculum_trainer_pipeline(tmp_path: Path) -> None:
     assert report.total_timesteps == 128
     assert report.final_model_path.exists()
     assert trainer.curriculum.current_stage.stage_id >= 0
-

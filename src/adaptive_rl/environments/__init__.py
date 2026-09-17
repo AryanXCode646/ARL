@@ -18,6 +18,7 @@ from adaptive_rl.environments.registry import (
     register,
     registry,
 )
+from adaptive_rl.environments.seeded_wrapper import TrainingDistributionWrapper
 from adaptive_rl.environments.testing import DummyTestEnv
 from adaptive_rl.environments.traffic.intersection import TrafficSignalEnv
 
@@ -198,6 +199,7 @@ __all__ = [
     "GridWorldEnv",
     "RegistryError",
     "TrafficSignalEnv",
+    "TrainingDistributionWrapper",
     "create_environment",
     "get",
     "get_metadata",
