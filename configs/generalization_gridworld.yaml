@@ -1,0 +1,32 @@
+name: "generalization_gridworld_ppo"
+seed: 42
+
+algorithm:
+  name: "ppo"
+  learning_rate: 0.0003
+  gamma: 0.99
+  batch_size: 64
+  parameters:
+    n_steps: 512
+    clip_range: 0.2
+    ent_coef: 0.01
+
+environment:
+  name: "gridworld"
+  max_steps: 100
+  parameters:
+    width: 6
+    height: 6
+    num_obstacles: 4
+
+training:
+  total_timesteps: 30000
+  checkpoint_freq: 10000
+  log_interval: 10
+
+evaluation:
+  eval_episodes: 20
+  deterministic: true
+
+output_dir: "experiments/results"
+log_dir: "experiments/logs"

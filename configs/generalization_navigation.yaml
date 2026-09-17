@@ -1,0 +1,33 @@
+name: "generalization_navigation_sac"
+seed: 42
+
+algorithm:
+  name: "sac"
+  learning_rate: 0.0003
+  gamma: 0.99
+  batch_size: 64
+  parameters:
+    buffer_size: 20000
+    learning_starts: 500
+    tau: 0.005
+
+environment:
+  name: "navigation"
+  max_steps: 150
+  parameters:
+    arena_width: 20.0
+    arena_height: 20.0
+    num_obstacles: 4
+    obstacle_radius: 1.0
+
+training:
+  total_timesteps: 25000
+  checkpoint_freq: 5000
+  log_interval: 10
+
+evaluation:
+  eval_episodes: 20
+  deterministic: true
+
+output_dir: "experiments/results"
+log_dir: "experiments/logs"

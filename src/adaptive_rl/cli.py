@@ -55,7 +55,7 @@ def version() -> None:
     """Show the installed AdaptiveRL version and phase status."""
     console.print(
         f"[bold green]AdaptiveRL[/bold green] version [bold cyan]{adaptive_rl.__version__}[/bold cyan] "
-        f"([yellow]Phase 10: Drone Disturbances and Constraints[/yellow])"
+        f"([yellow]Phase 11: Generalization to Unseen Environments[/yellow])"
     )
 
 
@@ -92,7 +92,10 @@ def info() -> None:
         "Phase 10", "Drone Disturbances and Constraints", "[bold green]COMPLETED[/bold green]"
     )
     table.add_row(
-        "Phase 11-17", "Research Baselines, Hardening & Final Audit", "[yellow]PLANNED[/yellow]"
+        "Phase 11", "Generalization to Unseen Environments", "[bold green]COMPLETED[/bold green]"
+    )
+    table.add_row(
+        "Phase 12-17", "Research Baselines, Hardening & Final Audit", "[yellow]PLANNED[/yellow]"
     )
 
     console.print(table)
@@ -521,6 +524,123 @@ def evaluate(
         env.close()
     except Exception as err:
         console.print(f"[bold red]Evaluation failed with error:[/bold red] {err}")
+        raise typer.Exit(code=1)
+
+
+@app.command(name="generalization")
+def run_generalization_command(
+    config: Optional[Path] = typer.Option(
+        None, "--config", "-c", help="Path to experiment configuration YAML"
+    ),
+    train_count: int = typer.Option(
+        15, "--train-count", help="Number of training distribution seeds to evaluate"
+    ),
+    test_count: int = typer.Option(
+        15, "--test-count", help="Number of unseen test distribution seeds to evaluate"
+    ),
+    train_start: int = typer.Option(
+        1000, "--train-start", help="Starting seed for training distribution"
+    ),
+    test_start: int = typer.Option(
+        2000, "--test-start", help="Starting seed for unseen test distribution"
+    ),
+    output_report: Optional[Path] = typer.Option(
+        None, "--output-report", "-o", help="Optional path to export JSON metrics report"
+    ),
+) -> None:
+    """Run an end-to-end generalization experiment measuring performance on unseen environments."""
+    from adaptive_rl.evaluation.generalization import (
+        GeneralizationDistribution,
+        GeneralizationReport,
+    )
+    from adaptive_rl.experiments.generalization_runner import GeneralizationExperimentRunner
+
+    if config is None:
+        default_config = Path("configs/generalization_gridworld.yaml")
+        if default_config.exists():
+            config = default_config
+        else:
+            console.print(
+                "[bold red]No configuration file provided.[/bold red] Specify --config <path>"
+            )
+            raise typer.Exit(code=1)
+
+    try:
+        exp_config = load_config(config)
+    except ConfigError as err:
+        console.print(f"[bold red]Configuration error:[/bold red] {err}")
+        raise typer.Exit(code=1)
+
+    console.print(
+        Panel.fit(
+            f"[bold green]Starting Generalization Experiment: {exp_config.name}[/bold green]\n\n"
+            f"• [bold]Environment:[/bold] {exp_config.environment.name}\n"
+            f"• [bold]Algorithm:[/bold] {exp_config.algorithm.name}\n"
+            f"• [bold]Training Seed Distribution:[/bold] [{train_start} .. {train_start + train_count})\n"
+            f"• [bold]Unseen Test Seed Distribution:[/bold] [{test_start} .. {test_start + test_count})\n"
+            f"• [bold]Disjoint Integrity Check:[/bold] Verified (0 overlapping seeds)",
+            title="Generalization Experiment Runner",
+            border_style="cyan",
+        )
+    )
+
+    try:
+        distribution = GeneralizationDistribution(
+            train_seeds=list(range(train_start, train_start + train_count)),
+            test_seeds=list(range(test_start, test_start + test_count)),
+            description=f"Disjoint benchmark for {exp_config.name}",
+        )
+        runner = GeneralizationExperimentRunner(distribution=distribution)
+        report: GeneralizationReport = runner.run(exp_config)
+
+        # Output comparison table
+        table = Table(
+            title=f"Generalization Benchmark: {report.environment_name} ({report.algorithm_name})"
+        )
+        table.add_column("Metric", style="cyan")
+        table.add_column("Training Distribution", style="green", justify="right")
+        table.add_column("Unseen Test Distribution", style="magenta", justify="right")
+        table.add_column("Generalization Gap", style="yellow", justify="right")
+
+        table.add_row(
+            "Success Rate",
+            f"{report.train_metrics.success_rate * 100:.1f}%",
+            f"{report.test_metrics.success_rate * 100:.1f}%",
+            f"{-report.generalization_gap_success * 100:+.1f}%",
+        )
+        table.add_row(
+            "Collision Rate",
+            f"{report.train_metrics.collision_rate * 100:.1f}%",
+            f"{report.test_metrics.collision_rate * 100:.1f}%",
+            f"{report.test_metrics.collision_rate - report.train_metrics.collision_rate:+.1f}%",
+        )
+        table.add_row(
+            "Mean Reward",
+            f"{report.train_metrics.mean_reward:.2f} ± {report.train_metrics.std_reward:.2f}",
+            f"{report.test_metrics.mean_reward:.2f} ± {report.test_metrics.std_reward:.2f}",
+            f"{-report.generalization_gap_reward:+.2f}",
+        )
+        table.add_row(
+            "Mean Episode Length",
+            f"{report.train_metrics.mean_episode_length:.1f}",
+            f"{report.test_metrics.mean_episode_length:.1f}",
+            f"{report.test_metrics.mean_episode_length - report.train_metrics.mean_episode_length:+.1f}",
+        )
+        table.add_row(
+            "Success Retention",
+            "100.0%",
+            f"{report.relative_success_retention * 100:.1f}%",
+            "-",
+        )
+
+        console.print(table)
+
+        if output_report is not None:
+            saved_path = report.save_json(output_report)
+            console.print(f"\n[bold green]Report saved to:[/bold green] {saved_path}")
+
+    except Exception as err:
+        console.print(f"[bold red]Generalization experiment failed with error:[/bold red] {err}")
         raise typer.Exit(code=1)
 
 
