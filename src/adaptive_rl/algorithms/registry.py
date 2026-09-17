@@ -388,10 +388,12 @@ def _register_defaults(target_registry: Optional[AlgorithmRegistry] = None) -> N
 
     # Optional classical planners: resolved strictly via real implementations.
     # Never creates fake/stub classes. If unavailable, they are not registered.
+    # Prefer adaptive_rl.planning.astar (richer implementation with heuristic/allow_diagonal
+    # support) as the canonical source; fall back to adaptive_rl.planners.astar.
     astar_class = _safe_import_algorithm(
-        "adaptive_rl.planners.astar",
+        "adaptive_rl.planning.astar",
         "AStarPlanner",
-        fallback_module="adaptive_rl.planning.astar",
+        fallback_module="adaptive_rl.planners.astar",
     )
     if astar_class is not None and "astar" not in reg.list_algorithms():
         reg.register(
@@ -413,9 +415,9 @@ def _register_defaults(target_registry: Optional[AlgorithmRegistry] = None) -> N
         )
 
     rrt_star_class = _safe_import_algorithm(
-        "adaptive_rl.planners.rrt_star",
+        "adaptive_rl.planning.rrt",
         "RRTStarPlanner",
-        fallback_module="adaptive_rl.planning.rrt",
+        fallback_module="adaptive_rl.planners.rrt_star",
     )
     if rrt_star_class is not None and "rrt_star" not in reg.list_algorithms():
         reg.register(

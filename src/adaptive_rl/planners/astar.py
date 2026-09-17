@@ -51,19 +51,29 @@ class AStarPlanner(BasePlanner):
             print("Path length:", result.path_length)
     """
 
-    def __init__(self, heuristic: str = "manhattan") -> None:
+    def __init__(
+        self,
+        heuristic: str = "manhattan",
+        allow_diagonal: bool = False,
+        seed: Optional[int] = None,
+    ) -> None:
         """Initialize the A* planner.
 
         Args:
-            heuristic: Heuristic function to use. Currently only 'manhattan'
-                is supported (admissible and consistent for 4-connected grids).
+            heuristic: Heuristic function to use ('manhattan', 'euclidean', 'chebyshev').
+            allow_diagonal: If True, permits 8-directional diagonal movement.
+            seed: Optional random seed (accepted for interface uniformity; A* is deterministic).
 
         Raises:
             ValueError: If an unsupported heuristic name is given.
         """
-        if heuristic not in ("manhattan",):
-            raise ValueError(f"Unsupported heuristic '{heuristic}'. Valid options: 'manhattan'.")
+        if heuristic not in ("manhattan", "euclidean", "chebyshev"):
+            raise ValueError(
+                f"Unsupported heuristic '{heuristic}'. Valid options: 'manhattan', 'euclidean', 'chebyshev'."
+            )
         self._heuristic_name = heuristic
+        self.allow_diagonal = allow_diagonal
+        self._seed = seed  # stored for interface uniformity; not used in deterministic search
 
     @property
     def name(self) -> str:

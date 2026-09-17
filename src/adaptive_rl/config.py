@@ -32,6 +32,10 @@ class AStarParametersConfig(BaseModel):
         "manhattan",
         description="Heuristic function to use ('manhattan', 'euclidean', 'chebyshev')",
     )
+    allow_diagonal: bool = Field(
+        False,
+        description="Whether diagonal movements are permitted in the grid",
+    )
     seed: Optional[int] = Field(
         None, description="Optional random seed (accepted for interface uniformity)"
     )
@@ -184,11 +188,11 @@ class AlgorithmConfig(BaseModel):
                 if raw_name == "astar":
                     data["parameters"] = AStarParametersConfig.model_validate(
                         raw_params
-                    ).model_dump(exclude_none=True)
+                    ).model_dump(exclude_none=True, exclude_unset=True)
                 elif raw_name in ("rrt_star", "rrt*"):
                     data["parameters"] = RRTStarParametersConfig.model_validate(
                         raw_params
-                    ).model_dump(exclude_none=True)
+                    ).model_dump(exclude_none=True, exclude_unset=True)
             else:
                 # Supply default RL hyperparameter values if not specified
                 if "learning_rate" not in data:

@@ -34,16 +34,24 @@ from adaptive_rl.experiments.manager import (
 # ---------------------------------------------------------------------------
 
 
+PLANNER_ALGOS = {"astar", "rrt_star", "rrt*"}
+
+
 def _make_minimal_config(
     algo: str = "astar", env: str = "gridworld", seed: int = 42
 ) -> ExperimentConfig:
     """Build a minimal ExperimentConfig for testing."""
+    is_planner = algo in PLANNER_ALGOS
     return ExperimentConfig(
         name=f"{env}_{algo}_test",
         seed=seed,
-        algorithm=AlgorithmConfig(name=algo, learning_rate=3e-4, gamma=0.99, batch_size=64),
+        algorithm=AlgorithmConfig(name=algo)
+        if is_planner
+        else AlgorithmConfig(name=algo, learning_rate=3e-4, gamma=0.99, batch_size=64),
         environment=EnvironmentConfig(name=env, max_steps=10),
-        training=TrainingConfig(total_timesteps=1, checkpoint_freq=0, log_interval=1),
+        training=None
+        if is_planner
+        else TrainingConfig(total_timesteps=1, checkpoint_freq=0, log_interval=1),
         evaluation=EvaluationConfig(eval_episodes=2, deterministic=True),
     )
 
@@ -87,7 +95,7 @@ class TestExperimentIDGeneration:
         """Modifying effective parameters changes the deterministic experiment ID."""
         config1 = _make_minimal_config(seed=42)
         config2 = _make_minimal_config(seed=42)
-        config2.training.total_timesteps = 50000
+        config2.environment.max_steps = 50000
         assert _make_experiment_id(config1) != _make_experiment_id(config2)
 
     def test_path_manipulation_defense(self) -> None:
@@ -161,14 +169,9 @@ class TestConfigProvenanceAndOverrides:
 seed: 42
 algorithm:
   name: "astar"
-  learning_rate: 0.0003
-  gamma: 0.99
-  batch_size: 64
 environment:
   name: "gridworld"
   max_steps: 10
-training:
-  total_timesteps: 10
 evaluation:
   eval_episodes: 2
   deterministic: true
@@ -178,7 +181,6 @@ evaluation:
             manager = ExperimentManager(base_output_dir=tmp_path / "results")
             result = manager.run_from_config(
                 cfg_file,
-                timesteps_override=999,
                 seed_override=77,
             )
 
@@ -186,15 +188,12 @@ evaluation:
             manifest = result.manifest
 
             # Verify source_config preserves original values
-            assert manifest.source_config["training"]["total_timesteps"] == 10
             assert manifest.source_config["seed"] == 42
 
             # Verify overrides are explicitly recorded
-            assert manifest.overrides["training.total_timesteps"] == 999
             assert manifest.overrides["seed"] == 77
 
             # Verify effective_config reflects overrides
-            assert manifest.effective_config["training"]["total_timesteps"] == 999
             assert manifest.effective_config["seed"] == 77
 
             # Verify both config files exist in output
@@ -215,7 +214,7 @@ evaluation:
         """Every advertised override actually modifies effective_config."""
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = ExperimentManager(base_output_dir=Path(tmpdir))
-            config = _make_minimal_config(algo="astar", env="gridworld", seed=42)
+            config = _make_minimal_config(algo="ppo", env="gridworld", seed=42)
             overrides = {
                 "training.total_timesteps": 500,
                 "seed": 99,

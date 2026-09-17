@@ -86,6 +86,7 @@ class ExperimentManifest:
     package_versions: Dict[str, str] = field(default_factory=dict)
     artifact_paths: Dict[str, str] = field(default_factory=dict)
     evaluation_status: str = "pending"
+    evaluation_seeds: List[int] = field(default_factory=list)
     notes: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
@@ -184,12 +185,30 @@ def _get_git_provenance(cwd: Optional[Path] = None) -> Dict[str, Any]:
     return prov
 
 
-def _get_git_commit() -> str:
-    """Return the short git commit hash, or 'unknown' if unavailable (legacy helper)."""
-    prov = _get_git_provenance()
-    if prov["commit"]:
-        return str(prov["commit"])[:7]
-    return "unknown"
+def _get_git_commit(cwd: Optional[Path] = None) -> str:
+    """Return the short git commit hash, or 'unknown' if unavailable.
+
+    Calls ``git rev-parse --short HEAD`` directly via subprocess. Returns
+    the 7-character short hash on success, or 'unknown' if git is unavailable,
+    the working directory is not a repository, or the command times out.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=cwd,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+        return "unknown"
+    except FileNotFoundError:
+        return "unknown"
+    except subprocess.TimeoutExpired:
+        return "unknown"
+    except Exception:
+        return "unknown"
 
 
 def _get_package_version(package: str) -> str:
@@ -350,10 +369,15 @@ def _resolve_planner_policy(factory: Any, env: Any, kwargs: Optional[Dict[str, A
 
         planner = None
         if isinstance(factory, type) and issubclass(factory, AStarPlanner):
-            if hasattr(factory, "from_gridworld") and hasattr(unwrapped_env, "obstacles"):
+            if hasattr(factory, "from_gridworld"):
+                # from_gridworld uses getattr with defaults for missing env attributes
                 planner = factory.from_gridworld(unwrapped_env)
         if planner is None and params:
-            planner = factory(**params)
+            try:
+                planner = factory(**params)
+            except TypeError:
+                # Factory requires more args than params provides; fall back to policy wrapper
+                pass
         return AStarPlannerPolicy(planner=planner, env=env)
 
     # 5. RRT / RRT* Planner policy adapter
@@ -612,7 +636,9 @@ class ExperimentManager:
             source_config=source_dump,
             overrides=overrides_dict,
             effective_config=effective_config.model_dump(mode="json"),
-            training_timesteps=effective_config.training.total_timesteps,
+            training_timesteps=effective_config.training.total_timesteps
+            if effective_config.training is not None
+            else None,
             git_commit=git_prov["commit"],
             git_branch=git_prov["branch"],
             git_dirty=git_prov["dirty"],
@@ -803,6 +829,13 @@ class ExperimentManager:
                 base_seed=config.seed,
             )
 
+            # Record evaluation seeds used for this run
+            from adaptive_rl.evaluation.seeding import generate_evaluation_seeds
+
+            manifest.evaluation_seeds = generate_evaluation_seeds(
+                config.seed, config.evaluation.eval_episodes
+            )
+
             metrics = eval_metrics.model_dump()
             manifest.evaluation_status = "completed"
             manifest.training_timesteps = None
@@ -867,23 +900,30 @@ class ExperimentManager:
 
     @staticmethod
     def _save_metrics_csv(metrics: Dict[str, Any], path: Path) -> None:
-        """Save flat scalar metrics as a single-row CSV file."""
-        scalar_metrics = {
-            k: v
-            for k, v in metrics.items()
-            if isinstance(v, (int, float, str, bool)) and not isinstance(v, bool)
-        }
-        bool_metrics = {k: int(v) for k, v in metrics.items() if isinstance(v, bool)}
-        scalar_metrics.update(bool_metrics)
+        """Save flat scalar metrics as a single-row CSV file.
 
-        if not scalar_metrics:
+        Scalar metrics (int, float, str) are written as-is. Boolean metrics are
+        converted to 0/1. None values are written as empty strings. Non-scalar
+        values (lists, dicts) are excluded from the CSV.
+        """
+        csv_metrics: Dict[str, Any] = {}
+        for k, v in metrics.items():
+            if v is None:
+                csv_metrics[k] = ""
+            elif isinstance(v, bool):
+                csv_metrics[k] = int(v)
+            elif isinstance(v, (int, float, str)):
+                csv_metrics[k] = v
+            # Non-scalar types (list, dict, etc.) are excluded from flat CSV
+
+        if not csv_metrics:
             return
 
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=sorted(scalar_metrics.keys()))
+            writer = csv.DictWriter(f, fieldnames=sorted(csv_metrics.keys()))
             writer.writeheader()
-            writer.writerow({k: scalar_metrics[k] for k in sorted(scalar_metrics.keys())})
+            writer.writerow({k: csv_metrics[k] for k in sorted(csv_metrics.keys())})
 
     # ------------------------------------------------------------------
     # Experiment listing / inspection utilities

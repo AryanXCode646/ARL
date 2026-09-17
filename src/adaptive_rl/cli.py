@@ -1018,6 +1018,92 @@ def benchmark(
 
 
 # ---------------------------------------------------------------------------
+# Benchmark-planners command
+# ---------------------------------------------------------------------------
+
+
+@app.command(name="benchmark-planners")
+def benchmark_planners(
+    config: Path = typer.Option(
+        ..., "--config", "-c", help="Path to the YAML experiment configuration"
+    ),
+    planner: str = typer.Option(
+        "astar", "--planner", "-p", help="Classical planner to benchmark ('astar' or 'rrt_star')"
+    ),
+    episodes: int = typer.Option(
+        10, "--episodes", "-n", help="Number of evaluation episodes per seed"
+    ),
+    start_seed: int = typer.Option(
+        42, "--start-seed", "-s", help="Starting seed; subsequent seeds are start_seed+i"
+    ),
+    output_report: Optional[Path] = typer.Option(
+        None, "--output-report", "-o", help="Path to write JSON benchmark report"
+    ),
+) -> None:
+    """Benchmark a classical planner head-to-head against the RL baseline from a config.
+
+    Runs the specified classical planner for the given number of episodes and
+    reports success rate, collision rate, path length, and planning time.
+
+    Example:
+        adaptive-rl benchmark-planners --config configs/gridworld_astar.yaml --planner astar --episodes 10
+        adaptive-rl benchmark-planners --config configs/gridworld_ppo.yaml --planner astar --output-report report.json
+    """
+    from adaptive_rl.planning.benchmark import ClassicalBenchmarkRunner
+
+    try:
+        exp_config = load_config(config)
+    except ConfigError as exc:
+        console.print(f"[bold red]Configuration error:[/bold red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    env_name = exp_config.environment.name
+    env_params = dict(exp_config.environment.parameters or {})
+
+    console.print(
+        Panel.fit(
+            f"[bold green]Classical vs RL Benchmark[/bold green]\n\n"
+            f"• [bold]Planner:[/bold] {planner}\n"
+            f"• [bold]Environment:[/bold] {env_name}\n"
+            f"• [bold]Episodes:[/bold] {episodes}\n"
+            f"• [bold]Start Seed:[/bold] {start_seed}",
+            title="Planner Benchmark",
+            border_style="cyan",
+        )
+    )
+
+    runner = ClassicalBenchmarkRunner(
+        environment_name=env_name,
+        planner_type=planner,
+        environment_parameters=env_params,
+    )
+
+    seeds = list(range(start_seed, start_seed + episodes))
+    report = runner.run_benchmark(
+        seeds=seeds,
+        experiment_name=f"{env_name}_{planner}_benchmark",
+        rl_algorithm=None,
+    )
+
+    table = Table(title="Classical vs RL Benchmark Results")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green", justify="right")
+
+    table.add_row("Success Rate", f"{report.planner_success_rate:.2%}")
+    table.add_row("Collision Rate", f"{report.planner_collision_rate:.2%}")
+    table.add_row("Mean Path Length", f"{report.planner_mean_path_length:.2f}")
+    table.add_row("Mean Steps", f"{report.planner_mean_steps:.1f}")
+    table.add_row("Mean Planning Time (ms)", f"{report.planner_mean_planning_time_ms:.2f}")
+    table.add_row("Total Episodes", str(report.total_episodes))
+
+    console.print(table)
+
+    if output_report:
+        saved = report.save_json(output_report)
+        console.print(f"\n[bold green]Report saved to:[/bold green] {saved}")
+
+
+# ---------------------------------------------------------------------------
 # Dashboard command
 # ---------------------------------------------------------------------------
 

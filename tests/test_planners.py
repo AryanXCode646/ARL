@@ -170,7 +170,7 @@ class TestAStarPlanner:
     def test_invalid_heuristic_raises(self) -> None:
         """Unsupported heuristic name raises ValueError at construction."""
         with pytest.raises(ValueError, match="Unsupported heuristic"):
-            AStarPlanner(heuristic="euclidean")
+            AStarPlanner(heuristic="unsupported")
 
     def test_planning_time_recorded(self) -> None:
         """Planning time is positive after a search."""
