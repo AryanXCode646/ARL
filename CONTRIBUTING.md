@@ -19,7 +19,7 @@ AdaptiveRL is developed under strict quality and architectural rules:
 
 ### 2.1 Fork & Clone
 ```bash
-# Clone your fork or the repository
+# Clone your fork or the canonical upstream repository
 git clone https://github.com/ashishsinghbora/ARL.git
 cd ARL
 ```
