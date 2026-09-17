@@ -55,7 +55,7 @@ def version() -> None:
     """Show the installed AdaptiveRL version and phase status."""
     console.print(
         f"[bold green]AdaptiveRL[/bold green] version [bold cyan]{adaptive_rl.__version__}[/bold cyan] "
-        f"([yellow]Phase 11: Generalization to Unseen Environments[/yellow])"
+        f"([yellow]Phase 12: Classical Motion Planning Baselines & Benchmarking[/yellow])"
     )
 
 
@@ -95,7 +95,12 @@ def info() -> None:
         "Phase 11", "Generalization to Unseen Environments", "[bold green]COMPLETED[/bold green]"
     )
     table.add_row(
-        "Phase 12-17", "Research Baselines, Hardening & Final Audit", "[yellow]PLANNED[/yellow]"
+        "Phase 12",
+        "Classical Motion Planning Baselines & Benchmarking",
+        "[bold green]COMPLETED[/bold green]",
+    )
+    table.add_row(
+        "Phase 13-17", "Research Baselines, Hardening & Final Audit", "[yellow]PLANNED[/yellow]"
     )
 
     console.print(table)
@@ -644,5 +649,152 @@ def run_generalization_command(
         raise typer.Exit(code=1)
 
 
+@app.command(name="benchmark-planners")
+def run_benchmark_planners_command(
+    config: Optional[Path] = typer.Option(
+        None, "--config", "-c", help="Path to experiment configuration YAML"
+    ),
+    planner: str = typer.Option(
+        "auto", "--planner", "-p", help="Planner algorithm: 'auto', 'astar', 'rrt', 'rrt_star'"
+    ),
+    episodes: int = typer.Option(
+        10, "--episodes", "-n", help="Number of benchmark evaluation seeds"
+    ),
+    start_seed: int = typer.Option(
+        100, "--start-seed", help="Starting procedural generation seed"
+    ),
+    model_path: Optional[Path] = typer.Option(
+        None, "--model-path", "-m", help="Optional path to trained SB3 model weights (.zip)"
+    ),
+    output_report: Optional[Path] = typer.Option(
+        None, "--output-report", "-o", help="Optional path to export JSON metrics report"
+    ),
+) -> None:
+    """Run an empirical head-to-head benchmark comparing classical motion planners against RL policies."""
+    from adaptive_rl.planning.benchmark import (
+        ClassicalBenchmarkReport,
+        ClassicalBenchmarkRunner,
+    )
+
+    env_name = "gridworld"
+    env_params: Dict[str, Any] = {}
+    algo_instance: Optional[Any] = None
+
+    if config is not None:
+        try:
+            exp_config = load_config(config)
+            env_name = exp_config.environment.name
+            env_params = dict(exp_config.environment.parameters)
+            if "max_steps" not in env_params:
+                env_params["max_steps"] = exp_config.environment.max_steps
+        except ConfigError as err:
+            console.print(f"[bold red]Configuration error:[/bold red] {err}")
+            raise typer.Exit(code=1)
+    else:
+        # Check default config
+        default_cfg = Path("configs/benchmark_planners_gridworld.yaml")
+        if default_cfg.exists():
+            exp_config = load_config(default_cfg)
+            env_name = exp_config.environment.name
+            env_params = dict(exp_config.environment.parameters)
+
+    # Load RL model if provided
+    if model_path is not None and model_path.exists():
+        try:
+            from adaptive_rl.algorithms.ppo import PPOAlgorithm
+            from adaptive_rl.algorithms.sac import SACAlgorithm
+
+            if "sac" in str(model_path).lower():
+                algo_instance = SACAlgorithm(policy="MlpPolicy")
+            else:
+                algo_instance = PPOAlgorithm(policy="MlpPolicy")
+            algo_instance.load(model_path)
+        except Exception as load_err:
+            console.print(f"[yellow]Warning: Could not load RL model: {load_err}[/yellow]")
+            algo_instance = None
+
+    seeds = list(range(start_seed, start_seed + episodes))
+
+    console.print(
+        Panel.fit(
+            f"[bold green]Starting Classical Motion Planning Benchmark[/bold green]\n\n"
+            f"• [bold]Environment:[/bold] {env_name}\n"
+            f"• [bold]Planner Engine:[/bold] {planner}\n"
+            f"• [bold]RL Baseline:[/bold] {'Loaded Model' if algo_instance else 'None (Planner Standalone)'}\n"
+            f"• [bold]Evaluation Seeds:[/bold] [{start_seed} .. {start_seed + episodes}) ({episodes} episodes)",
+            title="Classical Planning Benchmark Runner",
+            border_style="cyan",
+        )
+    )
+
+    try:
+        runner = ClassicalBenchmarkRunner(
+            environment_name=env_name,
+            planner_type=planner,
+            environment_parameters=env_params,
+        )
+        report: ClassicalBenchmarkReport = runner.run_benchmark(
+            seeds=seeds,
+            rl_algorithm=algo_instance,
+            experiment_name=f"benchmark_{env_name}_{planner}",
+        )
+
+        table = Table(
+            title=f"Classical vs RL Benchmark: {report.environment_name} ({report.planner_name} vs {report.rl_algorithm_name})"
+        )
+        table.add_column("Metric", style="cyan")
+        table.add_column(f"Classical Planner ({report.planner_name})", style="green", justify="right")
+        table.add_column(f"RL Policy ({report.rl_algorithm_name})", style="magenta", justify="right")
+        table.add_column("Comparison Ratio", style="yellow", justify="right")
+
+        table.add_row(
+            "Success Rate",
+            f"{report.planner_success_rate * 100:.1f}%",
+            f"{report.rl_success_rate * 100:.1f}%",
+            f"{report.rl_success_rate - report.planner_success_rate:+.1f}%",
+        )
+        table.add_row(
+            "Collision Rate",
+            f"{report.planner_collision_rate * 100:.1f}%",
+            f"{report.rl_collision_rate * 100:.1f}%",
+            f"{report.rl_collision_rate - report.planner_collision_rate:+.1f}%",
+        )
+        table.add_row(
+            "Mean Reward",
+            f"{report.planner_mean_reward:.2f}",
+            f"{report.rl_mean_reward:.2f}",
+            f"{report.rl_mean_reward - report.planner_mean_reward:+.2f}",
+        )
+        table.add_row(
+            "Mean Steps",
+            f"{report.planner_mean_steps:.1f}",
+            f"{report.rl_mean_steps:.1f}",
+            f"{report.rl_mean_steps - report.planner_mean_steps:+.1f}",
+        )
+        table.add_row(
+            "Mean Path Length",
+            f"{report.planner_mean_path_length:.2f}",
+            f"{report.rl_mean_path_length:.2f}",
+            f"{report.mean_path_length_ratio:.2f}x",
+        )
+        table.add_row(
+            "Compute Latency",
+            f"{report.planner_mean_planning_time_ms:.2f} ms (plan)",
+            f"{report.rl_mean_step_time_ms:.2f} ms (step)",
+            "-",
+        )
+
+        console.print(table)
+
+        if output_report is not None:
+            saved_path = report.save_json(output_report)
+            console.print(f"\n[bold green]Benchmark report saved to:[/bold green] {saved_path}")
+
+    except Exception as err:
+        console.print(f"[bold red]Planning benchmark failed with error:[/bold red] {err}")
+        raise typer.Exit(code=1)
+
+
 if __name__ == "__main__":
     app()
+
