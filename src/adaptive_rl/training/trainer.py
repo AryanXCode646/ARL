@@ -319,7 +319,12 @@ def get_trainer(
     env: Optional[gym.Env] = None,
     callbacks: Optional[List[BaseCallback]] = None,
 ) -> BaseTrainer:
-    """Create appropriate trainer instance based on algorithm in config."""
+    """Create appropriate trainer instance based on algorithm and curriculum in config."""
+    if config.curriculum is not None and config.curriculum.enabled:
+        from adaptive_rl.curriculum.trainer import CurriculumTrainer
+
+        return CurriculumTrainer(config=config, env=env, callbacks=callbacks)
+
     algo_name = config.algorithm.name.lower()
     if algo_name == "ppo":
         return PPOTrainer(config=config, env=env, callbacks=callbacks)

@@ -7,7 +7,7 @@ management for environments, algorithms, training, and evaluation.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -69,6 +69,45 @@ class EvaluationConfig(BaseModel):
     )
 
 
+class CurriculumStageConfig(BaseModel):
+    """Configuration for a single curriculum progression stage."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., description="Descriptive stage name")
+    environment_parameters: Dict[str, Any] = Field(
+        default_factory=dict, description="Environment parameter overrides for this stage"
+    )
+    success_threshold: Optional[float] = Field(
+        None, ge=0.0, le=1.0, description="Minimum success rate to advance to next stage"
+    )
+    mean_reward_threshold: Optional[float] = Field(
+        None, description="Minimum mean reward to advance to next stage"
+    )
+    max_timesteps: Optional[int] = Field(
+        None, gt=0, description="Max timesteps in stage before automatic advance"
+    )
+    min_episodes: int = Field(10, ge=1, description="Minimum episodes before advancing")
+    description: str = Field("", description="Optional stage description")
+
+
+class CurriculumConfig(BaseModel):
+    """Configuration for curriculum learning staged progression."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(True, description="Whether curriculum learning is enabled")
+    preset: Optional[str] = Field(
+        None, description="Optional preset name ('navigation' or 'gridworld')"
+    )
+    stages: list[CurriculumStageConfig] = Field(
+        default_factory=list, description="Explicit sequence of curriculum stages"
+    )
+    eval_window: int = Field(
+        20, gt=0, description="Rolling window size of recent episodes used for advancement"
+    )
+
+
 class ExperimentConfig(BaseModel):
     """Top-level configuration schema for an AdaptiveRL experiment."""
 
@@ -81,6 +120,9 @@ class ExperimentConfig(BaseModel):
     training: TrainingConfig
     evaluation: EvaluationConfig = Field(
         default_factory=lambda: EvaluationConfig(eval_episodes=10, deterministic=True)
+    )
+    curriculum: Optional[CurriculumConfig] = Field(
+        None, description="Optional curriculum learning configuration"
     )
     output_dir: Path = Field(
         default_factory=lambda: Path("experiments/results"),

@@ -30,14 +30,10 @@ AdaptiveRL is developed incrementally across verifiable phases.
 | **Phase 4** | **PPO Training Engine** | **Completed** | Stable-Baselines3 PPO adapter, metric callbacks, checkpointing, and end-to-end trainer. |
 | **Phase 5** | **Evaluation Engine & Standard Metrics** | **Completed** | Multi-episode benchmarking, success/collision tracking, scenario testing, and JSON reports. |
 | **Phase 6** | **Continuous 2D Navigation** | **Completed** | Continuous velocity control, 8-ray LiDAR rangefinders, circular obstacles, and SAC continuous actor-critic. |
-| Phase 7 | Curriculum Learning | *Upcoming* | Staged obstacle density and disturbance curriculum. |
-| Phase 8 | Traffic Signal Environment | *Planned* | Non-spatial queue management demonstrating framework multi-domain versatility. |
+| **Phase 7** | **Curriculum Learning** | **Completed** | Staged obstacle density and disturbance curriculum, automated graduation criteria, and CurriculumTrainer. |
+| Phase 8 | Traffic Signal Environment | *Upcoming* | Non-spatial queue management demonstrating framework multi-domain versatility. |
 | Phase 9-10| Autonomous 3D Drone Environment | *Planned* | 3D kinematics, wind disturbances, dynamic obstacles, and energy constraints. |
 | Phase 11-17| Research Baselines & Hardening | *Planned* | Generalization benchmarks, classical planners (A*, RRT*), and CI hardening. |
-
-
-> [!NOTE]
-> In accordance with Phase 1 constraints, concrete reinforcement learning training and concrete environment physics are scheduled for subsequent phases. Current APIs represent honest structural interfaces.
 
 ---
 
@@ -49,6 +45,8 @@ adaptive-rl/
 │   ├── ppo.yaml
 │   ├── sac.yaml
 │   ├── navigation.yaml
+│   ├── curriculum_navigation.yaml
+│   ├── curriculum_gridworld.yaml
 │   └── drone.yaml
 ├── docs/                      # Architectural specifications and research design
 │   ├── ARCHITECTURE.md
@@ -59,8 +57,9 @@ adaptive-rl/
 │   └── logs/
 ├── src/
 │   └── adaptive_rl/           # Core platform package
-│       ├── algorithms/        # Base algorithm interfaces and future SB3 adapters
-│       ├── environments/      # Gymnasium contracts, registry, and factories
+│       ├── algorithms/        # Base algorithm interfaces and SB3 adapters (PPO, SAC)
+│       ├── environments/      # Gymnasium contracts, registry, and environments
+│       ├── curriculum/        # Staged curriculum managers, wrappers, and callbacks
 │       ├── rewards/           # Modular reward function base interfaces
 │       ├── training/          # Trainers, callbacks, and checkpoint managers
 │       ├── evaluation/        # Benchmark evaluators, metrics, and scenarios
@@ -277,7 +276,51 @@ env.close()
 
 ---
 
-## 10. Running Tests
+## 10. Curriculum Learning Engine
+
+AdaptiveRL features a flexible, automated curriculum learning subsystem that gradually escalates task complexity based on empirical agent proficiency.
+
+* **Curriculum Stages:** Encapsulate environmental complexity parameters (e.g. obstacle density, arena dimensions), advancement criteria (rolling success rate $\ge$ threshold, mean reward $\ge$ threshold), and maximum timestep timeouts.
+* **Curriculum State Machine:** `Curriculum` tracks the active milestone, evaluates graduation rules over a rolling window, records stage transition events with timestamps, and exports JSON audit reports.
+* **Dynamic Gymnasium Wrapper:** `CurriculumEnvWrapper` intercepts resets and steps, injecting the active stage's configuration parameters directly into the environment without re-instantiation.
+* **Callback Coordination:** `CurriculumCallback` bridges training optimization loops and curriculum state, triggering seamless transitions when graduation thresholds are achieved.
+* **Built-in Presets:**
+  * **Navigation (4 tiers):** `Clear Corridor` (0 obstacles) $\rightarrow$ `Sparse Clutter` (2 obstacles) $\rightarrow$ `Standard Density` (5 obstacles) $\rightarrow$ `Dense Hazard Field` (8 obstacles).
+  * **GridWorld (4 tiers):** `Open Grid` (4x4, 0 obstacles) $\rightarrow$ `Light Clutter` (5x5, 2 obstacles) $\rightarrow$ `Standard Grid` (6x5, 4 obstacles) $\rightarrow$ `Dense Labyrinth` (7x7, 6 obstacles).
+
+### Curriculum via CLI
+
+```bash
+# List available curriculum presets
+adaptive-rl curriculum list
+
+# Inspect stages, progression thresholds, and parameters of a preset
+adaptive-rl curriculum inspect navigation
+
+# Train agent with automated curriculum progression
+adaptive-rl train --config configs/curriculum_navigation.yaml
+```
+
+### Curriculum via Python API
+
+```python
+from adaptive_rl.config import load_config
+from adaptive_rl.curriculum import CurriculumTrainer
+
+# 1. Load experiment configuration with curriculum block enabled
+config = load_config("configs/curriculum_navigation.yaml")
+
+# 2. Train agent with automated curriculum transitions
+trainer = CurriculumTrainer(config=config)
+result = trainer.fit()
+
+print(f"Trained {result.total_timesteps} steps across {result.episodes_completed} episodes.")
+print(f"Final model saved to: {result.final_model_path}")
+```
+
+---
+
+## 11. Running Tests
 
 Execute the automated test suite with `pytest`:
 ```bash
@@ -290,15 +333,16 @@ pytest --cov=adaptive_rl tests/
 
 ---
 
-## 11. Contributing
+## 12. Contributing
 
 We welcome contributions! Please review [CONTRIBUTING.md](CONTRIBUTING.md) for branch naming conventions, quality gates, and code formatting standards before opening a pull request.
 
 ---
 
-## 12. License
+## 13. License
 
 This project is licensed under the [MIT License](LICENSE).
+
 
 
 

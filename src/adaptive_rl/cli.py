@@ -39,6 +39,13 @@ env_app = typer.Typer(
 )
 app.add_typer(env_app, name="env")
 
+curriculum_app = typer.Typer(
+    name="curriculum",
+    help="Curriculum learning inspection and preset management commands.",
+    no_args_is_help=True,
+)
+app.add_typer(curriculum_app, name="curriculum")
+
 console = Console()
 
 
@@ -47,7 +54,7 @@ def version() -> None:
     """Show the installed AdaptiveRL version and phase status."""
     console.print(
         f"[bold green]AdaptiveRL[/bold green] version [bold cyan]{adaptive_rl.__version__}[/bold cyan] "
-        f"([yellow]Phase 6: Continuous 2D Navigation[/yellow])"
+        f"([yellow]Phase 7: Curriculum Learning[/yellow])"
     )
 
 
@@ -79,7 +86,9 @@ def info() -> None:
     table.add_row(
         "Phase 6", "Continuous 2D Navigation", "[bold green]COMPLETED[/bold green]"
     )
-    table.add_row("Phase 7", "Curriculum Learning", "[yellow]PLANNED[/yellow]")
+    table.add_row(
+        "Phase 7", "Curriculum Learning", "[bold green]COMPLETED[/bold green]"
+    )
     table.add_row("Phase 8", "Traffic Signal Environment", "[yellow]PLANNED[/yellow]")
     table.add_row(
         "Phase 9", "Mathematical Drone Navigation Environment", "[yellow]PLANNED[/yellow]"
@@ -101,6 +110,11 @@ def validate_config(
     """Validate an experiment YAML configuration file against the schema."""
     try:
         cfg = load_config(path)
+        curr_info = ""
+        if cfg.curriculum is not None and cfg.curriculum.enabled:
+            curr_preset = cfg.curriculum.preset or f"{len(cfg.curriculum.stages)} custom stages"
+            curr_info = f"\n• [bold]Curriculum:[/bold] Enabled ({curr_preset}, Window: {cfg.curriculum.eval_window})"
+
         console.print(
             Panel.fit(
                 f"[bold green]✓ Configuration is valid![/bold green]\n\n"
@@ -109,7 +123,8 @@ def validate_config(
                 f"• [bold]Algorithm:[/bold] {cfg.algorithm.name} (LR: {cfg.algorithm.learning_rate}, Gamma: {cfg.algorithm.gamma})\n"
                 f"• [bold]Environment:[/bold] {cfg.environment.name} (Max steps: {cfg.environment.max_steps})\n"
                 f"• [bold]Training:[/bold] {cfg.training.total_timesteps:,} steps (Checkpoint freq: {cfg.training.checkpoint_freq})\n"
-                f"• [bold]Evaluation:[/bold] {cfg.evaluation.eval_episodes} episodes",
+                f"• [bold]Evaluation:[/bold] {cfg.evaluation.eval_episodes} episodes"
+                f"{curr_info}",
                 title=f"Valid: {path}",
                 border_style="green",
             )
@@ -256,6 +271,71 @@ def run_env(
         raise typer.Exit(code=1)
 
 
+@curriculum_app.command(name="list")
+def list_curriculums() -> None:
+    """List all available built-in curriculum schedules."""
+    from adaptive_rl.curriculum.presets import CURRICULUM_PRESETS
+
+    table = Table(title="AdaptiveRL — Predefined Curriculum Schedules")
+    table.add_column("Preset Name", style="cyan", no_wrap=True)
+    table.add_column("Stages", style="green")
+    table.add_column("Description", style="white")
+
+    for name, builder in sorted(CURRICULUM_PRESETS.items()):
+        curr = builder()
+        table.add_row(
+            name,
+            f"{len(curr.stages)} stages",
+            f"Progressive curriculum for {curr.name}",
+        )
+    console.print(table)
+
+
+@curriculum_app.command(name="inspect")
+def inspect_curriculum(
+    name: str = typer.Argument("navigation", help="Curriculum preset name to inspect"),
+) -> None:
+    """Inspect stages, progression thresholds, and parameters of a curriculum preset."""
+    from adaptive_rl.curriculum.presets import get_curriculum_preset
+
+    try:
+        curr = get_curriculum_preset(name)
+    except ValueError as err:
+        console.print(f"[bold red]Curriculum lookup failed:[/bold red] {err}")
+        raise typer.Exit(code=1)
+
+    table = Table(title=f"Curriculum Stages: {curr.name} ({len(curr.stages)} stages)")
+    table.add_column("Stage ID", style="cyan")
+    table.add_column("Name", style="magenta")
+    table.add_column("Success Threshold", style="green")
+    table.add_column("Mean Reward Threshold", style="yellow")
+    table.add_column("Min Episodes", style="blue")
+    table.add_column("Parameters", style="white")
+
+    for stage in curr.stages:
+        st_str = (
+            f"{stage.success_threshold * 100:.0f}%"
+            if stage.success_threshold is not None
+            else "None"
+        )
+        mr_str = (
+            f"{stage.mean_reward_threshold:.1f}"
+            if stage.mean_reward_threshold is not None
+            else "None"
+        )
+        params_str = ", ".join(f"{k}={v}" for k, v in stage.environment_parameters.items())
+        table.add_row(
+            str(stage.stage_id),
+            stage.name,
+            st_str,
+            mr_str,
+            str(stage.min_episodes),
+            params_str or "(default)",
+        )
+
+    console.print(table)
+
+
 @app.command()
 def train(
     config: Optional[Path] = typer.Option(
@@ -290,6 +370,11 @@ def train(
     if seed is not None:
         exp_config.seed = seed
 
+    curriculum_line = ""
+    if exp_config.curriculum is not None and exp_config.curriculum.enabled:
+        preset_info = exp_config.curriculum.preset or f"{len(exp_config.curriculum.stages)} custom stages"
+        curriculum_line = f"\n• [bold]Curriculum:[/bold] Enabled ({preset_info})"
+
     console.print(
         Panel.fit(
             f"[bold green]Starting Training: {exp_config.name}[/bold green]\n\n"
@@ -298,7 +383,8 @@ def train(
             f"• [bold]Total Timesteps:[/bold] {exp_config.training.total_timesteps:,}\n"
             f"• [bold]Checkpoint Freq:[/bold] {exp_config.training.checkpoint_freq}\n"
             f"• [bold]Seed:[/bold] {exp_config.seed}\n"
-            f"• [bold]Output Dir:[/bold] {exp_config.output_dir}",
+            f"• [bold]Output Dir:[/bold] {exp_config.output_dir}"
+            f"{curriculum_line}",
             title=f"{exp_config.algorithm.name.upper()} Training Pipeline",
             border_style="cyan",
         )

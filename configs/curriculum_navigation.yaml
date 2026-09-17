@@ -1,0 +1,37 @@
+name: "navigation_curriculum_ppo"
+seed: 123
+
+algorithm:
+  name: "ppo"
+  learning_rate: 0.0003
+  gamma: 0.99
+  batch_size: 64
+  parameters:
+    n_steps: 1024
+    clip_range: 0.2
+
+environment:
+  name: "navigation"
+  max_steps: 200
+  parameters:
+    arena_width: 20.0
+    arena_height: 20.0
+    num_obstacles: 0
+    obstacle_radius: 1.0
+
+curriculum:
+  enabled: true
+  preset: "navigation"
+  eval_window: 20
+
+training:
+  total_timesteps: 50000
+  checkpoint_freq: 10000
+  log_interval: 10
+
+evaluation:
+  eval_episodes: 20
+  deterministic: true
+
+output_dir: "experiments/results"
+log_dir: "experiments/logs"
