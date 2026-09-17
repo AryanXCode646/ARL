@@ -265,12 +265,13 @@ def test_cli_curriculum_commands() -> None:
     # version
     v_res = runner.invoke(app, ["version"])
     assert v_res.exit_code == 0
-    assert "Phase 7" in v_res.output
+    assert "AdaptiveRL" in v_res.output
 
     # info
     i_res = runner.invoke(app, ["info"])
     assert i_res.exit_code == 0
     assert "Phase 7" in i_res.output
+    assert "Phase 8" in i_res.output
 
     # curriculum list
     list_res = runner.invoke(app, ["curriculum", "list"])

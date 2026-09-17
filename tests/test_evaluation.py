@@ -132,7 +132,6 @@ def test_cli_evaluate_execution(tmp_path: Path) -> None:
     algo.save(model_path)
     env.close()
 
-
     config_path = tmp_path / "eval_cfg.yaml"
     config_path.write_text(
         """

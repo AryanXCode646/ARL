@@ -203,7 +203,9 @@ def generate_navigation_obstacles(
         # Clearance from existing obstacles (avoid excessive overlap)
         overlaps = False
         for ex_x, ex_y, ex_r in obstacles:
-            if float(np.linalg.norm(candidate - np.array([ex_x, ex_y]))) < (obstacle_radius + ex_r + 0.5):
+            if float(np.linalg.norm(candidate - np.array([ex_x, ex_y]))) < (
+                obstacle_radius + ex_r + 0.5
+            ):
                 overlaps = True
                 break
 
