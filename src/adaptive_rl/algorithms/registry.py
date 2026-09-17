@@ -337,13 +337,41 @@ algorithm_registry = AlgorithmRegistry()
 def _register_defaults(target_registry: Optional[AlgorithmRegistry] = None) -> None:
     """Register the built-in algorithms into the global registry with real implementations."""
     reg = target_registry if target_registry is not None else algorithm_registry
-    from adaptive_rl.algorithms.ppo import PPOAlgorithm
-    from adaptive_rl.algorithms.sac import SACAlgorithm
+    import importlib.util
+
+    rl_stack_installed = (
+        importlib.util.find_spec("gymnasium") is not None
+        and importlib.util.find_spec("torch") is not None
+        and importlib.util.find_spec("stable_baselines3") is not None
+    )
+
+    if rl_stack_installed:
+        from adaptive_rl.algorithms.ppo import PPOAlgorithm
+        from adaptive_rl.algorithms.sac import SACAlgorithm
+
+        ppo_factory: Callable[..., Any] = PPOAlgorithm
+        sac_factory: Callable[..., Any] = SACAlgorithm
+    else:
+
+        def _uninstalled_ppo_factory(*args: Any, **kwargs: Any) -> Any:
+            raise ImportError(
+                "PPO requires optional RL dependencies (gymnasium, stable-baselines3, torch). "
+                "Install with: pip install 'adaptive-rl[rl]'"
+            )
+
+        def _uninstalled_sac_factory(*args: Any, **kwargs: Any) -> Any:
+            raise ImportError(
+                "SAC requires optional RL dependencies (gymnasium, stable-baselines3, torch). "
+                "Install with: pip install 'adaptive-rl[rl]'"
+            )
+
+        ppo_factory = _uninstalled_ppo_factory
+        sac_factory = _uninstalled_sac_factory
 
     if "ppo" not in reg.list_algorithms():
         reg.register(
             "ppo",
-            PPOAlgorithm,
+            ppo_factory,
             AlgorithmMetadata(
                 name="ppo",
                 kind=AlgorithmKind.RL_POLICY,
@@ -373,7 +401,7 @@ def _register_defaults(target_registry: Optional[AlgorithmRegistry] = None) -> N
     if "sac" not in reg.list_algorithms():
         reg.register(
             "sac",
-            SACAlgorithm,
+            sac_factory,
             AlgorithmMetadata(
                 name="sac",
                 kind=AlgorithmKind.RL_POLICY,
