@@ -385,3 +385,158 @@ def test_traffic_curriculum_trainer_workflow(tmp_path: Path) -> None:
     assert (
         tmp_path / "curr_results" / "curriculum" / "test_traffic_curriculum_curriculum.json"
     ).exists()
+
+
+def test_traffic_scenario_a_successful_nonzero_traffic() -> None:
+    """TEST A: Deterministic non-zero traffic scenario resulting in verified success.
+
+    Proves that with real vehicle arrivals and adequate signal service,
+    an episode completes without overflow, discharges vehicles, and reports
+    explicit episode success with controlled queues.
+    """
+    env = TrafficSignalEnv(
+        arrival_rates=(0.3, 0.3, 0.2, 0.2),
+        departure_rate=3,
+        max_queue=25,
+        max_steps=10,
+        min_green_steps=2,
+        terminate_on_overflow=True,
+        success_queue_threshold=10,
+    )
+    obs, info = env.reset(seed=42)
+    assert info["had_overflow"] is False
+    assert info["step"] == 0
+
+    had_arrivals = False
+    for step_idx in range(10):
+        # Service NS for first 5 steps, then EW for next 5 steps
+        action = 0 if step_idx < 5 else 1
+        obs, reward, terminated, truncated, step_info = env.step(action)
+        if step_info["step_arrivals"] > 0:
+            had_arrivals = True
+
+    assert had_arrivals, "Expected non-zero vehicle arrivals during test run"
+    assert terminated is False
+    assert truncated is True
+    assert step_info["had_overflow"] is False
+    assert step_info["total_queue"] <= 10
+    assert step_info["success"] is True
+    assert step_info["cumulative_departures"] > 0
+    assert step_info["mean_wait"] >= 0.0
+    env.close()
+
+
+def test_traffic_scenario_b_overflow_failure() -> None:
+    """TEST B: Deterministic scenario with guaranteed queue overflow.
+
+    Proves that queue overflow permanently sets had_overflow=True,
+    forces success=False, and immediately triggers termination when
+    terminate_on_overflow=True.
+    """
+    env = TrafficSignalEnv(
+        arrival_rates=(15.0, 15.0, 15.0, 15.0),
+        departure_rate=1,
+        max_queue=5,
+        max_steps=10,
+        terminate_on_overflow=True,
+        overflow_penalty=50.0,
+    )
+    obs, info = env.reset(seed=123)
+    assert info["had_overflow"] is False
+
+    obs, reward, terminated, truncated, step_info = env.step(0)
+    assert step_info["overflow"] is True
+    assert step_info["had_overflow"] is True
+    assert step_info["success"] is False
+    assert terminated is True
+    assert truncated is False
+    assert reward < -40.0  # Includes overflow penalty
+    env.close()
+
+
+def test_traffic_scenario_c_terminal_vs_truncation_semantics() -> None:
+    """TEST C: Explicit differentiation between terminated and truncated.
+
+    Case 1: Overflow causes terminated=True, truncated=False.
+    Case 2: Completing all steps without overflow causes terminated=False, truncated=True.
+    """
+    # Case 1: Early termination on overflow
+    env_term = TrafficSignalEnv(
+        arrival_rates=(20.0, 0.0, 0.0, 0.0),
+        departure_rate=1,
+        max_queue=4,
+        max_steps=50,
+        terminate_on_overflow=True,
+    )
+    env_term.reset(seed=99)
+    _, _, terminated, truncated, info_term = env_term.step(0)
+    assert terminated is True
+    assert truncated is False
+    assert info_term["had_overflow"] is True
+    assert info_term["success"] is False
+    env_term.close()
+
+    # Case 2: Normal truncation at max_steps
+    env_trunc = TrafficSignalEnv(
+        arrival_rates=(0.0, 0.0, 0.0, 0.0),
+        departure_rate=2,
+        max_queue=30,
+        max_steps=5,
+        terminate_on_overflow=True,
+    )
+    env_trunc.reset(seed=99)
+    for _ in range(4):
+        _, _, term, trunc, _ = env_trunc.step(0)
+        assert not term and not trunc
+    _, _, term, trunc, info_trunc = env_trunc.step(0)
+    assert term is False
+    assert trunc is True
+    assert info_trunc["had_overflow"] is False
+    assert info_trunc["success"] is True
+    env_trunc.close()
+
+
+def test_traffic_scenario_d_known_wait_values_and_aggregation() -> None:
+    """TEST D: Deterministic queue with known wait values and exact aggregation.
+
+    Verifies vehicle delay accumulation per step and approach max_wait calculation.
+    """
+    env = TrafficSignalEnv(
+        arrival_rates=(0.0, 0.0, 0.0, 0.0),
+        departure_rate=2,
+        max_queue=20,
+        max_steps=10,
+        min_green_steps=1,
+    )
+    # Seed 3 vehicles in North and 1 vehicle in East
+    env.reset(
+        seed=42,
+        options={
+            "initial_queues": {
+                Approach.NORTH: 3,
+                Approach.SOUTH: 0,
+                Approach.EAST: 1,
+                Approach.WEST: 0,
+            }
+        },
+    )
+
+    # Step 1: Green for EW (action=1).
+    # East has 1 vehicle, discharges it.
+    # North has 3 vehicles, wait increments by 1.
+    _, _, _, _, info1 = env.step(1)
+    assert info1["step_departures"] == 1
+    assert info1["total_queue"] == 3
+    # North vehicles waited 1 step
+    assert info1["max_wait"] == 1
+    assert info1["mean_wait"] == 0.25  # (1 + 0 + 0 + 0) / 4 approaches
+
+    # Step 2: Green for EW (action=1) again.
+    # No departures (EW queues empty).
+    # North vehicles wait another step (wait = 2).
+    _, _, _, _, info2 = env.step(1)
+    assert info2["step_departures"] == 0
+    assert info2["total_queue"] == 3
+    assert info2["max_wait"] == 2
+    assert info2["mean_wait"] == 0.5  # (2 + 0 + 0 + 0) / 4 approaches
+    env.close()
