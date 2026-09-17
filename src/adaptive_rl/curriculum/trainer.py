@@ -152,7 +152,9 @@ class CurriculumTrainer(BaseTrainer):
                 **algo_params,
             )
         else:
-            raise ValueError(f"Unsupported algorithm '{self.config.algorithm.name}' for curriculum training.")
+            raise ValueError(
+                f"Unsupported algorithm '{self.config.algorithm.name}' for curriculum training."
+            )
 
     @staticmethod
     def _set_deterministic_seed(seed: int) -> None:

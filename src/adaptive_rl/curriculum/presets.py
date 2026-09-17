@@ -106,10 +106,61 @@ def create_gridworld_curriculum(eval_window: int = 20) -> Curriculum:
     )
 
 
+def create_traffic_curriculum(eval_window: int = 20) -> Curriculum:
+    """Create a progressive 4-stage curriculum for Traffic Signal Optimization.
+
+    Stage 0: Light Balanced — (0.15, 0.15, 0.15, 0.15) arrivals, basic phase allocation.
+    Stage 1: Moderate Balanced — (0.35, 0.35, 0.35, 0.35) arrivals, steady alternating demand.
+    Stage 2: Arterial Rush Hour — (0.65, 0.65, 0.20, 0.20) arrivals, asymmetric NS priority.
+    Stage 3: Peak Gridlock Challenge — (0.60, 0.60, 0.60, 0.60) arrivals, near-saturation clearing.
+    """
+    stages = [
+        CurriculumStage(
+            stage_id=0,
+            name="Light Balanced",
+            environment_parameters={"arrival_rates": (0.15, 0.15, 0.15, 0.15)},
+            success_threshold=0.80,
+            min_episodes=10,
+            description="Light symmetric traffic flow allowing basic phase allocation learning.",
+        ),
+        CurriculumStage(
+            stage_id=1,
+            name="Moderate Balanced",
+            environment_parameters={"arrival_rates": (0.35, 0.35, 0.35, 0.35)},
+            success_threshold=0.70,
+            min_episodes=10,
+            description="Moderate uniform demand testing regular phase alternation.",
+        ),
+        CurriculumStage(
+            stage_id=2,
+            name="Arterial Rush Hour",
+            environment_parameters={"arrival_rates": (0.65, 0.65, 0.20, 0.20)},
+            success_threshold=0.60,
+            min_episodes=10,
+            description="Asymmetric rush hour prioritizing heavy North-South arterial corridor.",
+        ),
+        CurriculumStage(
+            stage_id=3,
+            name="Peak Gridlock Challenge",
+            environment_parameters={"arrival_rates": (0.60, 0.60, 0.60, 0.60)},
+            success_threshold=0.50,
+            min_episodes=10,
+            description="Near-saturation multi-approach peak volume demanding agile queue clearing.",
+        ),
+    ]
+    return Curriculum(
+        name="traffic_curriculum",
+        stages=stages,
+        eval_window=eval_window,
+    )
+
+
 CURRICULUM_PRESETS: Dict[str, Any] = {
     "navigation": create_navigation_curriculum,
     "navigation_2d": create_navigation_curriculum,
     "gridworld": create_gridworld_curriculum,
+    "traffic": create_traffic_curriculum,
+    "traffic_signal": create_traffic_curriculum,
 }
 
 
@@ -117,7 +168,7 @@ def get_curriculum_preset(name: str, eval_window: int = 20) -> Curriculum:
     """Resolve and build curriculum from preset identifier.
 
     Args:
-        name: Name of preset ('navigation', 'navigation_2d', 'gridworld').
+        name: Name of preset ('navigation', 'navigation_2d', 'gridworld', 'traffic').
         eval_window: Rolling evaluation window size.
 
     Returns:

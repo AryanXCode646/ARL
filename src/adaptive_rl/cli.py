@@ -54,7 +54,7 @@ def version() -> None:
     """Show the installed AdaptiveRL version and phase status."""
     console.print(
         f"[bold green]AdaptiveRL[/bold green] version [bold cyan]{adaptive_rl.__version__}[/bold cyan] "
-        f"([yellow]Phase 7: Curriculum Learning[/yellow])"
+        f"([yellow]Phase 8: Traffic Signal Optimization[/yellow])"
     )
 
 
@@ -83,13 +83,9 @@ def info() -> None:
     table.add_row(
         "Phase 5", "Evaluation Engine and Standard Metrics", "[bold green]COMPLETED[/bold green]"
     )
-    table.add_row(
-        "Phase 6", "Continuous 2D Navigation", "[bold green]COMPLETED[/bold green]"
-    )
-    table.add_row(
-        "Phase 7", "Curriculum Learning", "[bold green]COMPLETED[/bold green]"
-    )
-    table.add_row("Phase 8", "Traffic Signal Environment", "[yellow]PLANNED[/yellow]")
+    table.add_row("Phase 6", "Continuous 2D Navigation", "[bold green]COMPLETED[/bold green]")
+    table.add_row("Phase 7", "Curriculum Learning", "[bold green]COMPLETED[/bold green]")
+    table.add_row("Phase 8", "Traffic Signal Optimization", "[bold green]COMPLETED[/bold green]")
     table.add_row(
         "Phase 9", "Mathematical Drone Navigation Environment", "[yellow]PLANNED[/yellow]"
     )
@@ -244,11 +240,14 @@ def run_env(
             )
 
             if terminated or truncated:
-                outcome = (
-                    "GOAL REACHED!"
-                    if step_info.get("success")
-                    else ("COLLISION!" if step_info.get("collision") else "MAX STEPS REACHED")
-                )
+                if step_info.get("collision"):
+                    outcome = "COLLISION!"
+                elif step_info.get("overflow"):
+                    outcome = "QUEUE OVERFLOW!"
+                elif step_info.get("success"):
+                    outcome = "SUCCESS / GOAL REACHED!"
+                else:
+                    outcome = "MAX STEPS REACHED"
                 console.print(f"\n[bold yellow]Episode ended at step {s}: {outcome}[/bold yellow]")
                 if hasattr(env, "render"):
                     rendered = env.render()
@@ -372,7 +371,9 @@ def train(
 
     curriculum_line = ""
     if exp_config.curriculum is not None and exp_config.curriculum.enabled:
-        preset_info = exp_config.curriculum.preset or f"{len(exp_config.curriculum.stages)} custom stages"
+        preset_info = (
+            exp_config.curriculum.preset or f"{len(exp_config.curriculum.stages)} custom stages"
+        )
         curriculum_line = f"\n• [bold]Curriculum:[/bold] Enabled ({preset_info})"
 
     console.print(

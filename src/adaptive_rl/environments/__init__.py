@@ -17,6 +17,7 @@ from adaptive_rl.environments.registry import (
     registry,
 )
 from adaptive_rl.environments.testing import DummyTestEnv
+from adaptive_rl.environments.traffic.intersection import TrafficSignalEnv
 
 
 def register_default_environments() -> None:
@@ -69,6 +70,38 @@ def register_default_environments() -> None:
             ),
         )
 
+    if "traffic" not in list_environments():
+        register(
+            "traffic",
+            lambda **kwargs: TrafficSignalEnv(**kwargs),
+            metadata=EnvironmentMetadata(
+                name="traffic",
+                description="4-way signalized intersection queue length and delay optimization.",
+                observation_type="box",
+                action_type="discrete",
+                version="0.1.0",
+                max_episode_steps=100,
+                reward_range=(-1000.0, 100.0),
+                tags=["discrete", "traffic", "queuing", "signal_control", "optimization"],
+            ),
+        )
+
+    if "traffic_signal" not in list_environments():
+        register(
+            "traffic_signal",
+            lambda **kwargs: TrafficSignalEnv(**kwargs),
+            metadata=EnvironmentMetadata(
+                name="traffic_signal",
+                description="4-way signalized intersection queue length and delay optimization.",
+                observation_type="box",
+                action_type="discrete",
+                version="0.1.0",
+                max_episode_steps=100,
+                reward_range=(-1000.0, 100.0),
+                tags=["discrete", "traffic", "queuing", "signal_control", "optimization"],
+            ),
+        )
+
 
 # Automatically register standard environments with metadata
 register_default_environments()
@@ -81,6 +114,7 @@ __all__ = [
     "EnvironmentRegistry",
     "GridWorldEnv",
     "RegistryError",
+    "TrafficSignalEnv",
     "create_environment",
     "get",
     "get_metadata",

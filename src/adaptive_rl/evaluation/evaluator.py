@@ -74,7 +74,6 @@ class Evaluator(BaseEvaluator):
         else:
             raise ValueError("Evaluator requires either 'env' or 'env_name'.")
 
-
     def evaluate(
         self,
         num_episodes: int = 10,

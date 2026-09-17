@@ -31,8 +31,8 @@ AdaptiveRL is developed incrementally across verifiable phases.
 | **Phase 5** | **Evaluation Engine & Standard Metrics** | **Completed** | Multi-episode benchmarking, success/collision tracking, scenario testing, and JSON reports. |
 | **Phase 6** | **Continuous 2D Navigation** | **Completed** | Continuous velocity control, 8-ray LiDAR rangefinders, circular obstacles, and SAC continuous actor-critic. |
 | **Phase 7** | **Curriculum Learning** | **Completed** | Staged obstacle density and disturbance curriculum, automated graduation criteria, and CurriculumTrainer. |
-| Phase 8 | Traffic Signal Environment | *Upcoming* | Non-spatial queue management demonstrating framework multi-domain versatility. |
-| Phase 9-10| Autonomous 3D Drone Environment | *Planned* | 3D kinematics, wind disturbances, dynamic obstacles, and energy constraints. |
+| **Phase 8** | **Traffic Signal Optimization** | **Completed** | Non-spatial 4-way intersection queue & delay optimization, signal transitions, and multi-objective rewards. |
+| Phase 9-10| Autonomous 3D Drone Environment | *Upcoming* | 3D kinematics, wind disturbances, dynamic obstacles, and energy constraints. |
 | Phase 11-17| Research Baselines & Hardening | *Planned* | Generalization benchmarks, classical planners (A*, RRT*), and CI hardening. |
 
 ---
@@ -320,7 +320,87 @@ print(f"Final model saved to: {result.final_model_path}")
 
 ---
 
-## 11. Running Tests
+## 11. Traffic Signal Optimization Environment
+
+Phase 8 demonstrates the domain-agnostic capability of AdaptiveRL by implementing a discrete, non-spatial queuing optimization benchmark: a **4-way signalized intersection** (`TrafficSignalEnv`, registered as `traffic` and `traffic_signal`).
+
+* **Intersection Queuing Dynamics:**
+  * 4 directional approach lanes: **North (N)**, **South (S)**, **East (E)**, and **West (W)**.
+  * Stochastic Poisson arrival process per approach with configurable arrival rates $\lambda = (\lambda_N, \lambda_S, \lambda_E, \lambda_W)$.
+  * Saturation discharge throughput: Green approaches discharge up to `departure_rate` vehicles per step; Red approaches discharge 0.
+  * FIFO vehicle delay tracking: Accurately records individual waiting time, cumulative delay, and maximum waiting times.
+* **Farama Gymnasium Spaces:**
+  * **Observation Space:** `Box(low=0.0, high=1.0, shape=(10,), dtype=np.float32)`
+    * Normalized queue lengths: $[q_N, q_S, q_E, q_W] / \text{max\_queue}$
+    * Normalized waiting times: $[w_N, w_S, w_E, w_W] / \text{max\_wait\_limit}$
+    * Current signal phase: $0.0$ for North-South Green, $1.0$ for East-West Green
+    * Phase duration ratio: $\min(\text{duration} / \text{max\_phase\_duration}, 1.0)$
+  * **Action Space:** `Discrete(2)`
+    * `0`: North-South Green (East & West Red)
+    * `1`: East-West Green (North & South Red)
+* **Multi-Objective Reward Function:**
+  $$R_t = c_{\text{dep}} \cdot \Delta_{\text{departures}} - c_q \sum q_i - c_w \max(w_i) - c_{\text{switch}} \cdot \mathbb{I}_{\text{switch}} - c_{\text{prem}} \cdot \mathbb{I}_{\text{premature}}$$
+  Incentivizes clearing vehicle queues while penalizing excessive signal flickering and premature phase switching before minimum green time.
+* **ASCII Visualizer:**
+```
++--------------------------------------------------+
+|   4-WAY SIGNALIZED INTERSECTION OPTIMIZATION     |
++--------------------------------------------------+
+| Phase: NORTH_SOUTH (Green)  Step: 012/100        |
+| Duration: 04 | Switches: 02 | Cleared: 018       |
++--------------------------------------------------+
+                 |   N   |                          
+                 | Q:02  | (Wait: 03)             
+                 |  [G]  |                          
+  ---------------+       +---------------           
+   W  Q:04  [R]              [R]  Q:01  E    
+  (Wait: 08)                       (Wait: 02)     
+  ---------------+       +---------------           
+                 |  [G]  |                          
+                 | Q:01  | (Wait: 01)             
+                 |   S   |                          
++--------------------------------------------------+
+  Queues: [N=2, S=1, E=1, W=4] | Total: 08
++--------------------------------------------------+
+```
+
+### Traffic Signal via CLI
+
+```bash
+# Simulate 10 traffic steps with live ASCII rendering
+adaptive-rl env run traffic --steps 10 --seed 42
+
+# Inspect spaces and metadata
+adaptive-rl env inspect traffic
+
+# Train PPO agent on traffic signal optimization
+adaptive-rl train --config configs/traffic_ppo.yaml
+```
+
+### Traffic Signal via Python API
+
+```python
+from adaptive_rl.environments import make_env
+from adaptive_rl.algorithms import PPOAlgorithm
+
+# 1. Create 4-way traffic signal environment
+env = make_env("traffic", max_steps=100, arrival_rates=(0.35, 0.35, 0.2, 0.2))
+obs, info = env.reset(seed=42)
+
+# 2. Train PPO policy
+agent = PPOAlgorithm(env=env, learning_rate=3e-4)
+agent.train(total_timesteps=10000)
+
+# 3. Step environment with optimized signal controls
+action, _ = agent.predict(obs, deterministic=True)
+obs, reward, terminated, truncated, step_info = env.step(action)
+print(f"Phase: {step_info['phase_name']}, Total Queue: {step_info['total_queue']}, Reward: {reward:.2f}")
+env.close()
+```
+
+---
+
+## 12. Running Tests
 
 Execute the automated test suite with `pytest`:
 ```bash
@@ -333,15 +413,16 @@ pytest --cov=adaptive_rl tests/
 
 ---
 
-## 12. Contributing
+## 13. Contributing
 
 We welcome contributions! Please review [CONTRIBUTING.md](CONTRIBUTING.md) for branch naming conventions, quality gates, and code formatting standards before opening a pull request.
 
 ---
 
-## 13. License
+## 14. License
 
 This project is licensed under the [MIT License](LICENSE).
+
 
 
 

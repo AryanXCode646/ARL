@@ -1,0 +1,36 @@
+name: "traffic_curriculum_ppo"
+seed: 42
+
+algorithm:
+  name: "ppo"
+  learning_rate: 0.0003
+  gamma: 0.99
+  batch_size: 64
+  parameters:
+    n_steps: 256
+    clip_range: 0.2
+
+environment:
+  name: "traffic"
+  max_steps: 100
+  parameters:
+    arrival_rates: [0.15, 0.15, 0.15, 0.15]
+    departure_rate: 2
+    max_queue: 30
+
+curriculum:
+  enabled: true
+  preset: "traffic"
+  eval_window: 15
+
+training:
+  total_timesteps: 30000
+  checkpoint_freq: 10000
+  log_interval: 10
+
+evaluation:
+  eval_episodes: 20
+  deterministic: true
+
+output_dir: "experiments/results"
+log_dir: "experiments/logs"
