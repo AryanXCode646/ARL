@@ -1,7 +1,6 @@
 """Algorithm abstraction layer for AdaptiveRL."""
 
 from adaptive_rl.algorithms.base import BaseAlgorithm
-from adaptive_rl.algorithms.ppo import PPOAlgorithm
 from adaptive_rl.algorithms.registry import (
     AlgorithmKind,
     AlgorithmMetadata,
@@ -16,7 +15,16 @@ from adaptive_rl.algorithms.registry import (
     register_algorithm,
     reset_algorithm_defaults,
 )
-from adaptive_rl.algorithms.sac import SACAlgorithm
+
+try:
+    from adaptive_rl.algorithms.ppo import PPOAlgorithm
+except ImportError:
+    PPOAlgorithm = None  # type: ignore
+
+try:
+    from adaptive_rl.algorithms.sac import SACAlgorithm
+except ImportError:
+    SACAlgorithm = None  # type: ignore
 
 __all__ = [
     "AlgorithmKind",

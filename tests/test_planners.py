@@ -228,6 +228,10 @@ class TestPlannerResult:
 class TestPlannerAdapter:
     """Tests for the PlannerAdapter GridWorldEnv integration."""
 
+    @pytest.fixture(autouse=True)
+    def _require_gymnasium(self) -> None:
+        pytest.importorskip("gymnasium")
+
     def test_basic_evaluation(self) -> None:
         """Adapter evaluates A* on GridWorld and returns planner metrics."""
         from adaptive_rl.environments.gridworld.grid import GridWorldEnv
@@ -412,6 +416,7 @@ class TestRRTStarPlanner:
 
     def test_adapter_evaluation_continuous_navigation(self) -> None:
         """PlannerAdapter successfully evaluates RRT* on ContinuousNavigation2DEnv."""
+        pytest.importorskip("gymnasium")
         from adaptive_rl.environments.navigation.navigation2d import ContinuousNavigation2DEnv
         from adaptive_rl.planners.adapter import PlannerAdapter
         from adaptive_rl.planners.rrt_star import RRTStarPlanner

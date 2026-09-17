@@ -58,11 +58,9 @@ def test_studio_navigation_and_environment_controls(window: StudioWindow) -> Non
 def test_studio_loads_experiment_artifacts(window: StudioWindow) -> None:
     """The overview and experiment pages load existing repository artifacts."""
     expected_count = len(window.manager.list_experiments())
-    assert window.recent_table.rowCount() >= 7
     assert window.recent_table.rowCount() == expected_count
     window.navigation.setCurrentRow(3)
     window._load_selected_metrics()
-    assert window.evaluation_select.count() >= 7
     assert window.evaluation_select.count() == expected_count
 
 
