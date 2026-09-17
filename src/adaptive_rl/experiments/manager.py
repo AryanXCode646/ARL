@@ -7,12 +7,7 @@ evaluates performance, and serializes results to a machine-readable manifest.
 
 from __future__ import annotations
 
-import csv
-import hashlib
 import json
-import platform
-import re
-import sys
 import time
 import traceback
 import uuid
@@ -30,6 +25,14 @@ from adaptive_rl.algorithms import (
 )
 from adaptive_rl.config import ExperimentConfig, load_config
 from adaptive_rl.experiments.artifacts import (
+    _make_experiment_id,
+    _make_run_id,
+    _sanitize_path_component,
+    make_experiment_id,
+    make_run_id,
+    resolve_run_directory,
+    sanitize_path_component,
+    save_config_yaml,
     save_metrics_csv,
     save_metrics_json,
 )
@@ -62,57 +65,23 @@ __all__ = [
     "get_package_version",
     "get_platform_info",
     "collect_environment_provenance",
+    "_sanitize_path_component",
     "_make_experiment_id",
     "_make_run_id",
+    "sanitize_path_component",
+    "make_experiment_id",
+    "make_run_id",
+    "resolve_run_directory",
+    "save_config_yaml",
+    "save_metrics_csv",
+    "save_metrics_json",
     "_apply_config_override",
     "_apply_overrides",
 ]
 
 
-def _sanitize_path_component(name: str) -> str:
-    """Sanitize a string for safe usage in filesystem directory names.
-
-    Replaces non-alphanumeric, non-hyphen, non-underscore characters with '_',
-    collapses consecutive underscores, and strips leading/trailing periods,
-    slashes, and underscores to prevent directory traversal attacks.
-    """
-    sanitized = re.sub(r"[^a-zA-Z0-9_\-]", "_", str(name).strip())
-    sanitized = re.sub(r"_+", "_", sanitized).strip("._-")
-    return sanitized or "unknown"
-
-
-def _make_experiment_id(config: ExperimentConfig) -> str:
-    """Generate a deterministic, filesystem-safe experiment identifier.
-
-    Derived strictly from the canonical effective experiment definition (algorithm,
-    environment, seed, training, evaluation, curriculum parameters). Excludes
-    ephemeral runtime paths like output_dir and log_dir to maintain identity
-    invariance regardless of execution workspace.
-
-    Args:
-        config: Effective experiment configuration.
-
-    Returns:
-        Deterministic experiment identifier string.
-    """
-    data = config.model_dump(mode="python")
-    data.pop("output_dir", None)
-    data.pop("log_dir", None)
-
-    serialized = json.dumps(data, sort_keys=True, default=str)
-    config_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:8]
-
-    env = _sanitize_path_component(config.environment.name.lower())
-    algo = _sanitize_path_component(config.algorithm.name.lower())
-    seed = int(config.seed)
-    return f"{env}_{algo}_seed{seed}_{config_hash}"
-
-
-def _make_run_id() -> str:
-    """Generate a unique run execution identifier."""
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    rand = uuid.uuid4().hex[:8]
-    return f"run_{ts}_{rand}"
+# Re-exported from adaptive_rl.experiments.artifacts for backward compatibility
+# Single authoritative ownership resides in artifacts.py
 
 
 def _apply_config_override(config: ExperimentConfig, key: str, value: Any) -> None:
@@ -434,11 +403,7 @@ class ExperimentManager:
                 overrides=overrides_dict,
                 effective_config={},
                 training_timesteps=None,
-                git_commit=None,
-                git_error=None,
-                python_version=sys.version,
-                platform_info=f"{platform.system()} {platform.release()} {platform.machine()}",
-                package_versions={},
+                **collect_environment_provenance(),
                 evaluation_status="failed",
                 notes=f"Configuration override failed: {exc}",
             )
@@ -490,9 +455,6 @@ class ExperimentManager:
             with open(source_config_path, "w", encoding="utf-8") as f:
                 yaml.safe_dump(source_config, f, sort_keys=False, default_flow_style=False)
 
-        # Collect honest git provenance
-        git_prov = _get_git_provenance()
-
         # Build base manifest
         source_dump = (
             source_config.model_dump(mode="json")
@@ -510,22 +472,12 @@ class ExperimentManager:
             source_config=source_dump,
             overrides=overrides_dict,
             effective_config=effective_config.model_dump(mode="json"),
-            training_timesteps=effective_config.training.total_timesteps
-            if effective_config.training is not None
-            else None,
-            git_commit=git_prov["commit"],
-            git_branch=git_prov["branch"],
-            git_dirty=git_prov["dirty"],
-            git_error=git_prov["error"],
-            python_version=sys.version,
-            platform_info=f"{platform.system()} {platform.release()} {platform.machine()}",
-            package_versions={
-                "adaptive-rl": _get_package_version("adaptive-rl"),
-                "gymnasium": _get_package_version("gymnasium"),
-                "stable-baselines3": _get_package_version("stable-baselines3"),
-                "torch": _get_package_version("torch"),
-                "pydantic": _get_package_version("pydantic"),
-            },
+            training_timesteps=(
+                effective_config.training.total_timesteps
+                if effective_config.training is not None
+                else None
+            ),
+            **collect_environment_provenance(),
         )
         # Store relative artifact paths for complete filesystem portability
         manifest.artifact_paths["config"] = "config.yaml"
@@ -785,39 +737,12 @@ class ExperimentManager:
     @staticmethod
     def _save_config_copy(config: ExperimentConfig, path: Path) -> None:
         """Save a copy of the experiment config as YAML."""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        data = config.model_dump(mode="python")
-        data["output_dir"] = str(data["output_dir"])
-        data["log_dir"] = str(data["log_dir"])
-        with open(path, "w", encoding="utf-8") as f:
-            yaml.safe_dump(data, f, sort_keys=False, default_flow_style=False)
+        save_config_yaml(config, path)
 
     @staticmethod
-    def _save_metrics_csv(metrics: Dict[str, Any], path: Path) -> None:
-        """Save flat scalar metrics as a single-row CSV file.
-
-        Scalar metrics (int, float, str) are written as-is. Boolean metrics are
-        converted to 0/1. None values are written as empty strings. Non-scalar
-        values (lists, dicts) are excluded from the CSV.
-        """
-        csv_metrics: Dict[str, Any] = {}
-        for k, v in metrics.items():
-            if v is None:
-                csv_metrics[k] = ""
-            elif isinstance(v, bool):
-                csv_metrics[k] = int(v)
-            elif isinstance(v, (int, float, str)):
-                csv_metrics[k] = v
-            # Non-scalar types (list, dict, etc.) are excluded from flat CSV
-
-        if not csv_metrics:
-            return
-
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=sorted(csv_metrics.keys()))
-            writer.writeheader()
-            writer.writerow({k: csv_metrics[k] for k in sorted(csv_metrics.keys())})
+    def _save_metrics_csv(metrics: Dict[str, Any], path: Path) -> Path:
+        """Save flat scalar metrics as a single-row CSV file (delegates to artifacts.py)."""
+        return save_metrics_csv(metrics, path)
 
     # ------------------------------------------------------------------
     # Experiment listing / inspection utilities

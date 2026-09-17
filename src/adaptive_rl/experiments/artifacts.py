@@ -3,13 +3,70 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
+import re
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 
 import yaml
 
 from adaptive_rl.config import ExperimentConfig
+
+
+def sanitize_path_component(name: str) -> str:
+    """Sanitize a string for safe usage in filesystem directory names.
+
+    Replaces non-alphanumeric, non-hyphen, non-underscore characters with '_',
+    collapses consecutive underscores, and strips leading/trailing periods,
+    slashes, and underscores to prevent directory traversal attacks.
+    """
+    sanitized = re.sub(r"[^a-zA-Z0-9_\-]", "_", str(name).strip())
+    sanitized = re.sub(r"_+", "_", sanitized).strip("._-")
+    return sanitized or "unknown"
+
+
+def make_experiment_id(config: ExperimentConfig) -> str:
+    """Generate a deterministic, filesystem-safe experiment identifier.
+
+    Derived strictly from the canonical effective experiment definition (algorithm,
+    environment, seed, training, evaluation, curriculum parameters). Excludes
+    ephemeral runtime paths like output_dir and log_dir to maintain identity
+    invariance regardless of execution workspace.
+    """
+    data = config.model_dump(mode="python")
+    data.pop("output_dir", None)
+    data.pop("log_dir", None)
+
+    serialized = json.dumps(data, sort_keys=True, default=str)
+    config_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:8]
+
+    env = sanitize_path_component(config.environment.name.lower())
+    algo = sanitize_path_component(config.algorithm.name.lower())
+    seed = int(config.seed)
+    return f"{env}_{algo}_seed{seed}_{config_hash}"
+
+
+def make_run_id() -> str:
+    """Generate a unique run execution identifier with UTC timestamp and random hex."""
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    rand = uuid.uuid4().hex[:8]
+    return f"run_{ts}_{rand}"
+
+
+def resolve_run_directory(base_output_dir: Path, experiment_id: str, run_id: str) -> Path:
+    """Resolve and create isolated directory for an experiment run."""
+    run_dir = base_output_dir / experiment_id / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
+# Backward-compatible aliases matching internal naming
+_sanitize_path_component = sanitize_path_component
+_make_experiment_id = make_experiment_id
+_make_run_id = make_run_id
 
 
 def save_metrics_json(metrics: Dict[str, Any], path: Path) -> Path:

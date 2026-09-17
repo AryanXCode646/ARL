@@ -539,3 +539,72 @@ class TestExperimentInspection:
         assert isinstance(version, str)
         assert len(version) > 0
         assert version == "not_installed" or "." in version
+
+
+class TestModularOwnershipAndCompatibility:
+    """Verifies that modularization maintains backward compatibility and clean ownership."""
+
+    def test_reexported_classes_identity(self) -> None:
+        from adaptive_rl.experiments.manager import (
+            ExperimentManifest as ManagerManifestClass,
+        )
+        from adaptive_rl.experiments.manager import (
+            ExperimentResult as ManagerResultClass,
+        )
+        from adaptive_rl.experiments.manifest import (
+            ExperimentManifest as ManifestClass,
+        )
+        from adaptive_rl.experiments.manifest import (
+            ExperimentResult as ResultClass,
+        )
+
+        assert ManagerManifestClass is ManifestClass
+        assert ManagerResultClass is ResultClass
+
+    def test_reexported_provenance_functions_identity(self) -> None:
+        from adaptive_rl.experiments.manager import (
+            collect_environment_provenance as MgrEnvProv,
+        )
+        from adaptive_rl.experiments.manager import (
+            get_git_commit as MgrGitCommit,
+        )
+        from adaptive_rl.experiments.manager import (
+            get_git_provenance as MgrGitProv,
+        )
+        from adaptive_rl.experiments.provenance import (
+            collect_environment_provenance as ProvEnvProv,
+        )
+        from adaptive_rl.experiments.provenance import (
+            get_git_commit as ProvGitCommit,
+        )
+        from adaptive_rl.experiments.provenance import (
+            get_git_provenance as ProvGitProv,
+        )
+
+        assert MgrGitCommit is ProvGitCommit
+        assert MgrGitProv is ProvGitProv
+        assert MgrEnvProv is ProvEnvProv
+
+    def test_reexported_artifact_functions_identity(self) -> None:
+        from adaptive_rl.experiments.artifacts import (
+            _make_experiment_id as ArtMakeExpId,
+        )
+        from adaptive_rl.experiments.artifacts import (
+            _make_run_id as ArtMakeRunId,
+        )
+        from adaptive_rl.experiments.artifacts import (
+            _sanitize_path_component as ArtSanitize,
+        )
+        from adaptive_rl.experiments.manager import (
+            _make_experiment_id as MgrMakeExpId,
+        )
+        from adaptive_rl.experiments.manager import (
+            _make_run_id as MgrMakeRunId,
+        )
+        from adaptive_rl.experiments.manager import (
+            _sanitize_path_component as MgrSanitize,
+        )
+
+        assert MgrMakeExpId is ArtMakeExpId
+        assert MgrMakeRunId is ArtMakeRunId
+        assert MgrSanitize is ArtSanitize
