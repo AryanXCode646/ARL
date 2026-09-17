@@ -8,9 +8,25 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtWidgets import QApplication
 
-from adaptive_rl.studio.app import StudioWindow, TrainingWorker
+try:
+    from PySide6.QtWidgets import QApplication
+
+    from adaptive_rl.studio.app import StudioWindow, TrainingWorker
+
+    # Verify QApplication can be instantiated in the current environment
+    _probe = QApplication.instance() or QApplication([])
+    HAS_USABLE_QT = True
+except Exception:
+    HAS_USABLE_QT = False
+    QApplication = None  # type: ignore
+    StudioWindow = None  # type: ignore
+    TrainingWorker = None  # type: ignore
+
+pytestmark = pytest.mark.skipif(
+    not HAS_USABLE_QT,
+    reason="PySide6 or headless Qt platform libraries are unavailable",
+)
 
 
 @pytest.fixture(scope="module")
@@ -18,7 +34,10 @@ def qt_app() -> QApplication:
     """Provide one QApplication for the module."""
     application = QApplication.instance() or QApplication([])
     yield application
-    application.quit()
+    try:
+        application.quit()
+    except Exception:
+        pass
 
 
 @pytest.fixture
