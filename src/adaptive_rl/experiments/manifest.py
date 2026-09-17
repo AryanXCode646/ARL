@@ -91,6 +91,20 @@ class ExperimentManifest:
         filtered = {k: v for k, v in data.items() if k in known_fields}
         return cls(**filtered)
 
+    @classmethod
+    def load(cls, path: Path) -> ExperimentManifest:
+        """Load manifest instance from a JSON file.
+
+        Args:
+            path: Source file path.
+
+        Returns:
+            ExperimentManifest instance.
+        """
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return cls.from_dict(data)
+
 
 @dataclass
 class ExperimentResult:

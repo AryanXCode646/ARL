@@ -608,3 +608,90 @@ class TestModularOwnershipAndCompatibility:
         assert MgrMakeExpId is ArtMakeExpId
         assert MgrMakeRunId is ArtMakeRunId
         assert MgrSanitize is ArtSanitize
+
+    def test_manager_complete_artifact_and_boundary_validation(self) -> None:
+        """Explicitly validates contents of config.yaml, source_config.yaml, metrics.json,
+
+        metrics.csv, manifest.json, provenance fields, IDs, and failed experiment artifacts.
+        """
+        import csv
+        import json
+
+        import yaml
+
+        from adaptive_rl.experiments.manifest import ExperimentManifest
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ExperimentManager(base_output_dir=Path(tmpdir))
+            config = _make_minimal_config(algo="astar", env="gridworld", seed=42)
+
+            # Successful run with overrides
+            overrides = {"seed": 99}
+            res = manager.run(config=config, overrides=overrides)
+            assert res.success
+
+            out = res.output_dir
+
+            # 1. config.yaml contents validation
+            config_file = out / "config.yaml"
+            assert config_file.exists()
+            with open(config_file, encoding="utf-8") as f:
+                saved_config = yaml.safe_load(f)
+            assert saved_config["seed"] == 99
+            assert saved_config["algorithm"]["name"] == "astar"
+
+            # 2. source_config.yaml contents validation
+            source_file = out / "source_config.yaml"
+            assert source_file.exists()
+            with open(source_file, encoding="utf-8") as f:
+                saved_source = yaml.safe_load(f)
+            assert saved_source["seed"] == 42
+            assert saved_source["algorithm"]["name"] == "astar"
+
+            # 3. metrics.json contents validation
+            metrics_json_file = out / "metrics.json"
+            assert metrics_json_file.exists()
+            with open(metrics_json_file, encoding="utf-8") as f:
+                saved_metrics = json.load(f)
+            assert isinstance(saved_metrics, dict)
+            assert (
+                "success_rate" in saved_metrics
+                or "eval_success_rate" in saved_metrics
+                or "mean_success_rate" in saved_metrics
+                or "steps" in saved_metrics
+            )
+
+            # 4. metrics.csv contents validation
+            metrics_csv_file = out / "metrics.csv"
+            assert metrics_csv_file.exists()
+            with open(metrics_csv_file, newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+            assert len(rows) == 1
+            assert reader.fieldnames is not None
+            assert len(reader.fieldnames) > 0
+
+            # 5. manifest.json contents validation via ExperimentManifest.load
+            manifest_file = out / "manifest.json"
+            assert manifest_file.exists()
+            manifest = ExperimentManifest.load(manifest_file)
+            assert manifest.experiment_id == res.experiment_id
+            assert manifest.run_id == res.run_id
+            assert manifest.seed == 99
+            assert manifest.evaluation_status == "completed"
+
+            # 6. Provenance fields validation
+            assert isinstance(manifest.python_version, str) and len(manifest.python_version) > 0
+            assert isinstance(manifest.platform_info, str) and len(manifest.platform_info) > 0
+            assert isinstance(manifest.package_versions, dict)
+            assert "adaptive-rl" in manifest.package_versions
+
+            # 7. Failed experiment artifacts validation
+            fail_res = manager.run(config=config, overrides={"nonexistent_field": 123})
+            assert not fail_res.success
+            assert fail_res.output_dir.exists()
+            fail_manifest_file = fail_res.output_dir / "manifest.json"
+            assert fail_manifest_file.exists()
+            fail_manifest = ExperimentManifest.load(fail_manifest_file)
+            assert fail_manifest.evaluation_status == "failed"
+            assert "Configuration override failed" in fail_manifest.notes

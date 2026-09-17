@@ -408,3 +408,98 @@ def test_planner_algorithms_dynamic_lookup_and_runtime_registration() -> None:
 
     # After reset, it is removed again
     assert "custom_mock_planner" not in PLANNER_ALGORITHMS
+
+
+def test_registry_failure_behavior(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Phase 4 regression tests: AlgorithmRegistry single-source-of-truth and failure behavior.
+
+    Proves:
+    1. Registered planner is recognized.
+    2. Dynamically registered planner is recognized.
+    3. rrt* alias remains supported.
+    4. Unknown algorithm raises explicit error during validation and unvalidated access.
+    5. Registry failure does NOT silently restore a hard-coded planner list.
+    6. Registry metadata remains authoritative.
+    """
+    from adaptive_rl.algorithms.registry import (
+        AlgorithmKind,
+        AlgorithmMetadata,
+        AlgorithmRegistryError,
+        algorithm_registry,
+    )
+    from adaptive_rl.config import PLANNER_ALGORITHMS, AlgorithmConfig
+
+    # 1. Registered planner is recognized
+    assert "astar" in PLANNER_ALGORITHMS
+    assert AlgorithmConfig(name="astar").is_planner is True
+    assert AlgorithmConfig(name="ppo").is_planner is False
+
+    # 2. Dynamically registered planner is recognized
+    class DynamicTestPlanner:
+        pass
+
+    try:
+        algorithm_registry.register(
+            name="dynamic_test_planner",
+            factory=DynamicTestPlanner,
+            metadata=AlgorithmMetadata(
+                name="dynamic_test_planner",
+                kind=AlgorithmKind.PLANNER,
+                trainable=False,
+            ),
+        )
+        assert "dynamic_test_planner" in PLANNER_ALGORITHMS
+        assert AlgorithmConfig(name="dynamic_test_planner").is_planner is True
+    finally:
+        algorithm_registry.reset_defaults()
+
+    # 3. rrt* alias remains supported
+    assert "rrt*" in PLANNER_ALGORITHMS
+    assert "rrt_star" in PLANNER_ALGORITHMS
+    assert AlgorithmConfig(name="rrt*").is_planner is True
+    assert AlgorithmConfig(name="rrt_star").is_planner is True
+
+    # 4. Unknown algorithm raises explicit error
+    with pytest.raises(ValueError, match="Unknown algorithm 'unregistered_nonexistent_xyz'"):
+        AlgorithmConfig(name="unregistered_nonexistent_xyz")
+
+    unvalidated_unknown = AlgorithmConfig.model_construct(name="unregistered_nonexistent_xyz")
+    with pytest.raises(AlgorithmRegistryError):
+        _ = unvalidated_unknown.is_planner
+
+    # 5. Registry failure does NOT silently restore a hard-coded planner list
+    # Simulate an internal registry crash during metadata lookup
+    def mock_broken_get_metadata(name: str) -> AlgorithmMetadata:
+        raise RuntimeError("Authoritative registry database unavailable")
+
+    monkeypatch.setattr(algorithm_registry, "get_metadata", mock_broken_get_metadata)
+
+    # In the old code, this silently caught Exception and checked hard-coded {"astar", ...}
+    # Now it must propagate the real registry failure!
+    astar_cfg = AlgorithmConfig.model_construct(name="astar")
+    with pytest.raises(RuntimeError, match="Authoritative registry database unavailable"):
+        _ = astar_cfg.is_planner
+
+    # Also verify PLANNER_ALGORITHMS propagation when list_by_kind fails
+    monkeypatch.undo()
+
+    def mock_broken_list_by_kind(kind: AlgorithmKind) -> list[str]:
+        raise RuntimeError("Registry iteration failed")
+
+    monkeypatch.setattr(algorithm_registry, "list_by_kind", mock_broken_list_by_kind)
+    with pytest.raises(RuntimeError, match="Registry iteration failed"):
+        _ = iter(PLANNER_ALGORITHMS)
+    with pytest.raises(RuntimeError, match="Registry iteration failed"):
+        _ = len(PLANNER_ALGORITHMS)
+
+    monkeypatch.undo()
+
+    # 6. Registry metadata remains authoritative
+    # If an algorithm kind is changed to RL in the registry, is_planner reflects it immediately
+    assert AlgorithmConfig(name="astar").is_planner is True
+    monkeypatch.setattr(
+        algorithm_registry,
+        "get_metadata",
+        lambda name: AlgorithmMetadata(name=name, kind=AlgorithmKind.RL_POLICY, trainable=True),
+    )
+    assert astar_cfg.is_planner is False

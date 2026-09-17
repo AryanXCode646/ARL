@@ -6,6 +6,7 @@ import csv
 import hashlib
 import json
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,9 +59,46 @@ def make_run_id() -> str:
 
 def resolve_run_directory(base_output_dir: Path, experiment_id: str, run_id: str) -> Path:
     """Resolve and create isolated directory for an experiment run."""
-    run_dir = base_output_dir / experiment_id / run_id
+    run_dir = (base_output_dir / experiment_id / run_id).resolve()
+    base_resolved = base_output_dir.resolve()
+    if not run_dir.is_relative_to(base_resolved):
+        raise ValueError(
+            f"Path traversal detected: '{run_dir}' escapes base directory '{base_resolved}'."
+        )
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
+
+
+def create_unique_run_directory(
+    base_output_dir: Path, experiment_id: str, max_attempts: int = 10
+) -> tuple[str, Path]:
+    """Atomically create a unique run directory under base_output_dir / experiment_id.
+
+    Returns:
+        tuple of (run_id, output_dir)
+
+    Raises:
+        ValueError: If path traversal attempts to escape base_output_dir.
+        RuntimeError: If unique directory cannot be created within max_attempts.
+    """
+    base_resolved = base_output_dir.resolve()
+    for attempt in range(max_attempts):
+        run_id = make_run_id()
+        candidate_dir = (base_output_dir / experiment_id / run_id).resolve()
+        if not candidate_dir.is_relative_to(base_resolved):
+            raise ValueError(
+                f"Path traversal detected: '{candidate_dir}' escapes base directory '{base_resolved}'."
+            )
+        try:
+            candidate_dir.mkdir(parents=True, exist_ok=False)
+            return run_id, candidate_dir
+        except FileExistsError:
+            if attempt == max_attempts - 1:
+                raise RuntimeError(
+                    f"Failed to create unique run directory after {max_attempts} attempts."
+                )
+            time.sleep(0.01)
+    raise RuntimeError(f"Failed to create unique run directory after {max_attempts} attempts.")
 
 
 # Backward-compatible aliases matching internal naming

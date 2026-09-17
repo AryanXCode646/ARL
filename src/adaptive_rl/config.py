@@ -258,14 +258,15 @@ class AlgorithmConfig(BaseModel):
 
     @property
     def is_planner(self) -> bool:
-        """Return True if this configuration is for a classical planner."""
+        """Return True if this configuration is for a classical planner.
+
+        Queries authoritative AlgorithmRegistry metadata directly.
+        Raises AlgorithmRegistryError if the algorithm is not registered or registry lookup fails.
+        """
         raw_name = self.name.strip().lower()
         if raw_name == "rrt*":
             raw_name = "rrt_star"
-        try:
-            return algorithm_registry.get_metadata(raw_name).kind == AlgorithmKind.PLANNER
-        except AlgorithmRegistryError:
-            return False
+        return algorithm_registry.get_metadata(raw_name).kind == AlgorithmKind.PLANNER
 
 
 class EnvironmentConfig(BaseModel):

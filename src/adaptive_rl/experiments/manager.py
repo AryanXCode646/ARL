@@ -8,14 +8,12 @@ evaluates performance, and serializes results to a machine-readable manifest.
 from __future__ import annotations
 
 import json
-import time
 import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union, cast
 
-import yaml
 from pydantic import BaseModel
 
 from adaptive_rl.algorithms import (
@@ -28,6 +26,7 @@ from adaptive_rl.experiments.artifacts import (
     _make_experiment_id,
     _make_run_id,
     _sanitize_path_component,
+    create_unique_run_directory,
     make_experiment_id,
     make_run_id,
     resolve_run_directory,
@@ -72,6 +71,7 @@ __all__ = [
     "make_experiment_id",
     "make_run_id",
     "resolve_run_directory",
+    "create_unique_run_directory",
     "save_config_yaml",
     "save_metrics_csv",
     "save_metrics_json",
@@ -387,8 +387,7 @@ class ExperimentManager:
         except Exception as exc:
             exp_id = f"failed_override_{uuid.uuid4().hex[:8]}"
             run_id = _make_run_id()
-            err_dir = self.base_output_dir / exp_id / run_id
-            err_dir.mkdir(parents=True, exist_ok=True)
+            err_dir = resolve_run_directory(self.base_output_dir, exp_id, run_id)
             manifest = ExperimentManifest(
                 experiment_id=exp_id,
                 run_id=run_id,
@@ -418,42 +417,13 @@ class ExperimentManager:
             )
 
         experiment_id = _make_experiment_id(effective_config)
-        base_resolved = self.base_output_dir.resolve()
 
-        # Atomic and race-safe run directory creation with path manipulation guards
-        max_attempts = 10
-        output_dir: Optional[Path] = None
-        run_id = ""
-        for attempt in range(max_attempts):
-            run_id = _make_run_id()
-            candidate_dir = (self.base_output_dir / experiment_id / run_id).resolve()
-            if not candidate_dir.is_relative_to(base_resolved):
-                raise ValueError(
-                    f"Path traversal detected: '{candidate_dir}' escapes base directory '{base_resolved}'."
-                )
-            try:
-                candidate_dir.mkdir(parents=True, exist_ok=False)
-                output_dir = candidate_dir
-                break
-            except FileExistsError:
-                if attempt == max_attempts - 1:
-                    raise RuntimeError(
-                        f"Failed to create unique run directory after {max_attempts} attempts."
-                    )
-                time.sleep(0.01)
+        # Atomic and race-safe run directory creation via artifacts module
+        run_id, output_dir = create_unique_run_directory(self.base_output_dir, experiment_id)
 
-        assert output_dir is not None
-
-        # Save config copies
-        effective_config_path = output_dir / "config.yaml"
-        self._save_config_copy(effective_config, effective_config_path)
-
-        source_config_path = output_dir / "source_config.yaml"
-        if isinstance(source_config, ExperimentConfig):
-            self._save_config_copy(source_config, source_config_path)
-        else:
-            with open(source_config_path, "w", encoding="utf-8") as f:
-                yaml.safe_dump(source_config, f, sort_keys=False, default_flow_style=False)
+        # Save config copies via artifacts module
+        effective_config_path = save_config_yaml(effective_config, output_dir / "config.yaml")
+        save_config_yaml(source_config, output_dir / "source_config.yaml")
 
         # Build base manifest
         source_dump = (
@@ -761,8 +731,7 @@ class ExperimentManager:
 
         for manifest_path in self.base_output_dir.rglob("manifest.json"):
             try:
-                with open(manifest_path, encoding="utf-8") as f:
-                    data = json.load(f)
+                data = ExperimentManifest.load(manifest_path).to_dict()
                 experiments.append(data)
             except Exception:
                 experiments.append(
@@ -792,8 +761,7 @@ class ExperimentManager:
         direct_manifest = self.base_output_dir / identifier / "manifest.json"
         if direct_manifest.exists():
             try:
-                with open(direct_manifest, encoding="utf-8") as f:
-                    return cast(Optional[Dict[str, Any]], json.load(f))
+                return ExperimentManifest.load(direct_manifest).to_dict()
             except Exception:
                 return None
 
@@ -811,8 +779,7 @@ class ExperimentManager:
 
         candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         try:
-            with open(candidates[0], encoding="utf-8") as f:
-                return cast(Optional[Dict[str, Any]], json.load(f))
+            return ExperimentManifest.load(candidates[0]).to_dict()
         except Exception:
             return None
 
