@@ -4,8 +4,11 @@ from adaptive_rl.curriculum.callbacks import CurriculumCallback
 from adaptive_rl.curriculum.curriculum import Curriculum
 from adaptive_rl.curriculum.presets import (
     CURRICULUM_PRESETS,
+    create_disturbed_drone_curriculum,
+    create_drone_curriculum,
     create_gridworld_curriculum,
     create_navigation_curriculum,
+    create_traffic_curriculum,
     get_curriculum_preset,
 )
 from adaptive_rl.curriculum.stage import CurriculumStage
@@ -19,7 +22,10 @@ __all__ = [
     "CurriculumEnvWrapper",
     "CurriculumStage",
     "CurriculumTrainer",
+    "create_disturbed_drone_curriculum",
+    "create_drone_curriculum",
     "create_gridworld_curriculum",
     "create_navigation_curriculum",
+    "create_traffic_curriculum",
     "get_curriculum_preset",
 ]

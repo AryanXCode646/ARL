@@ -1,6 +1,7 @@
 """Environment interfaces, metadata, and registration for AdaptiveRL."""
 
 from adaptive_rl.environments.base import AdaptiveRLEnv
+from adaptive_rl.environments.drone.disturbed_drone import DroneDisturbance3DEnv
 from adaptive_rl.environments.drone.drone3d import DroneNavigation3DEnv
 from adaptive_rl.environments.gridworld.grid import GridWorldEnv
 from adaptive_rl.environments.metadata import EnvironmentMetadata
@@ -150,6 +151,37 @@ def register_default_environments() -> None:
                 tags=["continuous", "drone", "3d", "kinematics", "lidar", "navigation"],
             ),
         )
+    if "drone_disturbed" not in list_environments():
+        register(
+            "drone_disturbed",
+            lambda **kwargs: DroneDisturbance3DEnv(**kwargs),
+            metadata=EnvironmentMetadata(
+                name="drone_disturbed",
+                description="Autonomous 3D drone navigation under atmospheric wind, turbulence, battery limits, and dynamic obstacles.",
+                observation_type="box",
+                action_type="continuous",
+                version="0.1.0",
+                max_episode_steps=300,
+                reward_range=(-100.0, 100.0),
+                tags=["continuous", "drone", "3d", "wind", "battery", "dynamic_obstacles"],
+            ),
+        )
+
+    if "drone_constrained" not in list_environments():
+        register(
+            "drone_constrained",
+            lambda **kwargs: DroneDisturbance3DEnv(**kwargs),
+            metadata=EnvironmentMetadata(
+                name="drone_constrained",
+                description="Autonomous 3D drone navigation under atmospheric wind, turbulence, battery limits, and dynamic obstacles.",
+                observation_type="box",
+                action_type="continuous",
+                version="0.1.0",
+                max_episode_steps=300,
+                reward_range=(-100.0, 100.0),
+                tags=["continuous", "drone", "3d", "wind", "battery", "dynamic_obstacles"],
+            ),
+        )
 
 
 # Automatically register standard environments with metadata
@@ -158,6 +190,7 @@ register_default_environments()
 __all__ = [
     "AdaptiveRLEnv",
     "ContinuousNavigation2DEnv",
+    "DroneDisturbance3DEnv",
     "DroneNavigation3DEnv",
     "DummyTestEnv",
     "EnvironmentMetadata",
