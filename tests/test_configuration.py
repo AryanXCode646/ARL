@@ -359,3 +359,52 @@ environment:
     )
     with pytest.raises(ConfigError, match="cannot be greater than step_size"):
         load_config(bad_yaml)
+
+
+def test_planner_algorithms_dynamic_lookup_and_runtime_registration() -> None:
+    """Verify PLANNER_ALGORITHMS and AlgorithmConfig dynamically query AlgorithmRegistry."""
+    from adaptive_rl.algorithms.registry import (
+        AlgorithmKind,
+        AlgorithmMetadata,
+        algorithm_registry,
+    )
+    from adaptive_rl.config import PLANNER_ALGORITHMS, AlgorithmConfig
+
+    # 1. Standard registered planners are recognized
+    assert "astar" in PLANNER_ALGORITHMS
+    assert "rrt_star" in PLANNER_ALGORITHMS
+    assert "rrt*" in PLANNER_ALGORITHMS
+    assert AlgorithmConfig(name="astar").is_planner is True
+    assert AlgorithmConfig(name="rrt_star").is_planner is True
+    assert AlgorithmConfig(name="rrt*").is_planner is True
+
+    # 2. Unknown planner is NOT in PLANNER_ALGORITHMS and fails validation
+    assert "custom_mock_planner" not in PLANNER_ALGORITHMS
+    with pytest.raises(ValueError, match="Unknown algorithm 'custom_mock_planner'"):
+        AlgorithmConfig(name="custom_mock_planner")
+
+    # 3. Dynamically register a new planner at runtime
+    class DummyPlanner:
+        def plan(self, *args: object, **kwargs: object) -> None:
+            pass
+
+    try:
+        algorithm_registry.register(
+            name="custom_mock_planner",
+            factory=DummyPlanner,
+            metadata=AlgorithmMetadata(
+                name="custom_mock_planner",
+                kind=AlgorithmKind.PLANNER,
+                trainable=False,
+            ),
+        )
+
+        # Immediately recognized without any edits to config.py!
+        assert "custom_mock_planner" in PLANNER_ALGORITHMS
+        cfg = AlgorithmConfig(name="custom_mock_planner")
+        assert cfg.is_planner is True
+    finally:
+        algorithm_registry.reset_defaults()
+
+    # After reset, it is removed again
+    assert "custom_mock_planner" not in PLANNER_ALGORITHMS

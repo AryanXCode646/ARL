@@ -7,8 +7,9 @@ training, and evaluation.
 
 from __future__ import annotations
 
+from collections.abc import Set as AbstractSet
 from pathlib import Path
-from typing import Any, Dict, Literal, Optional, Set
+from typing import Any, Dict, Iterator, Literal, Optional, Set
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -20,18 +21,42 @@ from adaptive_rl.algorithms.registry import (
 )
 
 
-def _get_canonical_planner_algorithms() -> Set[str]:
-    """Derive registered classical planner algorithm names from AlgorithmRegistry."""
-    try:
-        planners = set(algorithm_registry.list_by_kind(AlgorithmKind.PLANNER))
-        planners.add("rrt*")  # Syntactic alias for rrt_star
-        return planners
-    except Exception:
-        return {"astar", "rrt_star", "rrt*"}
+class _DynamicPlannerAlgorithms(AbstractSet[str]):
+    """Dynamic set-like view delegating directly to AlgorithmRegistry.
+
+    Preserves backward compatibility for callers expecting a collection of planner names
+    without duplicating knowledge or caching an import-time static snapshot.
+    """
+
+    def __contains__(self, item: object) -> bool:
+        if not isinstance(item, str):
+            return False
+        raw_name = item.strip().lower()
+        if raw_name == "rrt*":
+            raw_name = "rrt_star"
+        try:
+            return algorithm_registry.get_metadata(raw_name).kind == AlgorithmKind.PLANNER
+        except AlgorithmRegistryError:
+            return False
+
+    def __iter__(self) -> Iterator[str]:
+        registered = set(algorithm_registry.list_by_kind(AlgorithmKind.PLANNER))
+        if "rrt_star" in registered:
+            registered.add("rrt*")
+        return iter(registered)
+
+    def __len__(self) -> int:
+        registered = set(algorithm_registry.list_by_kind(AlgorithmKind.PLANNER))
+        if "rrt_star" in registered:
+            registered.add("rrt*")
+        return len(registered)
+
+    def __repr__(self) -> str:
+        return f"DynamicPlannerAlgorithms({set(self)})"
 
 
-# Canonical set of classical planner algorithm names derived from AlgorithmRegistry
-PLANNER_ALGORITHMS: Set[str] = _get_canonical_planner_algorithms()
+# Compatibility collection dynamically reflecting AlgorithmRegistry
+PLANNER_ALGORITHMS: Set[str] = _DynamicPlannerAlgorithms()  # type: ignore[assignment]
 
 
 class ConfigError(Exception):
@@ -234,13 +259,13 @@ class AlgorithmConfig(BaseModel):
     @property
     def is_planner(self) -> bool:
         """Return True if this configuration is for a classical planner."""
-        raw_name = self.name.lower()
+        raw_name = self.name.strip().lower()
         if raw_name == "rrt*":
             raw_name = "rrt_star"
         try:
             return algorithm_registry.get_metadata(raw_name).kind == AlgorithmKind.PLANNER
-        except Exception:
-            return raw_name in _get_canonical_planner_algorithms()
+        except AlgorithmRegistryError:
+            return False
 
 
 class EnvironmentConfig(BaseModel):
