@@ -32,7 +32,8 @@ AdaptiveRL is developed incrementally across verifiable phases.
 | **Phase 6** | **Continuous 2D Navigation** | **Completed** | Continuous velocity control, 8-ray LiDAR rangefinders, circular obstacles, and SAC continuous actor-critic. |
 | **Phase 7** | **Curriculum Learning** | **Completed** | Staged obstacle density and disturbance curriculum, automated graduation criteria, and CurriculumTrainer. |
 | **Phase 8** | **Traffic Signal Optimization** | **Completed** | Non-spatial 4-way intersection queue & delay optimization, signal transitions, and multi-objective rewards. |
-| Phase 9-10| Autonomous 3D Drone Environment | *Upcoming* | 3D kinematics, wind disturbances, dynamic obstacles, and energy constraints. |
+| **Phase 9** | **Autonomous 3D Drone Navigation** | **Completed** | 3D quadrotor translation kinematics, aerodynamic drag, 16-ray 3D spherical LiDAR, and SAC/PPO continuous control. |
+| Phase 10 | Drone Disturbances & Constraints | *Upcoming* | Wind vector fields, turbulence, battery energy depletion, and dynamic obstacles. |
 | Phase 11-17| Research Baselines & Hardening | *Planned* | Generalization benchmarks, classical planners (A*, RRT*), and CI hardening. |
 
 ---
@@ -400,7 +401,89 @@ env.close()
 
 ---
 
-## 12. Running Tests
+## 12. Autonomous 3D Drone Navigation Environment
+
+Phase 9 implements a continuous 3D quadrotor flight environment (`DroneNavigation3DEnv`, registered as `drone`, `drone_3d`, and `drone_navigation`), combining second-order translation kinematics, aerodynamic drag damping, procedural 3D spherical obstacle fields, and multi-directional 3D spherical LiDAR rangefinders.
+
+* **3D Kinematic Physics Model:**
+  * Translational state: position $\mathbf{p} = [x, y, z]^T \in [0, X_{\max}] \times [0, Y_{\max}] \times [0, Z_{\max}]$, velocity $\mathbf{v} = [v_x, v_y, v_z]^T$, and acceleration $\mathbf{a} = [a_x, a_y, a_z]^T$.
+  * Equations of motion:
+    $$\frac{d\mathbf{v}}{dt} = \mathbf{a} - c_d \mathbf{v}$$
+    $$\frac{d\mathbf{p}}{dt} = \mathbf{v}$$
+    Integrated via semi-implicit Euler integration with maximum velocity spherical clamping ($\|\mathbf{v}\| \le v_{\max}$).
+* **Farama Gymnasium Spaces:**
+  * **Continuous Action Space:** `Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)` representing commanded 3D accelerations $[a_x, a_y, a_z]$, scaled by $a_{\max} = 4.0\ \text{m/s}^2$.
+  * **Continuous Observation Space:** `Box(low=-1.0, high=1.0, shape=(29,), dtype=np.float32)`
+    * $[0:3]$: Normalized 3D position $\mathbf{p} / \mathbf{B} \in [0, 1]^3$
+    * $[3:6]$: Normalized 3D velocity $\mathbf{v} / v_{\max} \in [-1, 1]^3$
+    * $[6:9]$: Normalized 3D waypoint target $\mathbf{g} / \mathbf{B} \in [0, 1]^3$
+    * $[9:12]$: Relative target vector $(\mathbf{g} - \mathbf{p}) / \mathbf{B} \in [-1, 1]^3$
+    * $[12]$: Normalized Euclidean distance to goal $\|\mathbf{g} - \mathbf{p}\| / D_{\max} \in [0, 1]$
+    * $[13:29]$: 16-ray 3D LiDAR distance rangefinder readings $\in [0, 1]^{16}$ (8 horizontal equatorial rays, 4 upper hemispheric rays $+45^\circ$, 4 lower hemispheric rays $-45^\circ$) computed via analytical 3D ray-sphere and ray-box slab intersections.
+* **Procedural Obstacle Field:**
+  * Generates non-overlapping spherical obstacles with guaranteed safe radius clearance around both drone takeoff position and destination waypoint.
+* **Reward Structure:**
+  * $+100.0$: Target waypoint reached within `target_radius`.
+  * $-100.0$: Collision with obstacle sphere or bounding perimeter wall.
+  * $+w_{\text{progress}} \cdot (d_{t-1} - d_t)$: Dense potential-based progress reward.
+  * $-0.05$: Per-step time penalty.
+  * $-0.01 \cdot \|\mathbf{a}\|^2$: Action effort / control smoothness regularization.
+* **ASCII 3D Flight Deck:**
+```
++----------------------------------------------------------------+
+|               AUTONOMOUS 3D DRONE FLIGHT DECK                  |
++----------------------------------------------------------------+
+| Step: 014/300 | Altitude (Z):  12.4m | Speed:  4.2 m/s         |
+| Position [X, Y, Z]: [ 18.2,  22.1,  12.4]                      |
+| Velocity [Vx,Vy,Vz]: [  2.8,   3.1,   0.5]                     |
+| Waypoint [Gx,Gy,Gz]: [ 45.0,  45.0,  20.0]                     |
+| Range to Target:  35.6m | Obstacles in Area: 08                |
++----------------------------------------------------------------+
+  Flight Arena Boundaries: [0..50, 0..50, 0..25] m
++----------------------------------------------------------------+
+```
+
+### Drone Navigation via CLI
+
+```bash
+# Simulate 10 continuous 3D drone steps with live flight deck visualization
+adaptive-rl env run drone --steps 10 --seed 42
+
+# Inspect 3D observation and action spaces
+adaptive-rl env inspect drone
+
+# Train continuous PPO on 3D drone navigation
+adaptive-rl train --config configs/drone.yaml
+
+# Train continuous SAC on 3D drone navigation
+adaptive-rl train --config configs/drone_sac.yaml
+```
+
+### Drone Navigation via Python API
+
+```python
+import numpy as np
+from adaptive_rl.environments import make_env
+from adaptive_rl.algorithms import SACAlgorithm
+
+# 1. Instantiate 3D continuous drone environment
+env = make_env("drone", bounds=(50.0, 50.0, 25.0), num_obstacles=8)
+obs, info = env.reset(seed=42)
+
+# 2. Train SAC agent for continuous 3D control
+agent = SACAlgorithm(env=env, learning_rate=3e-4, buffer_size=50000)
+agent.train(total_timesteps=100000)
+
+# 3. Predict continuous 3D acceleration command
+action, _ = agent.predict(obs, deterministic=True)
+obs, reward, terminated, truncated, step_info = env.step(action)
+print(f"Altitude: {step_info['altitude']:.1f}m, Distance: {step_info['distance_to_goal']:.1f}m, Reward: {reward:.2f}")
+env.close()
+```
+
+---
+
+## 13. Running Tests
 
 Execute the automated test suite with `pytest`:
 ```bash
@@ -413,15 +496,16 @@ pytest --cov=adaptive_rl tests/
 
 ---
 
-## 13. Contributing
+## 14. Contributing
 
 We welcome contributions! Please review [CONTRIBUTING.md](CONTRIBUTING.md) for branch naming conventions, quality gates, and code formatting standards before opening a pull request.
 
 ---
 
-## 14. License
+## 15. License
 
 This project is licensed under the [MIT License](LICENSE).
+
 
 
 

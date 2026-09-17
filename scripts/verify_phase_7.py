@@ -63,10 +63,18 @@ def run_phase_7_verification() -> bool:
             max_timesteps=100,
         )
 
-        assert not stage.can_advance({"success_rate": 1.0, "mean_reward": 50.0}, stage_episodes=4, stage_timesteps=50)
-        assert not stage.can_advance({"success_rate": 0.7, "mean_reward": 50.0}, stage_episodes=5, stage_timesteps=50)
-        assert stage.can_advance({"success_rate": 0.85, "mean_reward": 15.0}, stage_episodes=5, stage_timesteps=50)
-        assert stage.can_advance({"success_rate": 0.0, "mean_reward": -100.0}, stage_episodes=1, stage_timesteps=100)
+        assert not stage.can_advance(
+            {"success_rate": 1.0, "mean_reward": 50.0}, stage_episodes=4, stage_timesteps=50
+        )
+        assert not stage.can_advance(
+            {"success_rate": 0.7, "mean_reward": 50.0}, stage_episodes=5, stage_timesteps=50
+        )
+        assert stage.can_advance(
+            {"success_rate": 0.85, "mean_reward": 15.0}, stage_episodes=5, stage_timesteps=50
+        )
+        assert stage.can_advance(
+            {"success_rate": 0.0, "mean_reward": -100.0}, stage_episodes=1, stage_timesteps=100
+        )
         print("   ✓ Enforced minimum episodes constraint before evaluation.")
         print("   ✓ Verified success rate and mean reward threshold validation.")
         print("   ✓ Verified max timesteps timeout override.")
@@ -113,13 +121,17 @@ def run_phase_7_verification() -> bool:
         assert info["curriculum_stage_id"] == 0
         assert info["curriculum_stage_name"] == "Clear Corridor"
         assert raw_env.num_obstacles == 0
-        print(f"   ✓ Stage 0 active: {info['curriculum_stage_name']} (obstacles: {raw_env.num_obstacles})")
+        print(
+            f"   ✓ Stage 0 active: {info['curriculum_stage_name']} (obstacles: {raw_env.num_obstacles})"
+        )
 
         nav_curr.advance(timesteps=100)
         obs, info = wrapped_env.reset(seed=42)
         assert info["curriculum_stage_id"] == 1
         assert raw_env.num_obstacles == 2
-        print(f"   ✓ Stage 1 active: {info['curriculum_stage_name']} (obstacles: {raw_env.num_obstacles})")
+        print(
+            f"   ✓ Stage 1 active: {info['curriculum_stage_name']} (obstacles: {raw_env.num_obstacles})"
+        )
         wrapped_env.close()
 
         # Step 5: Presets verification
@@ -128,8 +140,12 @@ def run_phase_7_verification() -> bool:
         grid_preset = get_curriculum_preset("gridworld")
         assert len(nav_preset.stages) == 4
         assert len(grid_preset.stages) == 4
-        print(f"   ✓ Navigation preset verified: {len(nav_preset.stages)} progressive difficulty tiers.")
-        print(f"   ✓ GridWorld preset verified: {len(grid_preset.stages)} progressive difficulty tiers.")
+        print(
+            f"   ✓ Navigation preset verified: {len(nav_preset.stages)} progressive difficulty tiers."
+        )
+        print(
+            f"   ✓ GridWorld preset verified: {len(grid_preset.stages)} progressive difficulty tiers."
+        )
 
         # Step 6: End-to-end Curriculum Training Pipeline
         print("\n6. Executing end-to-end CurriculumTrainer with automated stage graduation...")
@@ -179,14 +195,18 @@ def run_phase_7_verification() -> bool:
 
         assert result.total_timesteps == 64
         assert result.final_model_path.exists()
-        print(f"   ✓ Curriculum training completed ({result.total_timesteps} steps, {result.episodes_completed} episodes).")
+        print(
+            f"   ✓ Curriculum training completed ({result.total_timesteps} steps, {result.episodes_completed} episodes)."
+        )
 
         # Verify curriculum JSON summary
         report_path = test_dir / "results" / "curriculum" / "verify_curriculum_run_curriculum.json"
         assert report_path.exists()
         report_data = json.loads(report_path.read_text(encoding="utf-8"))
         assert len(report_data["history"]) >= 1
-        print(f"   ✓ Curriculum report exported: {report_path.stat().st_size} bytes, {len(report_data['history'])} transitions recorded.")
+        print(
+            f"   ✓ Curriculum report exported: {report_path.stat().st_size} bytes, {len(report_data['history'])} transitions recorded."
+        )
 
         # Step 7: CLI commands verification
         print("\n7. Verifying Typer CLI curriculum commands...")
