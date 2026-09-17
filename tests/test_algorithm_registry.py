@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -12,12 +13,14 @@ from adaptive_rl.algorithms.registry import (
     AlgorithmMetadata,
     AlgorithmRegistry,
     AlgorithmRegistryError,
+    _safe_import_algorithm,
     algorithm_registry,
     get_algorithm_factory,
     get_algorithm_metadata,
     list_algorithms,
     list_algorithms_by_kind,
     list_all_algorithm_metadata,
+    reset_algorithm_defaults,
 )
 from adaptive_rl.algorithms.sac import SACAlgorithm
 from adaptive_rl.environments.gridworld.grid import GridWorldEnv
@@ -54,28 +57,39 @@ class TestAlgorithmRegistryBasics:
 
     def test_list_algorithms(self) -> None:
         """list_algorithms returns sorted list of registered names."""
-        self.registry.register("b_algo", _dummy_factory)
-        self.registry.register("a_algo", _dummy_factory)
+        self.registry.register(
+            "b_algo",
+            _dummy_factory,
+            AlgorithmMetadata(name="b_algo", kind=AlgorithmKind.RL_POLICY),
+        )
+        self.registry.register(
+            "a_algo",
+            _dummy_factory,
+            AlgorithmMetadata(name="a_algo", kind=AlgorithmKind.RL_POLICY),
+        )
         names = self.registry.list_algorithms()
         assert names == ["a_algo", "b_algo"]
 
     def test_duplicate_registration_raises(self) -> None:
         """Registering the same name twice raises AlgorithmRegistryError."""
-        self.registry.register("my_algo", _dummy_factory)
+        meta = AlgorithmMetadata(name="my_algo", kind=AlgorithmKind.RL_POLICY)
+        self.registry.register("my_algo", _dummy_factory, meta)
         with pytest.raises(AlgorithmRegistryError, match="already registered"):
-            self.registry.register("my_algo", _dummy_factory)
+            self.registry.register("my_algo", _dummy_factory, meta)
 
     def test_empty_name_raises(self) -> None:
         """Empty or non-string algorithm name raises AlgorithmRegistryError."""
+        meta = AlgorithmMetadata(name="dummy", kind=AlgorithmKind.RL_POLICY)
         with pytest.raises(AlgorithmRegistryError, match="non-empty string"):
-            self.registry.register("", _dummy_factory)
+            self.registry.register("", _dummy_factory, meta)
         with pytest.raises(AlgorithmRegistryError, match="non-empty string"):
-            self.registry.register(None, _dummy_factory)  # type: ignore
+            self.registry.register(None, _dummy_factory, meta)  # type: ignore
 
     def test_non_callable_factory_raises(self) -> None:
         """Non-callable factory raises AlgorithmRegistryError."""
+        meta = AlgorithmMetadata(name="my_algo", kind=AlgorithmKind.RL_POLICY)
         with pytest.raises(AlgorithmRegistryError, match="callable"):
-            self.registry.register("my_algo", "not_callable")  # type: ignore
+            self.registry.register("my_algo", "not_callable", meta)  # type: ignore
 
     def test_unknown_algorithm_raises(self) -> None:
         """Lookup of unregistered algorithm raises AlgorithmRegistryError with available list."""
@@ -85,12 +99,26 @@ class TestAlgorithmRegistryBasics:
             self.registry.get_metadata("nonexistent")
 
     def test_default_metadata_created(self) -> None:
-        """When no metadata provided, sensible defaults are created."""
-        self.registry.register("no_meta", _dummy_factory)
-        meta = self.registry.get_metadata("no_meta")
-        assert meta.name == "no_meta"
-        assert meta.kind == AlgorithmKind.RL_POLICY
-        assert meta.trainable is True
+        """When no metadata is provided, unambiguous classes are inferred, ambiguous callables raise."""
+        # Unambiguous RL policy
+        self.registry.register("inferred_ppo", PPOAlgorithm)
+        meta_ppo = self.registry.get_metadata("inferred_ppo")
+        assert meta_ppo.name == "inferred_ppo"
+        assert meta_ppo.kind == AlgorithmKind.RL_POLICY
+        assert meta_ppo.trainable is True
+        assert meta_ppo.class_name == "PPOAlgorithm"
+
+        # Unambiguous Planner
+        self.registry.register("inferred_astar", AStarPlanner)
+        meta_astar = self.registry.get_metadata("inferred_astar")
+        assert meta_astar.name == "inferred_astar"
+        assert meta_astar.kind == AlgorithmKind.PLANNER
+        assert meta_astar.trainable is False
+        assert meta_astar.class_name == "AStarPlanner"
+
+        # Ambiguous callable raises AlgorithmRegistryError
+        with pytest.raises(AlgorithmRegistryError, match="Cannot infer algorithm metadata"):
+            self.registry.register("ambiguous", _dummy_factory)
 
     def test_is_trainable(self) -> None:
         """is_trainable distinguishes RL algorithms from planners."""
@@ -109,19 +137,28 @@ class TestAlgorithmRegistryBasics:
 
     def test_clear(self) -> None:
         """clear() removes all registered algorithms."""
-        self.registry.register("my_algo", _dummy_factory)
+        self.registry.register(
+            "my_algo",
+            _dummy_factory,
+            AlgorithmMetadata(name="my_algo", kind=AlgorithmKind.RL_POLICY),
+        )
         assert len(self.registry.list_algorithms()) == 1
         self.registry.clear()
         assert self.registry.list_algorithms() == []
 
     def test_case_normalization(self) -> None:
         """Algorithm names are normalized to lowercase on registration and lookup."""
-        self.registry.register("MyAlgo", _dummy_factory)
+        self.registry.register(
+            "MyAlgo",
+            _dummy_factory,
+            AlgorithmMetadata(name="MyAlgo", kind=AlgorithmKind.RL_POLICY),
+        )
         assert "myalgo" in self.registry.list_algorithms()
         factory1 = self.registry.get_factory("myalgo")
         factory2 = self.registry.get_factory("MyAlgo")
         assert factory1 is _dummy_factory
         assert factory2 is _dummy_factory
+        assert self.registry.get_metadata("myalgo").name == "myalgo"
 
 
 # ---------------------------------------------------------------------------
@@ -152,10 +189,19 @@ class TestRegistryDataIntegrity:
             self.registry.register("ppo", _dummy_factory, meta)
 
     def test_name_case_insensitive_match_accepted(self) -> None:
-        """Case variations between key and metadata name normalize cleanly."""
+        """Case variations between key and metadata name normalize cleanly to canonical lowercase."""
         meta = AlgorithmMetadata(name="PPO", kind=AlgorithmKind.RL_POLICY)
         self.registry.register("ppo", _dummy_factory, meta)
-        assert self.registry.get_metadata("ppo").name == "PPO"
+        assert self.registry.get_metadata("ppo").name == "ppo"
+
+    def test_whitespace_and_case_canonicalization(self) -> None:
+        """Whitespace and mixed casing are stripped and canonicalized consistently."""
+        meta = AlgorithmMetadata(name="  My_Algo  ", kind=AlgorithmKind.RL_POLICY)
+        self.registry.register("  My_Algo  ", _dummy_factory, meta)
+        assert "my_algo" in self.registry.list_algorithms()
+        assert self.registry.get_factory("  my_algo  ") is _dummy_factory
+        assert self.registry.get_factory("MY_ALGO") is _dummy_factory
+        assert self.registry.get_metadata("my_algo").name == "my_algo"
 
     def test_invalid_metadata_type_rejected(self) -> None:
         """Non-AlgorithmMetadata objects are rejected during registration."""
@@ -214,12 +260,19 @@ class TestMetadataProtection:
             name="test_algo",
             kind=AlgorithmKind.RL_POLICY,
             trainable=True,
-            hyperparameters={"lr": 0.001},
+            hyperparameters={
+                "lr": 0.001,
+                "network": {
+                    "layers": [64, 64],
+                    "activations": ["relu", "tanh"],
+                },
+            },
             tags=["fast", "actor-critic"],
         )
         # Register and mutate original object
         self.registry.register("test_algo", _dummy_factory, meta)
         meta.tags.append("mutated_after_register")
+        meta.hyperparameters["network"]["layers"].append(128)  # type: ignore
 
         # Mutate retrieved copy
         retrieved = self.registry.get_metadata("test_algo")
@@ -227,17 +280,22 @@ class TestMetadataProtection:
         retrieved.tags.append("mutated_after_get")
         retrieved.hyperparameters["lr"] = 999.0
         retrieved.hyperparameters["new_key"] = "hacked"
+        retrieved.hyperparameters["network"]["layers"].append(256)  # type: ignore
 
         # Mutate list_all copy
         all_meta = self.registry.list_all_metadata()
         all_meta["test_algo"].tags.append("mutated_after_list")
+        all_meta["test_algo"].hyperparameters["network"]["activations"].append("sigmoid")  # type: ignore
         all_meta.clear()
 
         # Fresh retrieval must remain intact
         fresh = self.registry.get_metadata("test_algo")
         assert fresh.trainable is True
         assert fresh.tags == ["fast", "actor-critic"]
-        assert fresh.hyperparameters == {"lr": 0.001}
+        assert fresh.hyperparameters["lr"] == 0.001
+        assert fresh.hyperparameters["network"]["layers"] == [64, 64]
+        assert fresh.hyperparameters["network"]["activations"] == ["relu", "tanh"]
+        assert "new_key" not in fresh.hyperparameters
         assert "test_algo" in self.registry.list_all_metadata()
 
 
@@ -256,6 +314,18 @@ class TestOptionalAlgorithmHandling:
             registry.get_factory("uninstalled_planner")
         with pytest.raises(AlgorithmRegistryError, match="Unknown algorithm 'uninstalled_planner'"):
             registry.get_metadata("uninstalled_planner")
+
+    def test_safe_import_algorithm_missing_module(self) -> None:
+        """_safe_import_algorithm returns None when module is genuinely not found."""
+        result = _safe_import_algorithm("nonexistent_package_xyz", "NonexistentClass")
+        assert result is None
+
+    def test_safe_import_algorithm_propagates_unexpected_error(self) -> None:
+        """_safe_import_algorithm propagates genuine runtime/syntax errors within installed modules."""
+        with patch("importlib.util.find_spec", return_value=True):
+            with patch("importlib.import_module", side_effect=RuntimeError("Syntax defect inside module")):
+                with pytest.raises(RuntimeError, match="Syntax defect inside module"):
+                    _safe_import_algorithm("adaptive_rl.planning.astar", "AStarPlanner")
 
 
 # ---------------------------------------------------------------------------
@@ -356,3 +426,25 @@ class TestGlobalAlgorithmRegistryIntegration:
         assert "rrt_star" in planners
         assert "ppo" not in planners
         assert "sac" not in planners
+
+    def test_reset_defaults(self) -> None:
+        """reset_defaults() and reset_algorithm_defaults() restore built-in algorithms cleanly."""
+        # Test method on global registry
+        algorithm_registry.clear()
+        assert algorithm_registry.list_algorithms() == []
+
+        algorithm_registry.reset_defaults()
+        algos = list_algorithms()
+        assert "ppo" in algos
+        assert "sac" in algos
+        assert "astar" in algos
+        assert "rrt_star" in algos
+
+        # Test convenience function
+        algorithm_registry.clear()
+        assert algorithm_registry.list_algorithms() == []
+
+        reset_algorithm_defaults()
+        algos2 = list_algorithms()
+        assert "ppo" in algos2
+        assert "sac" in algos2
