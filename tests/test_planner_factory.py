@@ -26,7 +26,9 @@ def test_make_planner_rrt_star() -> None:
 
 def test_make_planner_rejects_plain_rrt() -> None:
     """Verify make_planner rejects 'rrt' with informative error suggesting 'rrt_star'."""
-    with pytest.raises(ValueError, match="Planner name 'rrt' is not supported.*Did you mean 'rrt_star'"):
+    with pytest.raises(
+        ValueError, match="Planner name 'rrt' is not supported.*Did you mean 'rrt_star'"
+    ):
         make_planner("rrt")
 
 

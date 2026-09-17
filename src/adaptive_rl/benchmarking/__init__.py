@@ -14,10 +14,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from adaptive_rl.config import load_config
-try:
-    from adaptive_rl.experiments.manager import ExperimentManager
-except ImportError:
-    ExperimentManager = None
+from adaptive_rl.experiments.manager import ExperimentManager
 
 # ---------------------------------------------------------------------------
 # Result data models
@@ -248,7 +245,7 @@ class BenchmarkRunner:
         """
         self.seeds = seeds or [42, 43, 44]
         self.timesteps = timesteps
-        self.manager = ExperimentManager(base_output_dir=base_output_dir) if ExperimentManager is not None else None
+        self.manager = ExperimentManager(base_output_dir=base_output_dir)
 
     def run(
         self,

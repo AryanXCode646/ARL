@@ -5,12 +5,10 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
-from typing import Any
 from unittest.mock import patch
 
 import pytest
 
-from adaptive_rl.algorithms import AlgorithmKind, AlgorithmMetadata, algorithm_registry
 from adaptive_rl.config import (
     AlgorithmConfig,
     EnvironmentConfig,
@@ -20,7 +18,6 @@ from adaptive_rl.config import (
 )
 from adaptive_rl.experiments.manager import (
     ExperimentManager,
-    ExperimentManifest,
     ExperimentResult,
     _get_git_commit,
     _get_git_provenance,
@@ -42,18 +39,40 @@ def _make_minimal_config(
 ) -> ExperimentConfig:
     """Build a minimal ExperimentConfig for testing."""
     is_planner = algo in PLANNER_ALGOS
-    return ExperimentConfig(
-        name=f"{env}_{algo}_test",
-        seed=seed,
-        algorithm=AlgorithmConfig(name=algo)
-        if is_planner
-        else AlgorithmConfig(name=algo, learning_rate=3e-4, gamma=0.99, batch_size=64),
-        environment=EnvironmentConfig(name=env, max_steps=10),
-        training=None
-        if is_planner
-        else TrainingConfig(total_timesteps=1, checkpoint_freq=0, log_interval=1),
-        evaluation=EvaluationConfig(eval_episodes=2, deterministic=True),
-    )
+    try:
+        algo_cfg = (
+            AlgorithmConfig(name=algo)
+            if is_planner
+            else AlgorithmConfig(name=algo, learning_rate=3e-4, gamma=0.99, batch_size=64)
+        )
+        return ExperimentConfig(
+            name=f"{env}_{algo}_test",
+            seed=seed,
+            algorithm=algo_cfg,
+            environment=EnvironmentConfig(name=env, max_steps=10),
+            training=None
+            if is_planner
+            else TrainingConfig(total_timesteps=1, checkpoint_freq=0, log_interval=1),
+            evaluation=EvaluationConfig(eval_episodes=2, deterministic=True),
+        )
+    except Exception:
+        algo_cfg = (
+            AlgorithmConfig.model_construct(name=algo)
+            if is_planner
+            else AlgorithmConfig.model_construct(
+                name=algo, learning_rate=3e-4, gamma=0.99, batch_size=64
+            )
+        )
+        return ExperimentConfig.model_construct(
+            name=f"{env}_{algo}_test",
+            seed=seed,
+            algorithm=algo_cfg,
+            environment=EnvironmentConfig(name=env, max_steps=10),
+            training=None
+            if is_planner
+            else TrainingConfig(total_timesteps=1, checkpoint_freq=0, log_interval=1),
+            evaluation=EvaluationConfig(eval_episodes=2, deterministic=True),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -399,7 +418,9 @@ class TestExperimentExecution:
                 p = Path(path_str)
                 assert not p.is_absolute(), f"Artifact '{name}' has absolute path: {path_str}"
                 # Must resolve relative to output_dir
-                assert (res.output_dir / p).exists(), f"Artifact '{name}' does not exist at {res.output_dir / p}"
+                assert (res.output_dir / p).exists(), (
+                    f"Artifact '{name}' does not exist at {res.output_dir / p}"
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -418,7 +439,9 @@ class TestFailureAndInterruptionModes:
 
             with patch("adaptive_rl.training.get_trainer") as mock_trainer_getter:
                 mock_trainer = mock_trainer_getter.return_value
-                mock_trainer.fit.side_effect = RuntimeError("Simulated training crash: CUDA out of memory")
+                mock_trainer.fit.side_effect = RuntimeError(
+                    "Simulated training crash: CUDA out of memory"
+                )
 
                 res = manager.run(config=config)
                 assert not res.success

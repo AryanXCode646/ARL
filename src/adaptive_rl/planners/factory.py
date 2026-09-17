@@ -27,11 +27,13 @@ except (ImportError, AttributeError):
         goal_sample_rate: float = 0.1
         seed: int | None = None
 
+
 try:
     from adaptive_rl.planners.astar import AStarPlanner
     from adaptive_rl.planners.base import BasePlanner
     from adaptive_rl.planners.rrt_star import RRTStarPlanner
 except ImportError:
+
     class BasePlanner:  # type: ignore
         pass
 
@@ -42,6 +44,7 @@ except ImportError:
     class RRTStarPlanner(BasePlanner):  # type: ignore
         def __init__(self, **kwargs: Any) -> None:
             self.params = kwargs
+
 
 PlannerType = Union[BasePlanner, AStarPlanner, RRTStarPlanner]
 

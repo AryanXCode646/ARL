@@ -11,18 +11,17 @@ import csv
 import hashlib
 import json
 import platform
-import subprocess
+import re
 import sys
 import time
+import traceback
 import uuid
-from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-import re
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Dict, List, Optional, Union, cast
 
-from pydantic import BaseModel
 import yaml
+from pydantic import BaseModel
 
 from adaptive_rl.algorithms import (
     AlgorithmKind,
@@ -30,195 +29,44 @@ from adaptive_rl.algorithms import (
     algorithm_registry,
 )
 from adaptive_rl.config import ExperimentConfig, load_config
+from adaptive_rl.experiments.artifacts import (
+    save_metrics_csv,
+    save_metrics_json,
+)
+from adaptive_rl.experiments.manifest import ExperimentManifest, ExperimentResult
+from adaptive_rl.experiments.provenance import (
+    _get_git_commit,
+    _get_git_provenance,
+    _get_package_version,
+    _get_platform_info,
+    collect_environment_provenance,
+    get_git_commit,
+    get_git_provenance,
+    get_package_version,
+    get_platform_info,
+)
 
 # ---------------------------------------------------------------------------
-# Result data models
+# Re-exported symbols for backward compatibility
 # ---------------------------------------------------------------------------
-
-
-@dataclass
-class ExperimentManifest:
-    """Machine-readable experiment provenance and execution record.
-
-    Written to ``<output_dir>/manifest.json`` on experiment completion.
-
-    Attributes:
-        experiment_id: Unique deterministic experiment identifier.
-        run_id: Unique identifier for this specific execution run.
-        created_at: ISO 8601 UTC timestamp of experiment run creation.
-        algorithm: Algorithm name used in this experiment.
-        environment: Environment name used in this experiment.
-        seed: Random seed.
-        config_path: Relative or absolute path to the source YAML config.
-        source_config: Original input configuration before runtime overrides.
-        overrides: Explicit runtime overrides applied for this run.
-        effective_config: The exact effective configuration used for execution.
-        training_timesteps: Total training timesteps (None for classical planners).
-        git_commit: Full git commit hash at experiment time, if available.
-        git_branch: Active git branch name, if available.
-        git_dirty: Whether the git working directory had uncommitted changes.
-        git_error: Error message if git provenance could not be collected.
-        python_version: Python version string.
-        platform_info: OS and CPU information.
-        package_versions: Key package versions (adaptive-rl, gymnasium, etc.).
-        artifact_paths: Dictionary mapping artifact names to their filesystem paths.
-        evaluation_status: 'completed', 'failed', or 'skipped'.
-        notes: Optional free-text notes or error descriptions.
-    """
-
-    experiment_id: str
-    run_id: str
-    created_at: str
-    algorithm: str
-    environment: str
-    seed: int
-    config_path: str
-    source_config: Dict[str, Any]
-    overrides: Dict[str, Any]
-    effective_config: Dict[str, Any]
-    training_timesteps: Optional[int]
-    git_commit: Optional[str]
-    git_branch: Optional[str] = None
-    git_dirty: Optional[bool] = None
-    git_error: Optional[str] = None
-    python_version: str = ""
-    platform_info: str = ""
-    package_versions: Dict[str, str] = field(default_factory=dict)
-    artifact_paths: Dict[str, str] = field(default_factory=dict)
-    evaluation_status: str = "pending"
-    evaluation_seeds: List[int] = field(default_factory=list)
-    notes: str = ""
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Serialize manifest to a plain dictionary."""
-        return asdict(self)
-
-    def save(self, path: Path) -> None:
-        """Write manifest as formatted JSON.
-
-        Args:
-            path: Destination file path.
-        """
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(self.to_dict(), f, indent=2, default=str)
-
-
-@dataclass
-class ExperimentResult:
-    """Structured result returned by :class:`ExperimentManager`.
-
-    Attributes:
-        experiment_id: Deterministic experiment identifier.
-        run_id: Unique execution identifier for this run.
-        output_dir: Root directory containing all run artifacts.
-        manifest: Experiment provenance manifest.
-        metrics: Evaluation metrics dictionary (JSON-serializable).
-        training_result: TrainingResult dataclass (None for planners).
-        success: Whether the experiment completed without fatal errors.
-        error_message: Error description if success is False.
-    """
-
-    experiment_id: str
-    run_id: str
-    output_dir: Path
-    manifest: ExperimentManifest
-    metrics: Dict[str, Any] = field(default_factory=dict)
-    training_result: Any = None
-    success: bool = True
-    error_message: str = ""
-
-
-# ---------------------------------------------------------------------------
-# Helper utilities
-# ---------------------------------------------------------------------------
-
-
-def _get_git_provenance(cwd: Optional[Path] = None) -> Dict[str, Any]:
-    """Collect git provenance: full commit SHA, branch, dirty status, or explicit error."""
-    prov: Dict[str, Any] = {
-        "commit": None,
-        "branch": None,
-        "dirty": None,
-        "error": None,
-    }
-    try:
-        res_sha = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            cwd=cwd,
-        )
-        if res_sha.returncode == 0:
-            prov["commit"] = res_sha.stdout.strip()
-        else:
-            prov["error"] = res_sha.stderr.strip() or f"git rev-parse returned code {res_sha.returncode}"
-            return prov
-
-        res_branch = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            cwd=cwd,
-        )
-        if res_branch.returncode == 0:
-            prov["branch"] = res_branch.stdout.strip()
-
-        res_dirty = subprocess.run(
-            ["git", "status", "--porcelain"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            cwd=cwd,
-        )
-        if res_dirty.returncode == 0:
-            prov["dirty"] = bool(res_dirty.stdout.strip())
-    except FileNotFoundError:
-        prov["error"] = "git binary not found"
-    except subprocess.TimeoutExpired:
-        prov["error"] = "git command timed out"
-    except Exception as exc:
-        prov["error"] = f"git inspection error: {exc}"
-
-    return prov
-
-
-def _get_git_commit(cwd: Optional[Path] = None) -> str:
-    """Return the short git commit hash, or 'unknown' if unavailable.
-
-    Calls ``git rev-parse --short HEAD`` directly via subprocess. Returns
-    the 7-character short hash on success, or 'unknown' if git is unavailable,
-    the working directory is not a repository, or the command times out.
-    """
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            cwd=cwd,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-        return "unknown"
-    except FileNotFoundError:
-        return "unknown"
-    except subprocess.TimeoutExpired:
-        return "unknown"
-    except Exception:
-        return "unknown"
-
-
-def _get_package_version(package: str) -> str:
-    """Return installed version of a package, or 'not_installed'."""
-    try:
-        import importlib.metadata
-
-        return importlib.metadata.version(package)
-    except Exception:
-        return "not_installed"
+__all__ = [
+    "ExperimentManager",
+    "ExperimentManifest",
+    "ExperimentResult",
+    "_get_git_commit",
+    "_get_git_provenance",
+    "_get_package_version",
+    "_get_platform_info",
+    "get_git_commit",
+    "get_git_provenance",
+    "get_package_version",
+    "get_platform_info",
+    "collect_environment_provenance",
+    "_make_experiment_id",
+    "_make_run_id",
+    "_apply_config_override",
+    "_apply_overrides",
+]
 
 
 def _sanitize_path_component(name: str) -> str:
@@ -288,7 +136,9 @@ def _apply_config_override(config: ExperimentConfig, key: str, value: Any) -> No
                     target[part] = {}
                 target = target[part]
             else:
-                raise ValueError(f"Cannot traverse into '{type(target).__name__}' for override '{key}'")
+                raise ValueError(
+                    f"Cannot traverse into '{type(target).__name__}' for override '{key}'"
+                )
 
         last_part = parts[-1]
         if isinstance(target, BaseModel):
@@ -296,11 +146,17 @@ def _apply_config_override(config: ExperimentConfig, key: str, value: Any) -> No
                 field_info = type(target).model_fields.get(last_part)
                 if field_info is not None and field_info.annotation is not None:
                     target_type = field_info.annotation
-                    try:
-                        if target_type in (int, float, str, bool) and not isinstance(value, target_type):
+                    if target_type is bool and isinstance(value, str):
+                        val_lower = value.strip().lower()
+                        if val_lower in ("true", "1", "yes", "on"):
+                            value = True
+                        elif val_lower in ("false", "0", "no", "off"):
+                            value = False
+                    elif target_type in (int, float, str) and not isinstance(value, target_type):
+                        try:
                             value = target_type(value)
-                    except (ValueError, TypeError):
-                        pass
+                        except (ValueError, TypeError):
+                            pass
                 setattr(target, last_part, value)
             else:
                 raise ValueError(f"Unknown field '{last_part}' in override '{key}'")
@@ -314,11 +170,17 @@ def _apply_config_override(config: ExperimentConfig, key: str, value: Any) -> No
             field_info = type(config).model_fields.get(key)
             if field_info is not None and field_info.annotation is not None:
                 target_type = field_info.annotation
-                try:
-                    if target_type in (int, float, str, bool) and not isinstance(value, target_type):
+                if target_type is bool and isinstance(value, str):
+                    val_lower = value.strip().lower()
+                    if val_lower in ("true", "1", "yes", "on"):
+                        value = True
+                    elif val_lower in ("false", "0", "no", "off"):
+                        value = False
+                elif target_type in (int, float, str) and not isinstance(value, target_type):
+                    try:
                         value = target_type(value)
-                except (ValueError, TypeError):
-                    pass
+                    except (ValueError, TypeError):
+                        pass
             setattr(config, key, value)
         elif hasattr(config.training, key):
             setattr(config.training, key, value)
@@ -337,7 +199,7 @@ def _apply_overrides(config: ExperimentConfig, overrides: Dict[str, Any]) -> Exp
     effective = config.model_copy(deep=True)
     for k, v in overrides.items():
         _apply_config_override(effective, k, v)
-    return effective
+    return ExperimentConfig.model_validate(effective.model_dump())
 
 
 def _resolve_planner_policy(factory: Any, env: Any, kwargs: Optional[Dict[str, Any]] = None) -> Any:
@@ -349,10 +211,15 @@ def _resolve_planner_policy(factory: Any, env: Any, kwargs: Optional[Dict[str, A
 
     # 1. If factory itself is a PlannerPolicy subclass
     if isinstance(factory, type) and issubclass(factory, PlannerPolicy):
-        return factory(env=env, **params)
+        try:
+            return cast(Any, factory)(env=env, **params)
+        except TypeError:
+            return cast(Any, factory)(**params)
 
     # 2. If factory is an instance that already implements PlannerPolicy or predict()
-    if isinstance(factory, PlannerPolicy) or (not isinstance(factory, type) and hasattr(factory, "predict")):
+    if isinstance(factory, PlannerPolicy) or (
+        not isinstance(factory, type) and hasattr(factory, "predict")
+    ):
         return factory
 
     factory_name = getattr(factory, "__name__", str(factory))
@@ -386,10 +253,13 @@ def _resolve_planner_policy(factory: Any, env: Any, kwargs: Optional[Dict[str, A
 
         planner = None
         if isinstance(factory, type) and issubclass(factory, (RRTPlanner, RRTStarPlanner)):
-            if hasattr(factory, "from_navigation_env") and hasattr(unwrapped_env, "bounds"):
-                planner = factory.from_navigation_env(unwrapped_env)
+            if hasattr(factory, "from_navigation_env"):
+                planner = factory.from_navigation_env(unwrapped_env, **params)
         if planner is None and params:
-            planner = factory(**params)
+            try:
+                planner = factory(**params)
+            except TypeError:
+                pass
         return RRTPlannerPolicy(planner=planner, env=env)
 
     # 6. Generic planner instance/factory
@@ -449,7 +319,7 @@ class ExperimentManager:
 
     def run_from_config(
         self,
-        config_path: Path,
+        config_path: Union[str, Path],
         timesteps_override: Optional[int] = None,
         seed_override: Optional[int] = None,
         **extra_overrides: Any,
@@ -484,15 +354,12 @@ class ExperimentManager:
                 seed=-1,
                 config_path=str(config_path),
                 source_config={},
-                overrides={},
+                overrides=extra_overrides,
                 effective_config={},
-                training_timesteps=None,
-                git_commit=None,
-                git_error=None,
-                python_version=sys.version,
-                platform_info=f"{platform.system()} {platform.release()} {platform.machine()}",
-                package_versions={},
                 evaluation_status="failed",
+                failure_type=type(exc).__name__,
+                failure_message=str(exc),
+                failure_traceback=traceback.format_exc(),
                 notes=f"Config loading failed: {exc}",
             )
             manifest.save(err_dir / "manifest.json")
@@ -505,7 +372,10 @@ class ExperimentManager:
                 error_message=f"Config loading failed: {exc}",
             )
 
-        overrides: Dict[str, Any] = dict(extra_overrides)
+        overrides: Dict[str, Any] = {}
+        if "overrides" in extra_overrides and isinstance(extra_overrides["overrides"], dict):
+            overrides.update(extra_overrides.pop("overrides"))
+        overrides.update(extra_overrides)
         if timesteps_override is not None:
             overrides["training.total_timesteps"] = timesteps_override
         if seed_override is not None:
@@ -558,7 +428,9 @@ class ExperimentManager:
                 environment=getattr(getattr(config, "environment", None), "name", "unknown"),
                 seed=getattr(config, "seed", -1),
                 config_path=str(config_path or ""),
-                source_config=source_config.model_dump(mode="json") if isinstance(source_config, ExperimentConfig) else dict(source_config),
+                source_config=source_config.model_dump(mode="json")
+                if isinstance(source_config, ExperimentConfig)
+                else dict(source_config),
                 overrides=overrides_dict,
                 effective_config={},
                 training_timesteps=None,
@@ -600,7 +472,9 @@ class ExperimentManager:
                 break
             except FileExistsError:
                 if attempt == max_attempts - 1:
-                    raise RuntimeError(f"Failed to create unique run directory after {max_attempts} attempts.")
+                    raise RuntimeError(
+                        f"Failed to create unique run directory after {max_attempts} attempts."
+                    )
                 time.sleep(0.01)
 
         assert output_dir is not None
@@ -731,7 +605,9 @@ class ExperimentManager:
             model_path = training_result.final_model_path
             if model_path is not None and Path(model_path).exists():
                 try:
-                    manifest.artifact_paths["model"] = Path(model_path).relative_to(output_dir).as_posix()
+                    manifest.artifact_paths["model"] = (
+                        Path(model_path).relative_to(output_dir).as_posix()
+                    )
                 except ValueError:
                     manifest.artifact_paths["model"] = Path(model_path).name
             manifest.training_timesteps = training_result.total_timesteps
@@ -751,18 +627,20 @@ class ExperimentManager:
                 base_seed=config.seed + 10000,
             )
 
-            metrics = eval_metrics.model_dump()
+            from adaptive_rl.evaluation.metrics import StandardizedExperimentMetrics
+
+            std_metrics = StandardizedExperimentMetrics.from_rl_metrics(eval_metrics)
+            metrics = std_metrics.model_dump()
             manifest.evaluation_status = "completed"
 
             # Save metrics
             metrics_path = output_dir / "metrics.json"
-            with open(metrics_path, "w", encoding="utf-8") as f:
-                json.dump(metrics, f, indent=2, default=str)
+            save_metrics_json(metrics, metrics_path)
             manifest.artifact_paths["metrics"] = "metrics.json"
 
             # Save CSV
             csv_path = output_dir / "metrics.csv"
-            self._save_metrics_csv(metrics, csv_path)
+            save_metrics_csv(std_metrics.to_csv_dict(), csv_path)
             manifest.artifact_paths["metrics_csv"] = "metrics.csv"
 
             # Full evaluation report
@@ -774,6 +652,9 @@ class ExperimentManager:
 
         except KeyboardInterrupt:
             manifest.evaluation_status = "interrupted"
+            manifest.failure_type = "KeyboardInterrupt"
+            manifest.failure_message = "Execution interrupted by user"
+            manifest.failure_traceback = traceback.format_exc()
             manifest.notes = "Execution interrupted by user (KeyboardInterrupt)."
             manifest_path = output_dir / "manifest.json"
             manifest.save(manifest_path)
@@ -782,6 +663,9 @@ class ExperimentManager:
             success = False
             error_msg = str(exc)
             manifest.evaluation_status = "failed"
+            manifest.failure_type = type(exc).__name__
+            manifest.failure_message = str(exc)
+            manifest.failure_traceback = traceback.format_exc()
             manifest.notes = f"RL execution error: {exc}"
 
         manifest_path = output_dir / "manifest.json"
@@ -836,19 +720,23 @@ class ExperimentManager:
                 config.seed, config.evaluation.eval_episodes
             )
 
-            metrics = eval_metrics.model_dump()
+            from adaptive_rl.evaluation.metrics import StandardizedExperimentMetrics
+
+            std_metrics = StandardizedExperimentMetrics.from_rl_metrics(eval_metrics)
+            std_metrics.episode_return = None  # Classical planners do not produce RL reward returns
+            std_metrics.episode_length = None  # RL step count is not applicable to planner paths
+            metrics = std_metrics.model_dump()
             manifest.evaluation_status = "completed"
             manifest.training_timesteps = None
 
             # Save metrics
             metrics_path = output_dir / "metrics.json"
-            with open(metrics_path, "w", encoding="utf-8") as f:
-                json.dump(metrics, f, indent=2, default=str)
+            save_metrics_json(metrics, metrics_path)
             manifest.artifact_paths["metrics"] = "metrics.json"
 
             # Save CSV
             csv_path = output_dir / "metrics.csv"
-            self._save_metrics_csv(metrics, csv_path)
+            save_metrics_csv(std_metrics.to_csv_dict(), csv_path)
             manifest.artifact_paths["metrics_csv"] = "metrics.csv"
 
             # Full evaluation report
@@ -860,6 +748,9 @@ class ExperimentManager:
 
         except KeyboardInterrupt:
             manifest.evaluation_status = "interrupted"
+            manifest.failure_type = "KeyboardInterrupt"
+            manifest.failure_message = "Execution interrupted by user"
+            manifest.failure_traceback = traceback.format_exc()
             manifest.notes = "Execution interrupted by user (KeyboardInterrupt)."
             manifest_path = output_dir / "manifest.json"
             manifest.save(manifest_path)
@@ -868,6 +759,9 @@ class ExperimentManager:
             success = False
             error_msg = str(exc)
             manifest.evaluation_status = "failed"
+            manifest.failure_type = type(exc).__name__
+            manifest.failure_message = str(exc)
+            manifest.failure_traceback = traceback.format_exc()
             manifest.notes = f"Planner execution error: {exc}"
 
         manifest_path = output_dir / "manifest.json"

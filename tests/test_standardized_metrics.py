@@ -10,24 +10,29 @@ from adaptive_rl.evaluation.metrics import (
     EvaluationMetrics,
     StandardizedExperimentMetrics,
 )
+
 try:
     from adaptive_rl.experiments.manager import ExperimentManager
 except ImportError:
+
     class ExperimentManager:
         @staticmethod
         def _save_metrics_csv(data, path):
             import csv
+
             filtered = {k: v for k, v in data.items() if not isinstance(v, (list, tuple, dict))}
             with open(path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=list(filtered.keys()))
                 writer.writeheader()
                 writer.writerow(filtered)
 
+
 try:
     from adaptive_rl.planners.adapter import PlannerEvaluationMetrics
 except ImportError:
     from dataclasses import dataclass, field
     from typing import Any, Dict, List, Optional
+
     @dataclass
     class PlannerEvaluationMetrics:
         episodes: int = 0
@@ -42,8 +47,6 @@ except ImportError:
         all_path_lengths: List[Optional[float]] = field(default_factory=list)
         all_planning_times: List[Optional[float]] = field(default_factory=list)
         additional_metrics: Dict[str, Any] = field(default_factory=dict)
-
-
 
 
 def test_standardized_metrics_defaults_to_none() -> None:

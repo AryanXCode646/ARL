@@ -17,6 +17,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 import adaptive_rl
+from adaptive_rl.algorithms import algorithm_registry
 from adaptive_rl.config import ConfigError, load_config
 from adaptive_rl.environments.registry import RegistryError, list_all_metadata, make_env
 
@@ -145,14 +146,25 @@ def validate_config(
             curr_preset = cfg.curriculum.preset or f"{len(cfg.curriculum.stages)} custom stages"
             curr_info = f"\n• [bold]Curriculum:[/bold] Enabled ({curr_preset}, Window: {cfg.curriculum.eval_window})"
 
+        algo_details = (
+            f"LR: {cfg.algorithm.learning_rate}, Gamma: {cfg.algorithm.gamma}"
+            if cfg.algorithm.learning_rate is not None
+            else "Planner"
+        )
+        training_info = (
+            f"{cfg.training.total_timesteps:,} steps (Checkpoint freq: {cfg.training.checkpoint_freq})"
+            if cfg.training is not None
+            else "None (Classical planner)"
+        )
+
         console.print(
             Panel.fit(
                 f"[bold green]✓ Configuration is valid![/bold green]\n\n"
                 f"• [bold]Experiment:[/bold] {cfg.name}\n"
                 f"• [bold]Seed:[/bold] {cfg.seed}\n"
-                f"• [bold]Algorithm:[/bold] {cfg.algorithm.name} (LR: {cfg.algorithm.learning_rate}, Gamma: {cfg.algorithm.gamma})\n"
+                f"• [bold]Algorithm:[/bold] {cfg.algorithm.name} ({algo_details})\n"
                 f"• [bold]Environment:[/bold] {cfg.environment.name} (Max steps: {cfg.environment.max_steps})\n"
-                f"• [bold]Training:[/bold] {cfg.training.total_timesteps:,} steps (Checkpoint freq: {cfg.training.checkpoint_freq})\n"
+                f"• [bold]Training:[/bold] {training_info}\n"
                 f"• [bold]Evaluation:[/bold] {cfg.evaluation.eval_episodes} episodes"
                 f"{curr_info}",
                 title=f"Valid: {path}",
@@ -401,6 +413,12 @@ def train(
         console.print(f"[bold red]Configuration error:[/bold red] {err}")
         raise typer.Exit(code=1)
 
+    if exp_config.training is None or algorithm_registry.is_planner(exp_config.algorithm.name):
+        console.print(
+            f"[bold red]Configuration error:[/bold red] Algorithm '{exp_config.algorithm.name}' is a classical planner and does not support training."
+        )
+        raise typer.Exit(code=1)
+
     if timesteps is not None:
         exp_config.training.total_timesteps = timesteps
     if seed is not None:
@@ -538,8 +556,14 @@ def evaluate(
 
         table.add_row("Mean Reward", f"{metrics.mean_reward:.2f} ± {metrics.std_reward:.2f}")
         table.add_row("Min / Max Reward", f"{metrics.min_reward:.2f} / {metrics.max_reward:.2f}")
-        table.add_row("Success Rate", f"{metrics.success_rate * 100:.1f}%")
-        table.add_row("Collision Rate", f"{metrics.collision_rate * 100:.1f}%")
+        success_str = (
+            f"{metrics.success_rate * 100:.1f}%" if metrics.success_rate is not None else "N/A"
+        )
+        collision_str = (
+            f"{metrics.collision_rate * 100:.1f}%" if metrics.collision_rate is not None else "N/A"
+        )
+        table.add_row("Success Rate", success_str)
+        table.add_row("Collision Rate", collision_str)
         table.add_row(
             "Mean Episode Length",
             f"{metrics.mean_episode_length:.1f} ± {metrics.std_episode_length:.1f}",
@@ -632,18 +656,40 @@ def run_generalization_command(
         table.add_column("Unseen Test Distribution", style="magenta", justify="right")
         table.add_column("Generalization Gap", style="yellow", justify="right")
 
-        table.add_row(
-            "Success Rate",
-            f"{report.train_metrics.success_rate * 100:.1f}%",
-            f"{report.test_metrics.success_rate * 100:.1f}%",
-            f"{-report.generalization_gap_success * 100:+.1f}%",
+        train_succ = (
+            f"{report.train_metrics.success_rate * 100:.1f}%"
+            if report.train_metrics.success_rate is not None
+            else "N/A"
         )
-        table.add_row(
-            "Collision Rate",
-            f"{report.train_metrics.collision_rate * 100:.1f}%",
-            f"{report.test_metrics.collision_rate * 100:.1f}%",
-            f"{report.test_metrics.collision_rate - report.train_metrics.collision_rate:+.1f}%",
+        test_succ = (
+            f"{report.test_metrics.success_rate * 100:.1f}%"
+            if report.test_metrics.success_rate is not None
+            else "N/A"
         )
+        gap_succ = (
+            f"{-report.generalization_gap_success * 100:+.1f}%"
+            if report.generalization_gap_success is not None
+            else "N/A"
+        )
+        table.add_row("Success Rate", train_succ, test_succ, gap_succ)
+
+        train_coll = (
+            f"{report.train_metrics.collision_rate * 100:.1f}%"
+            if report.train_metrics.collision_rate is not None
+            else "N/A"
+        )
+        test_coll = (
+            f"{report.test_metrics.collision_rate * 100:.1f}%"
+            if report.test_metrics.collision_rate is not None
+            else "N/A"
+        )
+        gap_coll = (
+            f"{(report.test_metrics.collision_rate - report.train_metrics.collision_rate) * 100:+.1f}%"
+            if report.train_metrics.collision_rate is not None
+            and report.test_metrics.collision_rate is not None
+            else "N/A"
+        )
+        table.add_row("Collision Rate", train_coll, test_coll, gap_coll)
         table.add_row(
             "Mean Reward",
             f"{report.train_metrics.mean_reward:.2f} ± {report.train_metrics.std_reward:.2f}",
@@ -656,10 +702,15 @@ def run_generalization_command(
             f"{report.test_metrics.mean_episode_length:.1f}",
             f"{report.test_metrics.mean_episode_length - report.train_metrics.mean_episode_length:+.1f}",
         )
+        retention_str = (
+            f"{report.relative_success_retention * 100:.1f}%"
+            if report.relative_success_retention is not None
+            else "N/A"
+        )
         table.add_row(
             "Success Retention",
             "100.0%",
-            f"{report.relative_success_retention * 100:.1f}%",
+            retention_str,
             "-",
         )
 

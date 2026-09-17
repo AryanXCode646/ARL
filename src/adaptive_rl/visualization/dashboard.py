@@ -8,7 +8,7 @@ No additional dependencies are required.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, cast
 
 from rich.console import Console
 from rich.panel import Panel
@@ -18,7 +18,6 @@ try:
     from adaptive_rl.experiments.manager import ExperimentManager
 except ImportError:
     import json
-    from typing import Any, Dict
 
     class ExperimentManager:  # type: ignore
         """Fallback manager for dashboard when running without experiment manager package."""
@@ -48,9 +47,10 @@ except ImportError:
                 return None
             try:
                 with open(metrics_path, encoding="utf-8") as f:
-                    return json.load(f)
+                    return cast(Dict[str, Any], json.load(f))
             except Exception:
                 return None
+
 
 console = Console()
 

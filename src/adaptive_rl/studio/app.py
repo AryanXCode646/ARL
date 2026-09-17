@@ -6,7 +6,7 @@ import json
 import sys
 from pathlib import Path
 from threading import Event
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional, cast
 
 from PySide6.QtCore import QObject, QPointF, Qt, QThread, Signal, Slot
 from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
@@ -32,9 +32,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from adaptive_rl.training.callbacks import BaseCallback
+
 try:
     from adaptive_rl.experiments.manager import ExperimentManager
 except ImportError:
+
     class ExperimentManager:  # type: ignore
         """Fallback manager for artifact reading when running without experiment manager package."""
 
@@ -63,9 +66,10 @@ except ImportError:
                 return None
             try:
                 with open(metrics_path, encoding="utf-8") as f:
-                    return json.load(f)
+                    return cast(Dict[str, Any], json.load(f))
             except Exception:
                 return None
+
 
 NAV_ITEMS = [
     ("Overview", "What is my RL system doing right now?"),
@@ -233,7 +237,7 @@ class TrainingWorker(QObject):
                 trainer.close()
 
 
-class TrainingStopCallback:
+class TrainingStopCallback(BaseCallback):
     """Stop training cooperatively without terminating a Qt worker thread."""
 
     def __init__(self, stop_event: Event) -> None:
@@ -279,7 +283,7 @@ class StudioWindow(QMainWindow):
 
     def _apply_theme(self) -> None:
         application = QApplication.instance()
-        if application is None:
+        if not isinstance(application, QApplication):
             return
         application.setStyleSheet(
             """

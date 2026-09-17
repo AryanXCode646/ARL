@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Sequence, Tuple, cast
 
 import numpy as np
 
@@ -136,7 +136,7 @@ class RRTPlanner(BasePlanner):
         if dist <= self.step_size:
             return to_point.copy()
         direction = vec / dist
-        return from_point + direction * self.step_size
+        return cast(np.ndarray, from_point + direction * self.step_size)
 
     def plan(
         self,
@@ -257,7 +257,9 @@ class RRTStarPlanner(RRTPlanner):
         agent_radius: float = 0.3,
         collision_resolution: float = 0.1,
         rewire_radius: float = 2.0,
+        search_radius: Optional[float] = None,
         rng_seed: Optional[int] = None,
+        **kwargs: Any,
     ) -> None:
         """Initialize RRTStarPlanner.
 
@@ -271,8 +273,11 @@ class RRTStarPlanner(RRTPlanner):
             agent_radius: Collision safety buffer.
             collision_resolution: Step resolution for edge checking.
             rewire_radius: Search radius for finding near neighbors during rewiring.
+            search_radius: Optional search radius override.
             rng_seed: Optional random generator seed.
+            **kwargs: Additional keyword arguments.
         """
+        effective_rewire = search_radius if search_radius is not None else rewire_radius
         super().__init__(
             bounds=bounds,
             obstacles=obstacles,
@@ -284,7 +289,7 @@ class RRTStarPlanner(RRTPlanner):
             collision_resolution=collision_resolution,
             rng_seed=rng_seed,
         )
-        self.rewire_radius = float(rewire_radius)
+        self.rewire_radius = float(effective_rewire)
 
     @property
     def name(self) -> str:
@@ -419,6 +424,7 @@ class RRTStarPlanner(RRTPlanner):
         env: Any,
         max_iterations: int = 2500,
         rng_seed: Optional[int] = None,
+        **kwargs: Any,
     ) -> RRTStarPlanner:
         """Construct an RRTStarPlanner calibrated for ContinuousNavigation2DEnv.
 
@@ -426,6 +432,7 @@ class RRTStarPlanner(RRTPlanner):
             env: ContinuousNavigation2DEnv instance.
             max_iterations: Search iteration budget.
             rng_seed: Reproducible sampling seed.
+            **kwargs: Additional overrides for planner hyperparameters.
 
         Returns:
             RRTStarPlanner: Calibrated 2D planner instance.
@@ -442,18 +449,20 @@ class RRTStarPlanner(RRTPlanner):
         agent_radius = float(getattr(env, "agent_radius", 0.3))
         goal_radius = float(getattr(env, "goal_radius", 0.8))
 
-        return cls(
-            bounds=bounds,
-            obstacles=obstacles,
-            step_size=0.8,
-            max_iterations=max_iterations,
-            goal_bias=0.2,
-            goal_tolerance=goal_radius,
-            agent_radius=agent_radius,
-            collision_resolution=0.1,
-            rewire_radius=2.5,
-            rng_seed=rng_seed,
-        )
+        init_kwargs: dict[str, Any] = {
+            "bounds": bounds,
+            "obstacles": obstacles,
+            "step_size": 0.8,
+            "max_iterations": max_iterations,
+            "goal_bias": 0.2,
+            "goal_tolerance": goal_radius,
+            "agent_radius": agent_radius,
+            "collision_resolution": 0.1,
+            "rewire_radius": 2.5,
+            "rng_seed": rng_seed,
+        }
+        init_kwargs.update(kwargs)
+        return cls(**init_kwargs)
 
     @classmethod
     def from_drone_env(
