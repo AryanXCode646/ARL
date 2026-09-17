@@ -74,8 +74,18 @@ class TrafficSignalEnv(AdaptiveRLEnv[np.ndarray, int]):
         overflow_penalty: float = 20.0,
         terminate_on_overflow: bool = False,
         render_mode: Optional[str] = None,
+        success_queue_threshold: int = 8,
     ) -> None:
         """Initialize the Traffic Signal environment.
+
+        Episode Semantics:
+            - Success: Episode-level outcome evaluated at completion. An episode is successful
+              if and only if: (1) no queue overflow occurred at any point (had_overflow is False),
+              and (2) total queue length at termination is <= success_queue_threshold.
+              An episode that experienced overflow can NEVER be successful.
+            - Overflow: Occurs when vehicle count on any approach reaches max_queue.
+            - Termination: Occurs only if terminate_on_overflow is True and overflow occurs.
+            - Truncation: Occurs when step >= max_steps.
 
         Args:
             arrival_rates: Poisson arrival lambda parameters for (North, South, East, West).
@@ -93,6 +103,7 @@ class TrafficSignalEnv(AdaptiveRLEnv[np.ndarray, int]):
             overflow_penalty: Penalty applied when an approach queue overflows.
             terminate_on_overflow: Whether queue overflow terminates the episode immediately.
             render_mode: Rendering mode ('ansi' or 'human').
+            success_queue_threshold: Maximum total queue at episode end to count as success.
         """
         super().__init__()
         if max_steps < 1:
@@ -115,6 +126,7 @@ class TrafficSignalEnv(AdaptiveRLEnv[np.ndarray, int]):
         self.overflow_penalty = overflow_penalty
         self.terminate_on_overflow = terminate_on_overflow
         self.render_mode = render_mode
+        self.success_queue_threshold = success_queue_threshold
 
         # Define Farama Gymnasium action and observation spaces
         self.action_space = spaces.Discrete(2)
@@ -133,6 +145,7 @@ class TrafficSignalEnv(AdaptiveRLEnv[np.ndarray, int]):
             min_green_steps=min_green_steps,
         )
         self._current_step = 0
+        self._had_overflow = False
 
     def _get_obs(self) -> np.ndarray:
         """Construct normalized 10-dimensional observation vector."""
@@ -177,6 +190,9 @@ class TrafficSignalEnv(AdaptiveRLEnv[np.ndarray, int]):
         ]
         total_q = sum(queues)
 
+        controlled = total_q <= self.success_queue_threshold
+        success = controlled and (not self._had_overflow)
+
         return {
             "step": self._current_step,
             "max_steps": self.max_steps,
@@ -191,7 +207,11 @@ class TrafficSignalEnv(AdaptiveRLEnv[np.ndarray, int]):
             "cumulative_departures": self.intersection.cumulative_departures,
             "cumulative_arrivals": self.intersection.cumulative_arrivals,
             "cumulative_delay": self.intersection.cumulative_delay,
-            "success": total_q <= 8,
+            "overflow": self._had_overflow,
+            "step_overflow": False,
+            "had_overflow": self._had_overflow,
+            "success": success,
+            "success_queue_threshold": self.success_queue_threshold,
         }
 
     def reset(
@@ -203,6 +223,7 @@ class TrafficSignalEnv(AdaptiveRLEnv[np.ndarray, int]):
         """Reset the traffic intersection environment to initial state."""
         super().reset(seed=seed, options=options)
         self._current_step = 0
+        self._had_overflow = False
 
         # Optional parameter overrides via reset options
         rates = self.arrival_rates
@@ -258,7 +279,9 @@ class TrafficSignalEnv(AdaptiveRLEnv[np.ndarray, int]):
         reward = float(throughput_bonus - queue_cost - wait_cost - switch_cost - premature_cost)
 
         terminated = False
-        if telemetry.overflow:
+        step_overflow = bool(telemetry.overflow)
+        if step_overflow:
+            self._had_overflow = True
             reward -= self.overflow_penalty
             if self.terminate_on_overflow:
                 terminated = True
@@ -271,8 +294,13 @@ class TrafficSignalEnv(AdaptiveRLEnv[np.ndarray, int]):
         info["phase_switched"] = telemetry.phase_switched
         info["step_departures"] = telemetry.total_departures
         info["step_arrivals"] = telemetry.total_arrivals
-        info["overflow"] = telemetry.overflow
+        info["overflow"] = step_overflow
+        info["step_overflow"] = step_overflow
+        info["had_overflow"] = self._had_overflow
         info["premature_switch"] = was_premature
+        # Invariant: An overflowed or early-terminated episode is never successful
+        if self._had_overflow or terminated:
+            info["success"] = False
 
         if self.render_mode == "human":
             print(self.render())
