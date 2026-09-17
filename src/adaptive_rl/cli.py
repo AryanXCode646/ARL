@@ -7,7 +7,7 @@ and guiding developers through the multi-phase implementation roadmap.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 import typer
