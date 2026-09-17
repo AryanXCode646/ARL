@@ -1,12 +1,14 @@
 """Algorithm registry and factory system for AdaptiveRL.
 
 Provides a unified registry capable of resolving and inspecting both trainable
-RL algorithms (PPO, SAC) and deterministic planners (A*), distinguishing
-between algorithm types via capability metadata.
+RL algorithms (PPO, SAC) and deterministic classical motion planners (A*, RRT*),
+distinguishing between algorithm types via capability metadata and enforcing
+registration integrity and implementation availability.
 """
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
@@ -34,7 +36,7 @@ class AlgorithmMetadata:
         name: Canonical lowercase identifier used for registry lookup.
         kind: Whether this is an RL policy or deterministic planner.
         description: Human-readable description.
-        action_space: Type of action space supported (e.g. 'discrete', 'continuous', 'any').
+        action_space: Type of action space supported (e.g. 'discrete', 'continuous', 'discrete, continuous').
         trainable: True if the algorithm supports a training loop.
         class_name: Fully qualified or simple class name.
         hyperparameters: Default hyperparameter documentation.
@@ -44,11 +46,23 @@ class AlgorithmMetadata:
     name: str
     kind: AlgorithmKind
     description: str = ""
-    action_space: str = "any"
+    action_space: str = "discrete, continuous"
     trainable: bool = True
     class_name: str = ""
     hyperparameters: Dict[str, Any] = field(default_factory=dict)
     tags: List[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class RegisteredAlgorithm:
+    """Internal registry entry pairing an algorithm factory with its metadata.
+
+    Ensures that an algorithm's factory and capability metadata are stored and
+    retrieved as an indivisible, coherent record.
+    """
+
+    factory: Callable[..., Any]
+    metadata: AlgorithmMetadata
 
 
 class AlgorithmRegistryError(Exception):
@@ -57,12 +71,18 @@ class AlgorithmRegistryError(Exception):
     pass
 
 
+class AlgorithmUnavailableError(AlgorithmRegistryError):
+    """Exception raised when an algorithm is registered/recognized but unavailable in the environment."""
+
+    pass
+
+
 class AlgorithmRegistry:
     """Registry maintaining available algorithms, factories, and associated metadata.
 
     Mirrors the design of :class:`EnvironmentRegistry` for consistency.
-    Distinguishes between trainable RL algorithms and deterministic planners via
-    :class:`AlgorithmKind` capability metadata.
+    Stores factory and metadata as a single authoritative :class:`RegisteredAlgorithm`
+    record to prevent disconnects or inconsistent lookups.
 
     Example::
 
@@ -80,8 +100,7 @@ class AlgorithmRegistry:
     """
 
     def __init__(self) -> None:
-        self._factories: Dict[str, Callable[..., Any]] = {}
-        self._metadata: Dict[str, AlgorithmMetadata] = {}
+        self._registry: Dict[str, RegisteredAlgorithm] = {}
 
     def register(
         self,
@@ -98,13 +117,13 @@ class AlgorithmRegistry:
 
         Raises:
             AlgorithmRegistryError: If name is empty, already registered,
-                or factory is not callable.
+                factory is not callable, or metadata name does not match registry key.
         """
         if not name or not isinstance(name, str):
             raise AlgorithmRegistryError("Algorithm name must be a non-empty string.")
 
         clean = name.strip().lower()
-        if clean in self._factories:
+        if clean in self._registry:
             raise AlgorithmRegistryError(
                 f"Algorithm '{clean}' is already registered. "
                 "Use a unique name or clear the registry first."
@@ -112,15 +131,28 @@ class AlgorithmRegistry:
         if not callable(factory):
             raise AlgorithmRegistryError(f"Factory for algorithm '{clean}' must be callable.")
 
-        self._factories[clean] = factory
         if metadata is not None:
-            self._metadata[clean] = metadata
+            if not isinstance(metadata, AlgorithmMetadata):
+                raise AlgorithmRegistryError(
+                    f"Metadata for algorithm '{clean}' must be an instance of AlgorithmMetadata."
+                )
+            if metadata.name.strip().lower() != clean:
+                raise AlgorithmRegistryError(
+                    f"Algorithm name mismatch: registration key '{clean}' does not match "
+                    f"metadata name '{metadata.name}'."
+                )
+            meta_record = copy.deepcopy(metadata)
         else:
-            self._metadata[clean] = AlgorithmMetadata(
+            meta_record = AlgorithmMetadata(
                 name=clean,
                 kind=AlgorithmKind.RL_POLICY,
                 description=f"Algorithm '{clean}' (no metadata provided).",
             )
+
+        self._registry[clean] = RegisteredAlgorithm(
+            factory=factory,
+            metadata=meta_record,
+        )
 
     def get_factory(self, name: str) -> Callable[..., Any]:
         """Retrieve the factory callable for a registered algorithm.
@@ -135,15 +167,17 @@ class AlgorithmRegistry:
             AlgorithmRegistryError: If name is not registered.
         """
         clean = name.strip().lower()
-        if clean not in self._factories:
-            available = ", ".join(sorted(self._factories.keys())) or "none"
+        if clean not in self._registry:
+            available = ", ".join(sorted(self._registry.keys())) or "none"
             raise AlgorithmRegistryError(
                 f"Unknown algorithm '{clean}'. Available registered algorithms: {available}"
             )
-        return self._factories[clean]
+        return self._registry[clean].factory
 
     def get_metadata(self, name: str) -> AlgorithmMetadata:
         """Retrieve metadata for a registered algorithm.
+
+        Returns a defensive copy so external modification cannot mutate internal registry state.
 
         Args:
             name: Algorithm identifier.
@@ -155,19 +189,21 @@ class AlgorithmRegistry:
             AlgorithmRegistryError: If name is not registered.
         """
         clean = name.strip().lower()
-        if clean not in self._metadata:
-            available = ", ".join(sorted(self._metadata.keys())) or "none"
+        if clean not in self._registry:
+            available = ", ".join(sorted(self._registry.keys())) or "none"
             raise AlgorithmRegistryError(
                 f"Unknown algorithm '{clean}'. Available registered algorithms: {available}"
             )
-        return self._metadata[clean]
+        return copy.deepcopy(self._registry[clean].metadata)
 
     def list_algorithms(self) -> List[str]:
         """Return sorted list of registered algorithm names."""
-        return sorted(self._factories.keys())
+        return sorted(self._registry.keys())
 
     def list_by_kind(self, kind: AlgorithmKind) -> List[str]:
         """Return sorted list of registered algorithm names matching a kind.
+
+        Operates directly on the authoritative registered records.
 
         Args:
             kind: AlgorithmKind to filter by.
@@ -175,11 +211,16 @@ class AlgorithmRegistry:
         Returns:
             Sorted list of matching algorithm names.
         """
-        return sorted(name for name, meta in self._metadata.items() if meta.kind == kind)
+        if not isinstance(kind, AlgorithmKind):
+            try:
+                kind = AlgorithmKind(kind)
+            except ValueError:
+                return []
+        return sorted(name for name, entry in self._registry.items() if entry.metadata.kind == kind)
 
     def list_all_metadata(self) -> Dict[str, AlgorithmMetadata]:
-        """Return mapping of all registered algorithm names to metadata."""
-        return {k: self._metadata[k] for k in sorted(self._metadata.keys())}
+        """Return mapping of all registered algorithm names to metadata defensive copies."""
+        return {name: copy.deepcopy(entry.metadata) for name, entry in sorted(self._registry.items())}
 
     def is_trainable(self, name: str) -> bool:
         """Return True if the named algorithm is a trainable RL policy.
@@ -194,8 +235,65 @@ class AlgorithmRegistry:
 
     def clear(self) -> None:
         """Clear all registered algorithms (primarily for test isolation)."""
-        self._factories.clear()
-        self._metadata.clear()
+        self._registry.clear()
+
+    def __contains__(self, name: str) -> bool:
+        """Check if an algorithm name is registered."""
+        return name.strip().lower() in self._registry
+
+    def __len__(self) -> int:
+        """Return the number of registered algorithms."""
+        return len(self._registry)
+
+
+def _safe_import_algorithm(
+    primary_module: str,
+    class_name: str,
+    fallback_module: Optional[str] = None,
+) -> Optional[type]:
+    """Safely import an algorithm or planner class from preferred or fallback modules.
+
+    Distinguishes strictly between:
+    1. The module genuinely does not exist on disk/in environment (returns None).
+    2. The module exists on disk but failed to import due to a syntax error,
+       internal import error, or runtime defect (re-raises the exception so
+       genuine bugs are never hidden).
+
+    Args:
+        primary_module: Preferred module path (e.g. 'adaptive_rl.planners.astar').
+        class_name: Class name to import (e.g. 'AStarPlanner').
+        fallback_module: Secondary module path (e.g. 'adaptive_rl.planning.astar').
+
+    Returns:
+        The imported class, or None if neither module is present in the environment.
+
+    Raises:
+        ImportError: If a module exists on disk but crashes during import.
+        AttributeError: If a module exists on disk but does not define class_name.
+    """
+    import importlib
+    import importlib.util
+
+    for mod_path in (primary_module, fallback_module):
+        if not mod_path:
+            continue
+        try:
+            spec = importlib.util.find_spec(mod_path)
+        except (ModuleNotFoundError, ValueError):
+            spec = None
+        except Exception as err:
+            raise ImportError(f"Error inspecting module spec for '{mod_path}': {err}") from err
+
+        if spec is not None:
+            # Module exists on disk. Any import/runtime failure is a real bug and must NOT be swallowed.
+            mod = importlib.import_module(mod_path)
+            if not hasattr(mod, class_name):
+                raise AttributeError(
+                    f"Module '{mod_path}' exists on disk but does not define '{class_name}'."
+                )
+            return getattr(mod, class_name)
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -205,17 +303,11 @@ algorithm_registry = AlgorithmRegistry()
 
 
 def _register_defaults() -> None:
-    """Register the built-in algorithms into the global registry."""
+    """Register the built-in algorithms into the global registry with real implementations."""
     from adaptive_rl.algorithms.ppo import PPOAlgorithm
     from adaptive_rl.algorithms.sac import SACAlgorithm
-    try:
-        from adaptive_rl.planners.astar import AStarPlanner
-    except ImportError:
-        class AStarPlanner:  # type: ignore
-            def __init__(self, **kwargs):
-                pass
 
-    if "ppo" not in algorithm_registry.list_algorithms():
+    if "ppo" not in algorithm_registry:
         algorithm_registry.register(
             "ppo",
             PPOAlgorithm,
@@ -226,7 +318,7 @@ def _register_defaults() -> None:
                     "Proximal Policy Optimization (PPO) — on-policy actor-critic algorithm. "
                     "Supports discrete and continuous action spaces. Wraps Stable-Baselines3 PPO."
                 ),
-                action_space="any",
+                action_space="discrete, continuous",
                 trainable=True,
                 class_name="PPOAlgorithm",
                 hyperparameters={
@@ -245,7 +337,7 @@ def _register_defaults() -> None:
             ),
         )
 
-    if "sac" not in algorithm_registry.list_algorithms():
+    if "sac" not in algorithm_registry:
         algorithm_registry.register(
             "sac",
             SACAlgorithm,
@@ -274,16 +366,23 @@ def _register_defaults() -> None:
             ),
         )
 
-    if "astar" not in algorithm_registry.list_algorithms():
+    # Optional classical planners: resolved strictly via real implementations.
+    # Never creates fake/stub classes. If unavailable, they are not registered.
+    astar_class = _safe_import_algorithm(
+        "adaptive_rl.planners.astar",
+        "AStarPlanner",
+        fallback_module="adaptive_rl.planning.astar",
+    )
+    if astar_class is not None and "astar" not in algorithm_registry:
         algorithm_registry.register(
             "astar",
-            AStarPlanner,
+            astar_class,
             AlgorithmMetadata(
                 name="astar",
                 kind=AlgorithmKind.PLANNER,
                 description=(
                     "A* grid navigation planner. Deterministic shortest-path algorithm using "
-                    "Manhattan distance heuristic. Supports discrete GridWorld environments only."
+                    "heuristic search. Supports discrete GridWorld environments."
                 ),
                 action_space="discrete",
                 trainable=False,
@@ -293,17 +392,15 @@ def _register_defaults() -> None:
             ),
         )
 
-    if "rrt_star" not in algorithm_registry.list_algorithms():
-        try:
-            from adaptive_rl.planners.rrt_star import RRTStarPlanner
-        except ImportError:
-            class RRTStarPlanner:  # type: ignore
-                def __init__(self, **kwargs):
-                    pass
-
+    rrt_star_class = _safe_import_algorithm(
+        "adaptive_rl.planners.rrt_star",
+        "RRTStarPlanner",
+        fallback_module="adaptive_rl.planning.rrt",
+    )
+    if rrt_star_class is not None and "rrt_star" not in algorithm_registry:
         algorithm_registry.register(
             "rrt_star",
-            RRTStarPlanner,
+            rrt_star_class,
             AlgorithmMetadata(
                 name="rrt_star",
                 kind=AlgorithmKind.PLANNER,
