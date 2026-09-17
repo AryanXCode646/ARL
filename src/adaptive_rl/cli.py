@@ -416,7 +416,9 @@ def train(
                 f"• [bold]Episodes Completed:[/bold] {result.episodes_completed}\n"
                 f"• [bold]Mean Reward (last window):[/bold] {result.mean_reward:.2f}\n"
                 f"• [bold]Saved Model:[/bold] {result.final_model_path}\n"
-                f"• [bold]Checkpoints Created:[/bold] {len(result.checkpoints)}",
+                f"• [bold]Checkpoints Created:[/bold] {len(result.checkpoints)}\n"
+                f"• [bold]Metadata:[/bold] {result.metadata_path}\n"
+                f"• [bold]Episodes CSV:[/bold] {result.episodes_csv_path}",
                 title="Training Summary",
                 border_style="green",
             )
