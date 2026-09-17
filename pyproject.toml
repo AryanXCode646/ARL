@@ -30,8 +30,6 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
@@ -39,6 +37,7 @@ dependencies = [
     "typer>=0.9.0",
     "rich>=13.0.0",
     "pydantic>=2.0.0",
+    "numpy>=1.24.0",
 ]
 
 [project.optional-dependencies]
@@ -53,8 +52,11 @@ dev = [
     "ruff>=0.1.0",
     "mypy>=1.6.0",
 ]
+studio = [
+    "PySide6>=6.7.0",
+]
 all = [
-    "adaptive-rl[rl,dev]"
+    "adaptive-rl[rl,dev,studio]"
 ]
 
 [project.scripts]
