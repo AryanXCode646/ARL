@@ -543,7 +543,7 @@ adaptive-rl train --config configs/drone_disturbed_ppo.yaml
 
 ## 14. Generalization to Unseen Environments Benchmark
 
-AdaptiveRL includes rigorous empirical evaluation protocols to test whether trained reinforcement learning policies generalize to novel, unseen environment topologies or merely overfit to training layouts.
+AdaptiveRL includes structured evaluation protocols to test whether trained reinforcement learning policies generalize to novel, unseen environment topologies or merely overfit to training layouts.
 
 ### Key Capabilities:
 1. **Strict Train/Test Partitioning**:

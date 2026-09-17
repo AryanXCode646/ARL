@@ -201,6 +201,20 @@ For the `TrafficSignalEnv` benchmark, success is strictly an episode-level outco
 $$\text{Success} = (\text{Total Queue at Completion} \le \text{Threshold}) \land (\neg \text{Had Overflow}) \land (\neg \text{Early Terminated})$$
 Any episode that experienced queue overflow at any point during its duration is irrevocably classified as failed, regardless of subsequent queue clearance.
 
+#### 6.2.2 Traffic Metric Aggregation Order
+The benchmark enforces deterministic, non-ambiguous metric aggregations across evaluation episodes:
+- **`mean_queue_length`**: Mean of total intersection queue length ($q_t = \sum_a q_{a,t}$) pooled over all evaluated timesteps across all episodes.
+- **`mean_max_wait_time`**: Evaluated in strict hierarchical order **vehicle $\to$ approach $\to$ timestep $\to$ episode**:
+  1. *Vehicle Level*: For approach $a$ at timestep $t$, $w_{a,t} = \max_{v \in V_{a,t}} \text{wait}(v)$.
+  2. *Approach Level*: For the intersection at timestep $t$, $W_t = \max_{a \in \{N,S,E,W\}} w_{a,t}$.
+  3. *Timestep Level*: For episode $e$, episodic maximum wait is $M_e = \max_{t=1}^{T_e} W_t$.
+  4. *Episode Level*: Final evaluated benchmark metric is $\text{mean\_max\_wait\_time} = \frac{1}{N} \sum_{e=1}^N M_e$.
+- **`mean_wait_time`**: Mean of approach-averaged vehicle waiting times pooled across all evaluated timesteps.
+- **`mean_total_departures`**: Mean cumulative vehicle departures per episode: $\frac{1}{N} \sum_{e=1}^N D_e$.
+- **`total_departures`**: Sum of cumulative vehicle departures across all evaluation episodes: $\sum_{e=1}^N D_e$.
+- **`cumulative_delay`**: Mean cumulative waiting time incurred by all vehicles per episode.
+- **`overflow_rate`**: Fraction of evaluation episodes experiencing queue overflow: $\frac{N_{\text{overflow}}}{N}$.
+
 ### 6.3 Honest Language
 
 This document and all associated README/documentation use the following conventions:
