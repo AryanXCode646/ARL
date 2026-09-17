@@ -57,6 +57,14 @@ class BaseTrainer(ABC):
         """Execute the training process and return structured results."""
         pass
 
+    def close(self) -> None:
+        """Clean up trainer resources and close environment."""
+        if hasattr(self, "env") and self.env is not None:
+            try:
+                self.env.close()
+            except Exception:
+                pass
+
 
 class PPOTrainer(BaseTrainer):
     """Concrete PPO training engine coordinating environment, algorithm, callbacks, and checkpoints."""
@@ -91,13 +99,19 @@ class PPOTrainer(BaseTrainer):
         self.checkpoint_manager = CheckpointManager(checkpoint_dir=checkpoint_dir)
 
         # 3. Callbacks setup
+        if self.config.training is None:
+            raise ValueError(
+                f"Training configuration ('training') is required for {self.__class__.__name__}."
+            )
+        training_cfg = self.config.training
+
         self.metric_logger = MetricLoggerCallback()
         self._callbacks: List[BaseCallback] = [self.metric_logger]
 
-        if self.config.training.checkpoint_freq > 0:
+        if training_cfg.checkpoint_freq > 0:
             checkpoint_cb = CheckpointCallback(
                 checkpoint_manager=self.checkpoint_manager,
-                save_freq=self.config.training.checkpoint_freq,
+                save_freq=training_cfg.checkpoint_freq,
             )
             self._callbacks.append(checkpoint_cb)
 
@@ -106,11 +120,21 @@ class PPOTrainer(BaseTrainer):
 
         # 4. Algorithm configuration
         algo_params = dict(self.config.algorithm.parameters)
+        lr = (
+            self.config.algorithm.learning_rate
+            if self.config.algorithm.learning_rate is not None
+            else 3e-4
+        )
+        gamma = self.config.algorithm.gamma if self.config.algorithm.gamma is not None else 0.99
+        batch_size = (
+            self.config.algorithm.batch_size if self.config.algorithm.batch_size is not None else 64
+        )
+
         self.algorithm = PPOAlgorithm(
             env=self.env,
-            learning_rate=self.config.algorithm.learning_rate,
-            gamma=self.config.algorithm.gamma,
-            batch_size=self.config.algorithm.batch_size,
+            learning_rate=lr,
+            gamma=gamma,
+            batch_size=batch_size,
             seed=self.config.seed,
             **algo_params,
         )
@@ -138,6 +162,7 @@ class PPOTrainer(BaseTrainer):
             algorithm=self.algorithm,
         )
 
+        assert self.config.training is not None
         # Run optimization
         self.algorithm.train(
             total_timesteps=self.config.training.total_timesteps,
@@ -165,7 +190,7 @@ class PPOTrainer(BaseTrainer):
                     episode=i + 1,
                     reward=float(rew),
                     length=int(length),
-                    success=False,   # per-episode success not tracked separately at this level
+                    success=False,  # per-episode success not tracked separately at this level
                     collision=False,
                     timestep=cumulative_ts,
                 )
@@ -188,9 +213,9 @@ class PPOTrainer(BaseTrainer):
             checkpoint_paths=[cp["path"] for cp in self.checkpoint_manager.list_checkpoints()],
             config_snapshot=self.config.model_dump(mode="python"),
             adaptive_rl_version=adaptive_rl.__version__,
-            finished_at=__import__("datetime").datetime.fromtimestamp(
-                finished_at, tz=__import__("datetime").timezone.utc
-            ).isoformat(),
+            finished_at=__import__("datetime")
+            .datetime.fromtimestamp(finished_at, tz=__import__("datetime").timezone.utc)
+            .isoformat(),
             duration_seconds=round(duration, 3),
         )
         metadata_path = metadata.save(metadata_dir, name=self.config.name)
@@ -278,13 +303,19 @@ class SACTrainer(BaseTrainer):
         self.checkpoint_manager = CheckpointManager(checkpoint_dir=checkpoint_dir)
 
         # 3. Callbacks setup
+        if self.config.training is None:
+            raise ValueError(
+                f"Training configuration ('training') is required for {self.__class__.__name__}."
+            )
+        training_cfg = self.config.training
+
         self.metric_logger = MetricLoggerCallback()
         self._callbacks: List[BaseCallback] = [self.metric_logger]
 
-        if self.config.training.checkpoint_freq > 0:
+        if training_cfg.checkpoint_freq > 0:
             checkpoint_cb = CheckpointCallback(
                 checkpoint_manager=self.checkpoint_manager,
-                save_freq=self.config.training.checkpoint_freq,
+                save_freq=training_cfg.checkpoint_freq,
             )
             self._callbacks.append(checkpoint_cb)
 
@@ -293,11 +324,21 @@ class SACTrainer(BaseTrainer):
 
         # 4. Algorithm configuration
         algo_params = dict(self.config.algorithm.parameters)
+        lr = (
+            self.config.algorithm.learning_rate
+            if self.config.algorithm.learning_rate is not None
+            else 3e-4
+        )
+        gamma = self.config.algorithm.gamma if self.config.algorithm.gamma is not None else 0.99
+        batch_size = (
+            self.config.algorithm.batch_size if self.config.algorithm.batch_size is not None else 64
+        )
+
         self.algorithm = SACAlgorithm(
             env=self.env,
-            learning_rate=self.config.algorithm.learning_rate,
-            gamma=self.config.algorithm.gamma,
-            batch_size=self.config.algorithm.batch_size,
+            learning_rate=lr,
+            gamma=gamma,
+            batch_size=batch_size,
             seed=self.config.seed,
             **algo_params,
         )
@@ -325,6 +366,7 @@ class SACTrainer(BaseTrainer):
             algorithm=self.algorithm,
         )
 
+        assert self.config.training is not None
         # Run optimization
         self.algorithm.train(
             total_timesteps=self.config.training.total_timesteps,
@@ -375,9 +417,9 @@ class SACTrainer(BaseTrainer):
             checkpoint_paths=[cp["path"] for cp in self.checkpoint_manager.list_checkpoints()],
             config_snapshot=self.config.model_dump(mode="python"),
             adaptive_rl_version=adaptive_rl.__version__,
-            finished_at=__import__("datetime").datetime.fromtimestamp(
-                finished_at, tz=__import__("datetime").timezone.utc
-            ).isoformat(),
+            finished_at=__import__("datetime")
+            .datetime.fromtimestamp(finished_at, tz=__import__("datetime").timezone.utc)
+            .isoformat(),
             duration_seconds=round(duration, 3),
         )
         metadata_path = metadata.save(metadata_dir, name=self.config.name)

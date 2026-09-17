@@ -108,3 +108,254 @@ def test_config_serialization_roundtrip(tmp_path: Path) -> None:
     assert original_cfg.algorithm.name == reloaded_cfg.algorithm.name
     assert original_cfg.algorithm.learning_rate == reloaded_cfg.algorithm.learning_rate
     assert original_cfg.training.total_timesteps == reloaded_cfg.training.total_timesteps
+
+
+def test_planner_configs_valid() -> None:
+    """Verify clean A* and RRT* planner configs validate without RL hyperparameters or training blocks."""
+    config_dir = Path(__file__).resolve().parent.parent / "configs"
+    for filename in ("gridworld_astar.yaml", "navigation_rrt_star.yaml"):
+        cfg_path = config_dir / filename
+        if not cfg_path.exists():
+            pytest.skip(f"{filename} not present in standalone config PR")
+        cfg = load_config(cfg_path)
+        assert cfg.algorithm.is_planner
+        assert cfg.algorithm.learning_rate is None
+        assert cfg.algorithm.gamma is None
+        assert cfg.algorithm.batch_size is None
+        assert cfg.training is None
+
+
+def test_planner_rejects_rl_hyperparameters(tmp_path: Path) -> None:
+    """Verify that specifying learning_rate or gamma for a planner fails validation clearly."""
+    bad_planner_yaml = tmp_path / "bad_astar.yaml"
+    bad_planner_yaml.write_text(
+        """
+name: "bad_astar"
+seed: 42
+algorithm:
+  name: "astar"
+  learning_rate: 0.001
+environment:
+  name: "gridworld"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="does not accept RL hyperparameter"):
+        load_config(bad_planner_yaml)
+
+
+def test_planner_rejects_training_block(tmp_path: Path) -> None:
+    """Verify that including a training block for a classical planner fails validation."""
+    bad_planner_yaml = tmp_path / "bad_astar_training.yaml"
+    bad_planner_yaml.write_text(
+        """
+name: "bad_astar"
+seed: 42
+algorithm:
+  name: "astar"
+environment:
+  name: "gridworld"
+training:
+  total_timesteps: 1000
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="does not support a 'training' configuration block"):
+        load_config(bad_planner_yaml)
+
+
+def test_rl_algorithm_requires_training_block(tmp_path: Path) -> None:
+    """Verify that RL algorithms require a training configuration block."""
+    bad_rl_yaml = tmp_path / "bad_ppo.yaml"
+    bad_rl_yaml.write_text(
+        """
+name: "bad_ppo"
+seed: 42
+algorithm:
+  name: "ppo"
+environment:
+  name: "gridworld"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="Training configuration \\('training'\\) is required"):
+        load_config(bad_rl_yaml)
+
+
+def test_experiment_wrapper_block_unpacking(tmp_path: Path) -> None:
+    """Verify that YAML configs using the experiment: namespace unpack name and seed."""
+    exp_yaml = tmp_path / "namespaced_exp.yaml"
+    exp_yaml.write_text(
+        """
+experiment:
+  name: "namespaced_astar"
+  seed: 99
+algorithm:
+  name: "astar"
+  params:
+    heuristic: "manhattan"
+environment:
+  name: "gridworld"
+evaluation:
+  episodes: 5
+""",
+        encoding="utf-8",
+    )
+    cfg = load_config(exp_yaml)
+    assert cfg.name == "namespaced_astar"
+    assert cfg.seed == 99
+    assert cfg.algorithm.name == "astar"
+    assert cfg.algorithm.parameters == {"heuristic": "manhattan"}
+    assert cfg.evaluation.eval_episodes == 5
+
+
+def test_astar_invalid_heuristic_rejected(tmp_path: Path) -> None:
+    """Invalid A* heuristic raises ConfigError at load time."""
+    bad_yaml = tmp_path / "bad_astar.yaml"
+    bad_yaml.write_text(
+        """
+name: "bad_astar"
+algorithm:
+  name: "astar"
+  parameters:
+    heuristic: "teleportation"
+environment:
+  name: "gridworld"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        ConfigError, match="Input should be 'manhattan', 'euclidean' or 'chebyshev'"
+    ):
+        load_config(bad_yaml)
+
+
+def test_astar_valid_heuristics_accepted(tmp_path: Path) -> None:
+    """All valid A* heuristics load and validate successfully."""
+    for h in ("manhattan", "euclidean", "chebyshev"):
+        yaml_file = tmp_path / f"astar_{h}.yaml"
+        yaml_file.write_text(
+            f"""
+name: "astar_{h}"
+algorithm:
+  name: "astar"
+  parameters:
+    heuristic: "{h}"
+environment:
+  name: "gridworld"
+""",
+            encoding="utf-8",
+        )
+        cfg = load_config(yaml_file)
+        assert cfg.algorithm.parameters["heuristic"] == h
+
+
+def test_rrt_star_invalid_parameters_rejected(tmp_path: Path) -> None:
+    """Invalid RRT* parameters raise ConfigError at load time."""
+    bad_yaml = tmp_path / "bad_rrt.yaml"
+    bad_yaml.write_text(
+        """
+name: "bad_rrt"
+algorithm:
+  name: "rrt_star"
+  parameters:
+    step_size: -0.5
+environment:
+  name: "navigation"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="step_size"):
+        load_config(bad_yaml)
+
+
+def test_planner_extra_forbidden_parameters_rejected(tmp_path: Path) -> None:
+    """Unknown extra parameters in planner parameters block trigger validation error."""
+    bad_yaml = tmp_path / "extra_param_planner.yaml"
+    bad_yaml.write_text(
+        """
+name: "extra_param"
+algorithm:
+  name: "astar"
+  parameters:
+    heuristic: "manhattan"
+    unsupported_field: 123
+environment:
+  name: "gridworld"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="Extra inputs are not permitted"):
+        load_config(bad_yaml)
+
+
+def test_config_sha256_deterministic(tmp_path: Path) -> None:
+    """compute_config_sha256 is deterministic and independent of runtime paths."""
+    from adaptive_rl.config import compute_config_sha256
+
+    cfg_yaml = tmp_path / "test_exp.yaml"
+    cfg_yaml.write_text(
+        """
+name: "sha256_test"
+seed: 42
+algorithm:
+  name: "astar"
+  parameters:
+    heuristic: "euclidean"
+environment:
+  name: "gridworld"
+""",
+        encoding="utf-8",
+    )
+    cfg1 = load_config(cfg_yaml)
+    hash1 = compute_config_sha256(cfg1)
+    assert len(hash1) == 64
+    assert isinstance(hash1, str)
+
+    # Change runtime output_dir
+    cfg1.output_dir = tmp_path / "somewhere_else"
+    cfg1.log_dir = tmp_path / "somewhere_else" / "logs"
+    hash2 = compute_config_sha256(cfg1)
+    assert hash1 == hash2
+
+    # But changing a hyperparameter changes the hash
+    cfg1.seed = 999
+    assert compute_config_sha256(cfg1) != hash1
+
+
+def test_plain_rrt_rejected_in_config(tmp_path: Path) -> None:
+    """Plain 'rrt' is explicitly rejected in configuration."""
+    rrt_yaml = tmp_path / "rrt.yaml"
+    rrt_yaml.write_text(
+        """
+name: "plain_rrt"
+algorithm:
+  name: "rrt"
+environment:
+  name: "navigation"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="Standard RRT does not perform tree rewiring"):
+        load_config(rrt_yaml)
+
+
+def test_rrt_star_relational_validation_in_config(tmp_path: Path) -> None:
+    """Relational constraint violations in RRT* parameters raise ConfigError."""
+    # collision_resolution > step_size
+    bad_yaml = tmp_path / "bad_tunnel.yaml"
+    bad_yaml.write_text(
+        """
+name: "bad_tunnel"
+algorithm:
+  name: "rrt_star"
+  parameters:
+    step_size: 0.2
+    collision_resolution: 0.5
+environment:
+  name: "navigation"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="cannot be greater than step_size"):
+        load_config(bad_yaml)
