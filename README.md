@@ -33,7 +33,7 @@ AdaptiveRL is developed incrementally across verifiable phases.
 | **Phase 7** | **Curriculum Learning** | **Completed** | Staged obstacle density and disturbance curriculum, automated graduation criteria, and CurriculumTrainer. |
 | **Phase 8** | **Traffic Signal Optimization** | **Completed** | Non-spatial 4-way intersection queue & delay optimization, signal transitions, and multi-objective rewards. |
 | **Phase 9** | **Autonomous 3D Drone Navigation** | **Completed** | 3D quadrotor translation kinematics, aerodynamic drag, 16-ray 3D spherical LiDAR, and SAC/PPO continuous control. |
-| Phase 10 | Drone Disturbances & Constraints | *Upcoming* | Wind vector fields, turbulence, battery energy depletion, and dynamic obstacles. |
+| **Phase 10** | **Drone Disturbances & Constraints** | **Completed** | Atmospheric wind fields, Ornstein-Uhlenbeck turbulence, battery depletion, dynamic 3D obstacles. |
 | Phase 11-17| Research Baselines & Hardening | *Planned* | Generalization benchmarks, classical planners (A*, RRT*), and CI hardening. |
 
 ---
@@ -483,7 +483,43 @@ env.close()
 
 ---
 
-## 13. Running Tests
+## 13. Drone Disturbances and Constraints
+
+Phase 10 extends 3D quadrotor flight navigation with realistic atmospheric disturbances, electro-mechanical energy constraints, and moving obstacle hazards.
+
+### Environmental Features:
+1. **3D Atmospheric Wind Field**:
+   - Prevailing steady wind current $[w_x, w_y, w_z]$.
+   - Linear altitude shear gradient: wind velocity scales higher with altitude $z$.
+   - **Ornstein-Uhlenbeck Stochastic Gust Turbulence**: mean-reverting continuous Brownian velocity perturbations ($dg = -\theta g\,dt + \sigma\sqrt{dt}N(0, I)$).
+2. **Quadrotor Battery Depletion Model**:
+   - Power consumption dynamically modeled: $P_{\text{total}} = P_{\text{base}} + c_{\text{thrust}}\|a\|^2 + c_{\text{speed}}\|v\|^2$.
+   - Battery state-of-charge tracking ($\text{SoC} \in [0.0, 1.0]$) with termination penalty upon complete exhaustion.
+3. **Dynamic 3D Moving Obstacles**:
+   - Autonomous spherical obstacles with velocity vectors $[\dot{x}, \dot{y}, \dot{z}]$ and elastic perimeter reflection upon hitting arena boundary walls.
+   - Combined static and dynamic obstacle distance measuring via unified 16-ray spherical LiDAR.
+4. **Observation & Action Spaces**:
+   - **Action**: Continuous 3D acceleration command $\mathbf{a} \in [-1.0, 1.0]^3$.
+   - **Observation**: 33-dimensional normalized continuous vector including drone coordinates, velocities, goal vector, 16-ray LiDAR distances, battery charge level, and instantaneous 3D wind velocity.
+
+### CLI Usage:
+```bash
+# Run 10 steps of disturbed drone simulation
+adaptive-rl env run drone_disturbed --steps 10 --seed 42
+
+# Inspect disturbed drone environment spaces and registration
+adaptive-rl env inspect drone_disturbed
+
+# Inspect 4-stage progressive disturbance curriculum
+adaptive-rl curriculum inspect drone_disturbed
+
+# Train PPO under wind disturbances and battery constraints
+adaptive-rl train --config configs/drone_disturbed_ppo.yaml
+```
+
+---
+
+## 14. Running Tests
 
 Execute the automated test suite with `pytest`:
 ```bash
@@ -496,15 +532,16 @@ pytest --cov=adaptive_rl tests/
 
 ---
 
-## 14. Contributing
+## 15. Contributing
 
 We welcome contributions! Please review [CONTRIBUTING.md](CONTRIBUTING.md) for branch naming conventions, quality gates, and code formatting standards before opening a pull request.
 
 ---
 
-## 15. License
+## 16. License
 
 This project is licensed under the [MIT License](LICENSE).
+
 
 
 

@@ -216,6 +216,81 @@ def create_drone_curriculum(eval_window: int = 20) -> Curriculum:
     )
 
 
+def create_disturbed_drone_curriculum(eval_window: int = 20) -> Curriculum:
+    """Create a progressive 4-stage curriculum for Disturbed & Constrained Drone Navigation.
+
+    Stage 0: Calm Skies — 0 dynamic obstacles, no wind, high battery capacity.
+    Stage 1: Crosswind Drift — steady crosswind, battery drain active.
+    Stage 2: Gusting Turbulence — wind shear + OU turbulence gusts, 2 dynamic obstacles.
+    Stage 3: Storm Hazard Challenge — strong gusts, 4 dynamic moving obstacles, tight battery budget.
+    """
+    stages = [
+        CurriculumStage(
+            stage_id=0,
+            name="Calm Skies",
+            environment_parameters={
+                "num_obstacles": 2,
+                "num_dynamic_obstacles": 0,
+                "wind_enabled": False,
+                "battery_capacity": 200.0,
+            },
+            success_threshold=0.80,
+            min_episodes=10,
+            description="Calm atmosphere with high battery budget to ground basic 3D control.",
+        ),
+        CurriculumStage(
+            stage_id=1,
+            name="Crosswind Drift",
+            environment_parameters={
+                "num_obstacles": 3,
+                "num_dynamic_obstacles": 0,
+                "wind_enabled": True,
+                "wind_base_speed": 2.0,
+                "wind_gusts": False,
+                "battery_capacity": 150.0,
+            },
+            success_threshold=0.70,
+            min_episodes=10,
+            description="Steady crosswind drift requiring counter-steering and energy awareness.",
+        ),
+        CurriculumStage(
+            stage_id=2,
+            name="Gusting Turbulence",
+            environment_parameters={
+                "num_obstacles": 4,
+                "num_dynamic_obstacles": 2,
+                "wind_enabled": True,
+                "wind_base_speed": 3.0,
+                "wind_gusts": True,
+                "battery_capacity": 120.0,
+            },
+            success_threshold=0.60,
+            min_episodes=10,
+            description="Stochastic wind gusts and dynamic obstacles requiring active adaptation.",
+        ),
+        CurriculumStage(
+            stage_id=3,
+            name="Storm Hazard Challenge",
+            environment_parameters={
+                "num_obstacles": 6,
+                "num_dynamic_obstacles": 4,
+                "wind_enabled": True,
+                "wind_base_speed": 4.5,
+                "wind_gusts": True,
+                "battery_capacity": 100.0,
+            },
+            success_threshold=0.50,
+            min_episodes=10,
+            description="Heavy gusts, multiple dynamic obstacles, and strict energy budget.",
+        ),
+    ]
+    return Curriculum(
+        name="disturbed_drone_curriculum",
+        stages=stages,
+        eval_window=eval_window,
+    )
+
+
 CURRICULUM_PRESETS: Dict[str, Any] = {
     "navigation": create_navigation_curriculum,
     "navigation_2d": create_navigation_curriculum,
@@ -225,6 +300,9 @@ CURRICULUM_PRESETS: Dict[str, Any] = {
     "drone": create_drone_curriculum,
     "drone_3d": create_drone_curriculum,
     "drone_navigation": create_drone_curriculum,
+    "drone_disturbed": create_disturbed_drone_curriculum,
+    "drone_constrained": create_disturbed_drone_curriculum,
+    "disturbed_drone": create_disturbed_drone_curriculum,
 }
 
 

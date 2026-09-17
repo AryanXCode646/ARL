@@ -81,7 +81,13 @@ class CurriculumTrainer(BaseTrainer):
         else:
             # Default to preset matching environment name
             env_name = self.config.environment.name.lower()
-            if "nav" in env_name:
+            if "disturb" in env_name or "constrain" in env_name:
+                self.curriculum = get_curriculum_preset("drone_disturbed")
+            elif "drone" in env_name:
+                self.curriculum = get_curriculum_preset("drone")
+            elif "traffic" in env_name:
+                self.curriculum = get_curriculum_preset("traffic")
+            elif "nav" in env_name:
                 self.curriculum = get_curriculum_preset("navigation")
             elif "grid" in env_name:
                 self.curriculum = get_curriculum_preset("gridworld")

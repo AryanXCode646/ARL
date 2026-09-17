@@ -1,0 +1,34 @@
+name: "drone_disturbed_sac"
+seed: 42
+
+algorithm:
+  name: "sac"
+  learning_rate: 0.0003
+  gamma: 0.99
+  batch_size: 128
+  parameters:
+    buffer_size: 50000
+    learning_starts: 1000
+    tau: 0.005
+
+environment:
+  name: "drone_disturbed"
+  max_steps: 300
+  parameters:
+    bounds: [50.0, 50.0, 25.0]
+    num_obstacles: 6
+    num_dynamic_obstacles: 2
+    battery_capacity: 100.0
+    dynamic_obstacle_speed: 1.5
+
+training:
+  total_timesteps: 100000
+  checkpoint_freq: 20000
+  log_interval: 10
+
+evaluation:
+  eval_episodes: 20
+  deterministic: true
+
+output_dir: "experiments/results"
+log_dir: "experiments/logs"

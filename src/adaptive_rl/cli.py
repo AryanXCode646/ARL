@@ -55,7 +55,7 @@ def version() -> None:
     """Show the installed AdaptiveRL version and phase status."""
     console.print(
         f"[bold green]AdaptiveRL[/bold green] version [bold cyan]{adaptive_rl.__version__}[/bold cyan] "
-        f"([yellow]Phase 9: Autonomous 3D Drone Navigation[/yellow])"
+        f"([yellow]Phase 10: Drone Disturbances and Constraints[/yellow])"
     )
 
 
@@ -88,7 +88,9 @@ def info() -> None:
     table.add_row("Phase 7", "Curriculum Learning", "[bold green]COMPLETED[/bold green]")
     table.add_row("Phase 8", "Traffic Signal Optimization", "[bold green]COMPLETED[/bold green]")
     table.add_row("Phase 9", "Autonomous 3D Drone Navigation", "[bold green]COMPLETED[/bold green]")
-    table.add_row("Phase 10", "Drone Disturbances and Constraints", "[yellow]PLANNED[/yellow]")
+    table.add_row(
+        "Phase 10", "Drone Disturbances and Constraints", "[bold green]COMPLETED[/bold green]"
+    )
     table.add_row(
         "Phase 11-17", "Research Baselines, Hardening & Final Audit", "[yellow]PLANNED[/yellow]"
     )
