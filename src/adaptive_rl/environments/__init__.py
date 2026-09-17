@@ -1,6 +1,7 @@
 """Environment interfaces, metadata, and registration for AdaptiveRL."""
 
 from adaptive_rl.environments.base import AdaptiveRLEnv
+from adaptive_rl.environments.drone.drone3d import DroneNavigation3DEnv
 from adaptive_rl.environments.gridworld.grid import GridWorldEnv
 from adaptive_rl.environments.metadata import EnvironmentMetadata
 from adaptive_rl.environments.navigation.navigation2d import ContinuousNavigation2DEnv
@@ -102,6 +103,54 @@ def register_default_environments() -> None:
             ),
         )
 
+    if "drone" not in list_environments():
+        register(
+            "drone",
+            lambda **kwargs: DroneNavigation3DEnv(**kwargs),
+            metadata=EnvironmentMetadata(
+                name="drone",
+                description="Autonomous 3D drone navigation with continuous translation kinematics and 3D LiDAR.",
+                observation_type="box",
+                action_type="continuous",
+                version="0.1.0",
+                max_episode_steps=300,
+                reward_range=(-100.0, 100.0),
+                tags=["continuous", "drone", "3d", "kinematics", "lidar", "navigation"],
+            ),
+        )
+
+    if "drone_3d" not in list_environments():
+        register(
+            "drone_3d",
+            lambda **kwargs: DroneNavigation3DEnv(**kwargs),
+            metadata=EnvironmentMetadata(
+                name="drone_3d",
+                description="Autonomous 3D drone navigation with continuous translation kinematics and 3D LiDAR.",
+                observation_type="box",
+                action_type="continuous",
+                version="0.1.0",
+                max_episode_steps=300,
+                reward_range=(-100.0, 100.0),
+                tags=["continuous", "drone", "3d", "kinematics", "lidar", "navigation"],
+            ),
+        )
+
+    if "drone_navigation" not in list_environments():
+        register(
+            "drone_navigation",
+            lambda **kwargs: DroneNavigation3DEnv(**kwargs),
+            metadata=EnvironmentMetadata(
+                name="drone_navigation",
+                description="Autonomous 3D drone navigation with continuous translation kinematics and 3D LiDAR.",
+                observation_type="box",
+                action_type="continuous",
+                version="0.1.0",
+                max_episode_steps=300,
+                reward_range=(-100.0, 100.0),
+                tags=["continuous", "drone", "3d", "kinematics", "lidar", "navigation"],
+            ),
+        )
+
 
 # Automatically register standard environments with metadata
 register_default_environments()
@@ -109,6 +158,7 @@ register_default_environments()
 __all__ = [
     "AdaptiveRLEnv",
     "ContinuousNavigation2DEnv",
+    "DroneNavigation3DEnv",
     "DummyTestEnv",
     "EnvironmentMetadata",
     "EnvironmentRegistry",

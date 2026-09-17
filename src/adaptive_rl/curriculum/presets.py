@@ -155,12 +155,76 @@ def create_traffic_curriculum(eval_window: int = 20) -> Curriculum:
     )
 
 
+def create_drone_curriculum(eval_window: int = 20) -> Curriculum:
+    """Create a progressive 4-stage curriculum for Autonomous 3D Drone Navigation.
+
+    Stage 0: Open Sky — 0 obstacles, learns direct 3D waypoint tracking and kinematics.
+    Stage 1: Sparse Obstacle Field — 3 obstacles, learns initial 3D LiDAR steering.
+    Stage 2: Standard Urban Airspace — 6 obstacles, standard benchmark difficulty.
+    Stage 3: Dense Hazard Field — 10 obstacles, high-density agile spatial maneuvers.
+    """
+    stages = [
+        CurriculumStage(
+            stage_id=0,
+            name="Open Sky",
+            environment_parameters={"num_obstacles": 0, "bounds": (30.0, 30.0, 15.0)},
+            success_threshold=0.80,
+            min_episodes=10,
+            description="Empty 3D airspace to establish 3D acceleration and velocity grounding.",
+        ),
+        CurriculumStage(
+            stage_id=1,
+            name="Sparse Obstacle Field",
+            environment_parameters={
+                "num_obstacles": 3,
+                "obstacle_radius": 1.5,
+                "bounds": (40.0, 40.0, 20.0),
+            },
+            success_threshold=0.70,
+            min_episodes=10,
+            description="Sparse spherical obstacles requiring initial 3D LiDAR avoidance.",
+        ),
+        CurriculumStage(
+            stage_id=2,
+            name="Standard Urban Airspace",
+            environment_parameters={
+                "num_obstacles": 6,
+                "obstacle_radius": 2.0,
+                "bounds": (50.0, 50.0, 25.0),
+            },
+            success_threshold=0.60,
+            min_episodes=10,
+            description="Standard 3D navigation environment with multi-obstacle avoidance.",
+        ),
+        CurriculumStage(
+            stage_id=3,
+            name="Dense Hazard Field",
+            environment_parameters={
+                "num_obstacles": 10,
+                "obstacle_radius": 2.2,
+                "bounds": (50.0, 50.0, 25.0),
+            },
+            success_threshold=0.50,
+            min_episodes=10,
+            description="Dense 3D hazard field demanding tight vertical and lateral maneuvers.",
+        ),
+    ]
+    return Curriculum(
+        name="drone_curriculum",
+        stages=stages,
+        eval_window=eval_window,
+    )
+
+
 CURRICULUM_PRESETS: Dict[str, Any] = {
     "navigation": create_navigation_curriculum,
     "navigation_2d": create_navigation_curriculum,
     "gridworld": create_gridworld_curriculum,
     "traffic": create_traffic_curriculum,
     "traffic_signal": create_traffic_curriculum,
+    "drone": create_drone_curriculum,
+    "drone_3d": create_drone_curriculum,
+    "drone_navigation": create_drone_curriculum,
 }
 
 
@@ -168,7 +232,7 @@ def get_curriculum_preset(name: str, eval_window: int = 20) -> Curriculum:
     """Resolve and build curriculum from preset identifier.
 
     Args:
-        name: Name of preset ('navigation', 'navigation_2d', 'gridworld', 'traffic').
+        name: Name of preset ('navigation', 'gridworld', 'traffic', 'drone').
         eval_window: Rolling evaluation window size.
 
     Returns:

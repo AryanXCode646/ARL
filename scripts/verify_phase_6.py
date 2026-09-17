@@ -152,7 +152,9 @@ def run_phase_6_verification() -> bool:
         sac_model_path = test_dir / "sac_navigation_final.zip"
         sac_algo.save(sac_model_path)
         assert sac_model_path.exists()
-        print(f"   ✓ Saved SAC model weights to {sac_model_path} ({sac_model_path.stat().st_size:,} bytes).")
+        print(
+            f"   ✓ Saved SAC model weights to {sac_model_path} ({sac_model_path.stat().st_size:,} bytes)."
+        )
 
         loaded_sac = SACAlgorithm.from_pretrained(sac_model_path, env=nav_env)
         act, _ = loaded_sac.predict(obs, deterministic=True)

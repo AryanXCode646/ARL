@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import typer
 from rich.console import Console
 from rich.panel import Panel
@@ -54,7 +55,7 @@ def version() -> None:
     """Show the installed AdaptiveRL version and phase status."""
     console.print(
         f"[bold green]AdaptiveRL[/bold green] version [bold cyan]{adaptive_rl.__version__}[/bold cyan] "
-        f"([yellow]Phase 8: Traffic Signal Optimization[/yellow])"
+        f"([yellow]Phase 9: Autonomous 3D Drone Navigation[/yellow])"
     )
 
 
@@ -86,9 +87,7 @@ def info() -> None:
     table.add_row("Phase 6", "Continuous 2D Navigation", "[bold green]COMPLETED[/bold green]")
     table.add_row("Phase 7", "Curriculum Learning", "[bold green]COMPLETED[/bold green]")
     table.add_row("Phase 8", "Traffic Signal Optimization", "[bold green]COMPLETED[/bold green]")
-    table.add_row(
-        "Phase 9", "Mathematical Drone Navigation Environment", "[yellow]PLANNED[/yellow]"
-    )
+    table.add_row("Phase 9", "Autonomous 3D Drone Navigation", "[bold green]COMPLETED[/bold green]")
     table.add_row("Phase 10", "Drone Disturbances and Constraints", "[yellow]PLANNED[/yellow]")
     table.add_row(
         "Phase 11-17", "Research Baselines, Hardening & Final Audit", "[yellow]PLANNED[/yellow]"
@@ -234,9 +233,12 @@ def run_env(
             obs, reward, terminated, truncated, step_info = env.step(action)
             total_reward += float(reward)
             step_count += 1
-            action_desc = step_info.get("action_name", str(action))
+            if isinstance(action, np.ndarray):
+                action_desc = np.array2string(action, precision=2, separator=",")
+            else:
+                action_desc = step_info.get("action_name", str(action))
             console.print(
-                f"Step {s:02d}: Action={action_desc:<5} -> Reward={reward:+6.1f} | Terminated={terminated} | Truncated={truncated}"
+                f"Step {s:02d}: Action={action_desc:<18} -> Reward={reward:+6.1f} | Terminated={terminated} | Truncated={truncated}"
             )
 
             if terminated or truncated:
