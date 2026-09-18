@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import random
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import gymnasium as gym
 import numpy as np
@@ -246,7 +246,7 @@ class CurriculumTrainer(BaseTrainer):
             ep_reward = 0.0
             ep_length = 0
             done = False
-            last_step_info: dict[str, Any] = dict(info or {})
+            last_step_info: Dict[str, Any] = dict(info or {})
             last_terminated = False
             last_truncated = False
             while not done:

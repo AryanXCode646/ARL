@@ -190,12 +190,9 @@ class GeneralizationEvaluator:
         has_success_info = any(m.success is not None for m in episode_metrics)
         has_collision_info = any(m.collision is not None for m in episode_metrics)
 
-        # Invariant: an episode that ended in collision is never a success
+        # Episode-level outcomes aggregated directly from canonical EpisodeMetrics
         success_rate: Optional[float] = (
-            float(
-                sum(1 for m in episode_metrics if m.success is True and m.collision is not True)
-                / total
-            )
+            float(sum(1 for m in episode_metrics if m.success is True) / total)
             if has_success_info and total > 0
             else None
         )

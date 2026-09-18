@@ -520,3 +520,194 @@ def test_generalization_evaluator_consumes_canonical_episode_metrics() -> None:
     assert report.test_metrics.collision_rate == 0.0
 
     gen_eval.close()
+
+
+# ---------------------------------------------------------------------------
+# Regression Tests: Conflicting Info Resolution & Canonical Consumer Alignment
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "info,expected_success,expected_collision",
+    [
+        # Direct collision=True overriding success=True
+        ({"collision": True, "success": True}, False, True),
+        # Alias is_collision=True overriding episode_success=True
+        ({"is_collision": True, "episode_success": True}, False, True),
+        # Alias had_collision=True overriding is_success=True
+        ({"had_collision": True, "is_success": True}, False, True),
+        # Multiple success and collision keys present
+        (
+            {
+                "collision": True,
+                "is_collision": True,
+                "had_collision": True,
+                "episode_success": True,
+                "success": True,
+                "is_success": True,
+            },
+            False,
+            True,
+        ),
+        # Collision=False preserves success=True
+        ({"collision": False, "success": True}, True, False),
+        # Collision=False preserves success=False
+        ({"collision": False, "success": False}, False, False),
+        # Missing collision preserves success=True
+        ({"success": True}, True, None),
+        # Missing collision preserves success=False
+        ({"success": False}, False, None),
+        # Collision=True with missing success keeps success=None (no heuristic inference)
+        ({"collision": True}, None, True),
+    ],
+)
+def test_conflicting_info_collision_overrides_success(
+    info: Dict[str, Any],
+    expected_success: Optional[bool],
+    expected_collision: Optional[bool],
+) -> None:
+    """Verify that collision always overrides positive success flags canonically in extract_episode_metrics."""
+    m = extract_episode_metrics(
+        reward=0.0,
+        length=10,
+        terminated=True,
+        truncated=False,
+        info=info,
+    )
+    assert m.success is expected_success
+    assert m.collision is expected_collision
+
+
+def test_evaluator_aggregation_cannot_disagree_with_episode_metrics() -> None:
+    """Verify that Evaluator aggregation strictly mirrors EpisodeMetrics with zero divergence.
+
+    Even when raw info contains conflicting flags or varied outcomes across multiple episodes,
+    the evaluator's aggregated rates must mathematically equal the canonical EpisodeMetrics flags.
+    """
+    step_trace = [
+        # Episode 1: Conflicting info (collision=True, success=True) -> canonical success=False, collision=True
+        (1.0, True, False, {"collision": True, "success": True}),
+        # Episode 2: Clean success
+        (10.0, True, False, {"success": True, "collision": False}),
+        # Episode 3: Clean failure without collision
+        (-2.0, True, False, {"success": False, "collision": False}),
+        # Episode 4: Truncated timeout without collision or success info
+        (0.0, False, True, {}),
+        # Episode 5: Conflicting info via aliases (had_collision=True, episode_success=True)
+        (-5.0, True, False, {"had_collision": True, "episode_success": True}),
+    ]
+    env = MockStepEnv(step_trace)
+    algo = MockPolicyAlgo()
+    evaluator = Evaluator(algorithm=algo, env=env)
+
+    num_episodes = 5
+    metrics = evaluator.evaluate(num_episodes=num_episodes, deterministic=True)
+
+    # Validate recorded EpisodeMetrics list
+    recorded_metrics = evaluator.last_episode_metrics
+    assert len(recorded_metrics) == num_episodes
+    assert all(isinstance(m, EpisodeMetrics) for m in recorded_metrics)
+
+    # Episode 1: Conflicting info resolved canonically
+    assert recorded_metrics[0].success is False
+    assert recorded_metrics[0].collision is True
+
+    # Episode 2: Success
+    assert recorded_metrics[1].success is True
+    assert recorded_metrics[1].collision is False
+
+    # Episode 3: Failure
+    assert recorded_metrics[2].success is False
+    assert recorded_metrics[2].collision is False
+
+    # Episode 4: Truncated with missing outcomes
+    assert recorded_metrics[3].success is None
+    assert recorded_metrics[3].collision is None
+    assert recorded_metrics[3].truncated is True
+
+    # Episode 5: Conflicting aliases resolved canonically
+    assert recorded_metrics[4].success is False
+    assert recorded_metrics[4].collision is True
+
+    # Evaluator aggregation MUST match EpisodeMetrics counts exactly
+    expected_successes = sum(1 for m in recorded_metrics if m.success is True)
+    expected_collisions = sum(1 for m in recorded_metrics if m.collision is True)
+    expected_truncations = sum(1 for m in recorded_metrics if m.truncated)
+
+    assert expected_successes == 1
+    assert expected_collisions == 2
+    assert expected_truncations == 1
+
+    assert metrics.success_rate == pytest.approx(expected_successes / num_episodes)
+    assert metrics.collision_rate == pytest.approx(expected_collisions / num_episodes)
+    assert metrics.truncation_rate == pytest.approx(expected_truncations / num_episodes)
+    env.close()
+
+
+def test_all_consumers_consistent_on_conflicting_info() -> None:
+    """Verify that all consumers interpret conflicting info identically via EpisodeMetrics."""
+    from adaptive_rl.curriculum.callbacks import CurriculumCallback
+    from adaptive_rl.curriculum.curriculum import Curriculum
+    from adaptive_rl.curriculum.stage import CurriculumStage
+
+    conflicting_info = {"collision": True, "success": True}
+
+    # 1. Evaluator
+    env_eval = MockStepEnv([(0.0, True, False, dict(conflicting_info))])
+    evaluator = Evaluator(algorithm=MockPolicyAlgo(), env=env_eval)
+    eval_metrics = evaluator.evaluate(num_episodes=1, deterministic=True)
+    assert evaluator.last_episode_metrics[0].success is False
+    assert evaluator.last_episode_metrics[0].collision is True
+    assert eval_metrics.success_rate == 0.0
+    assert eval_metrics.collision_rate == 1.0
+    env_eval.close()
+
+    # 2. GeneralizationEvaluator
+    env_gen = MockStepEnv([(0.0, True, False, dict(conflicting_info))])
+    gen_eval = GeneralizationEvaluator(algorithm=MockPolicyAlgo(), env=env_gen)
+    gen_dist = GeneralizationDistribution(train_seeds=[1], test_seeds=[2])
+    # Need 2 step outcomes for train and test
+    env_gen.step_outcomes = [
+        (0.0, True, False, dict(conflicting_info)),
+        (0.0, True, False, dict(conflicting_info)),
+    ]
+    gen_report = gen_eval.evaluate_generalization(distribution=gen_dist, experiment_name="test")
+    assert gen_report.train_metrics.success_rate == 0.0
+    assert gen_report.train_metrics.collision_rate == 1.0
+    assert gen_report.test_metrics.success_rate == 0.0
+    assert gen_report.test_metrics.collision_rate == 1.0
+    gen_eval.close()
+
+    # 3. MetricLoggerCallback
+    logger = MetricLoggerCallback()
+    ep_metrics = extract_episode_metrics(
+        reward=0.0,
+        length=1,
+        terminated=True,
+        truncated=False,
+        info=conflicting_info,
+    )
+    logger.on_episode_end(
+        episode=1,
+        episode_reward=0.0,
+        episode_length=1,
+        info=conflicting_info,
+        metrics=ep_metrics,
+    )
+    assert logger.successes == 0
+    assert logger.collisions == 1
+    assert logger.success_rate == 0.0
+    assert logger.collision_rate == 1.0
+
+    # 4. CurriculumCallback
+    stage = CurriculumStage(stage_id=0, name="stage0", environment_parameters={})
+    curriculum = Curriculum(name="test_curr", stages=[stage], eval_window=5)
+    curr_cb = CurriculumCallback(curriculum=curriculum, verbose=0)
+    curr_cb.on_episode_end(
+        episode=1,
+        episode_reward=0.0,
+        episode_length=1,
+        info=conflicting_info,
+        metrics=ep_metrics,
+    )
+    assert curr_cb.recent_successes[-1] == 0.0

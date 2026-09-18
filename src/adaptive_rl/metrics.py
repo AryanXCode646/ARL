@@ -109,6 +109,8 @@ def extract_episode_metrics(
     - Collision precedence: `collision` -> `is_collision` -> `had_collision`
     - Missing metrics remain None (never replaced with False).
     - Explicit False remains False.
+    - Invariant: an episode that ended in collision is never a success. If collision
+      occurred (collision is True), any conflicting positive success flag is overridden to False.
     - No heuristics: does not infer success/collision from reward, termination, or length.
     - `terminated` and `truncated` are taken directly from Gymnasium step-return flags.
     - Environment-specific terminal values from `info` are preserved in `additional_metrics`.
@@ -126,6 +128,11 @@ def extract_episode_metrics(
     """
     success = _extract_flag(info, SUCCESS_KEYS)
     collision = _extract_flag(info, COLLISION_KEYS)
+
+    # Invariant: An episode that ended in collision is never a success.
+    # If collision occurred, it overrides any conflicting positive success flag.
+    if collision is True and success is True:
+        success = False
 
     if additional_metrics is not None:
         extra: Dict[str, Any] = dict(additional_metrics)
