@@ -17,6 +17,7 @@ from adaptive_rl.evaluation.metrics import EvaluationMetrics
 from adaptive_rl.metrics import (
     EpisodeMetrics,
     EpisodeMetricsAccumulator,
+    compute_rate,
 )
 
 
@@ -181,23 +182,11 @@ class GeneralizationEvaluator:
         rewards = [m.reward for m in episode_metrics]
         lengths = [m.length for m in episode_metrics]
 
-        has_success_info = any(m.success is not None for m in episode_metrics)
-        has_collision_info = any(m.collision is not None for m in episode_metrics)
-
         # Rate aggregation denominator semantics:
-        # Rates (success_rate, collision_rate) use total evaluation episodes (total) as canonical
-        # denominator when telemetry is available. If unavailable across all episodes (all None),
-        # the rate evaluates to None. Episodes with False or None do not contribute to the numerator.
-        success_rate: Optional[float] = (
-            float(sum(1 for m in episode_metrics if m.success is True) / total)
-            if has_success_info and total > 0
-            else None
-        )
-        collision_rate: Optional[float] = (
-            float(sum(1 for m in episode_metrics if m.collision is True) / total)
-            if has_collision_info and total > 0
-            else None
-        )
+        # Rates (success_rate, collision_rate) are calculated among defined episodes (non-None).
+        # If unavailable across all episodes (all None), the rate evaluates to None.
+        success_rate = compute_rate([m.success for m in episode_metrics])
+        collision_rate = compute_rate([m.collision for m in episode_metrics])
         truncation_rate: Optional[float] = (
             float(sum(1 for m in episode_metrics if m.truncated) / total) if total > 0 else None
         )

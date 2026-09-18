@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import csv
+import json
 from dataclasses import FrozenInstanceError, is_dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import gymnasium as gym
@@ -639,8 +642,13 @@ def test_evaluator_aggregation_cannot_disagree_with_episode_metrics() -> None:
     assert expected_collisions == 2
     assert expected_truncations == 1
 
-    assert metrics.success_rate == pytest.approx(expected_successes / num_episodes)
-    assert metrics.collision_rate == pytest.approx(expected_collisions / num_episodes)
+    valid_success_count = sum(1 for m in recorded_metrics if m.success is not None)
+    valid_collision_count = sum(1 for m in recorded_metrics if m.collision is not None)
+    assert valid_success_count == 4
+    assert valid_collision_count == 4
+
+    assert metrics.success_rate == pytest.approx(expected_successes / valid_success_count)
+    assert metrics.collision_rate == pytest.approx(expected_collisions / valid_collision_count)
     assert metrics.truncation_rate == pytest.approx(expected_truncations / num_episodes)
     env.close()
 
@@ -963,12 +971,12 @@ def test_mixed_outcomes_across_episodes_and_documented_denominator_semantics() -
     assert recorded[2].success is None
     assert recorded[2].collision is None
 
-    # Total episodes is 3:
-    # 1 success / 3 total episodes = ~0.333333
-    # 1 collision / 3 total episodes = ~0.333333
+    # Total episodes is 3, but defined episodes is 2:
+    # 1 success / 2 defined episodes = 0.5
+    # 1 collision / 2 defined episodes = 0.5
     assert metrics.episodes == 3
-    assert metrics.success_rate == pytest.approx(1 / 3)
-    assert metrics.collision_rate == pytest.approx(1 / 3)
+    assert metrics.success_rate == 0.5
+    assert metrics.collision_rate == 0.5
     env.close()
 
     # If all episodes have metric unavailable, rate must be None (not 0.0)
@@ -1094,3 +1102,339 @@ def test_api_cleanup_single_public_owner() -> None:
     assert "EpisodeMetrics" not in eval_metrics_mod.__all__
     assert "EpisodeMetricsAccumulator" not in eval_metrics_mod.__all__
     assert "extract_episode_metrics" not in eval_metrics_mod.__all__
+
+
+def test_compute_rate_canonical_semantics() -> None:
+    """Verify compute_rate enforces exact canonical denominator semantics."""
+    from adaptive_rl.metrics import compute_rate
+
+    # [True, False, None] -> 1/2 = 0.5
+    assert compute_rate([True, False, None]) == 0.5
+
+    # [None, None] -> None
+    assert compute_rate([None, None]) is None
+
+    # [True, True] -> 1.0
+    assert compute_rate([True, True]) == 1.0
+
+    # [False, False] -> 0.0
+    assert compute_rate([False, False]) == 0.0
+
+    # Empty list -> None
+    assert compute_rate([]) is None
+
+    # Mixed single defined
+    assert compute_rate([None, True, None]) == 1.0
+    assert compute_rate([None, False, None]) == 0.0
+
+
+def test_traffic_outcome_policy_composition() -> None:
+    """Verify domain separation: TrafficOutcomePolicy is composed into EpisodeMetricsAccumulator."""
+    from adaptive_rl.metrics import (
+        DefaultOutcomePolicy,
+        EpisodeMetricsAccumulator,
+        TrafficOutcomePolicy,
+    )
+
+    # 1. Default policy does not care about overflow
+    acc_default = EpisodeMetricsAccumulator(outcome_policy=DefaultOutcomePolicy())
+    acc_default.record_step(info={"overflow": True, "success": True}, terminated=True)
+    m_default = acc_default.finish()
+    assert m_default.success is True
+
+    # 2. Traffic policy forces success=False when overflow occurred
+    acc_traffic = EpisodeMetricsAccumulator(outcome_policy=TrafficOutcomePolicy())
+    acc_traffic.record_step(info={"overflow": True})
+    acc_traffic.record_step(info={"success": True}, truncated=True)
+    m_traffic = acc_traffic.finish()
+    assert m_traffic.success is False
+    assert m_traffic.additional_metrics.get("had_overflow") is True
+
+    # 3. Dynamic composition via property setter
+    acc_dynamic = EpisodeMetricsAccumulator()
+    assert isinstance(acc_dynamic.outcome_policy, DefaultOutcomePolicy)
+    acc_dynamic.is_traffic = True
+    assert isinstance(acc_dynamic.outcome_policy, TrafficOutcomePolicy)
+
+
+def test_full_lifecycle_end_to_end_undefined_metrics(tmp_path: Path) -> None:
+    """Verify full pipeline (env -> callback adapter -> metrics -> logger -> result -> serialized output) preserves None."""
+    from adaptive_rl.experiments.metadata import (
+        EpisodeRecord,
+        ExperimentMetadata,
+        save_episodes_csv,
+    )
+    from adaptive_rl.training.callbacks import MetricLoggerCallback, SB3CallbackAdapter
+    from adaptive_rl.training.trainer import TrainingResult
+
+    logger = MetricLoggerCallback()
+    adapter = SB3CallbackAdapter(callbacks=[logger])
+
+    # Simulate environment where success and collision are undefined
+    adapter.locals = {
+        "dones": [False],
+        "infos": [{"other_data": 42}],
+        "rewards": [1.0],
+    }
+    adapter.num_timesteps = 1
+    adapter._on_step()
+
+    # Terminal transition
+    adapter.locals = {
+        "dones": [True],
+        "infos": [{"other_data": 43}],
+        "rewards": [2.0],
+    }
+    adapter.num_timesteps = 2
+    adapter._on_step()
+
+    # Verify EpisodeMetrics
+    assert len(logger.episode_metrics) == 1
+    m = logger.episode_metrics[0]
+    assert m.success is None
+    assert m.collision is None
+    assert m.reward == 3.0
+    assert m.length == 2
+
+    # Verify MetricLoggerCallback rates are None (never collapsed to 0.0)
+    assert logger.success_rate is None
+    assert logger.collision_rate is None
+
+    # Construct EpisodeRecord
+    rec = EpisodeRecord(
+        episode=1,
+        reward=m.reward,
+        length=m.length,
+        success=m.success,
+        collision=m.collision,
+        timestep=2,
+    )
+    assert rec.success is None
+    assert rec.collision is None
+
+    # Construct TrainingResult
+    res = TrainingResult(
+        experiment_name="test_undef",
+        total_timesteps=2,
+        episodes_completed=1,
+        mean_reward=3.0,
+        final_model_path=tmp_path / "model.zip",
+        success_rate=logger.success_rate,
+        collision_rate=logger.collision_rate,
+    )
+    assert res.success_rate is None
+    assert res.collision_rate is None
+
+    # Construct ExperimentMetadata and save JSON
+    meta = ExperimentMetadata(
+        experiment_name="test_undef",
+        algorithm="ppo",
+        environment="dummy",
+        seed=42,
+        total_timesteps=2,
+        actual_timesteps=2,
+        episodes_completed=1,
+        mean_reward=3.0,
+        success_rate=logger.success_rate,
+        collision_rate=logger.collision_rate,
+        final_model_path=str(tmp_path / "model.zip"),
+    )
+    json_path = meta.save(tmp_path)
+    with open(json_path) as f:
+        meta_dict = json.load(f)
+    assert meta_dict["success_rate"] is None
+    assert meta_dict["collision_rate"] is None
+
+    # Save CSV and verify None serializes as empty string ("")
+    csv_path = save_episodes_csv([rec], tmp_path, "test_undef")
+    with open(csv_path) as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 1
+    assert rows[0]["success"] == ""
+    assert rows[0]["collision"] == ""
+
+
+def test_full_lifecycle_end_to_end_explicit_false(tmp_path: Path) -> None:
+    """Verify explicit False remains False throughout the entire lifecycle."""
+    from adaptive_rl.experiments.metadata import (
+        EpisodeRecord,
+        ExperimentMetadata,
+        save_episodes_csv,
+    )
+    from adaptive_rl.training.callbacks import MetricLoggerCallback, SB3CallbackAdapter
+    from adaptive_rl.training.trainer import TrainingResult
+
+    logger = MetricLoggerCallback()
+    adapter = SB3CallbackAdapter(callbacks=[logger])
+
+    adapter.locals = {
+        "dones": [True],
+        "infos": [{"success": False, "collision": False}],
+        "rewards": [0.0],
+    }
+    adapter.num_timesteps = 1
+    adapter._on_step()
+
+    m = logger.episode_metrics[0]
+    assert m.success is False
+    assert m.collision is False
+
+    assert logger.success_rate == 0.0
+    assert logger.collision_rate == 0.0
+
+    rec = EpisodeRecord(
+        episode=1,
+        reward=m.reward,
+        length=m.length,
+        success=m.success,
+        collision=m.collision,
+        timestep=1,
+    )
+    assert rec.success is False
+    assert rec.collision is False
+
+    res = TrainingResult(
+        experiment_name="test_false",
+        total_timesteps=1,
+        episodes_completed=1,
+        mean_reward=0.0,
+        final_model_path=tmp_path / "model.zip",
+        success_rate=logger.success_rate,
+        collision_rate=logger.collision_rate,
+    )
+    assert res.success_rate == 0.0
+    assert res.collision_rate == 0.0
+
+    meta = ExperimentMetadata(
+        experiment_name="test_false",
+        algorithm="ppo",
+        environment="dummy",
+        seed=42,
+        total_timesteps=1,
+        actual_timesteps=1,
+        episodes_completed=1,
+        mean_reward=0.0,
+        success_rate=logger.success_rate,
+        collision_rate=logger.collision_rate,
+        final_model_path=str(tmp_path / "model.zip"),
+    )
+    json_path = meta.save(tmp_path)
+    with open(json_path) as f:
+        meta_dict = json.load(f)
+    assert meta_dict["success_rate"] == 0.0
+    assert meta_dict["collision_rate"] == 0.0
+
+    csv_path = save_episodes_csv([rec], tmp_path, "test_false")
+    with open(csv_path) as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["success"] == "False"
+    assert rows[0]["collision"] == "False"
+
+
+def test_full_lifecycle_multi_step_precedence_and_truncation() -> None:
+    """Verify multi-step precedence: collision overrides success, and truncation is preserved."""
+    from adaptive_rl.training.callbacks import MetricLoggerCallback, SB3CallbackAdapter
+
+    logger = MetricLoggerCallback()
+    adapter = SB3CallbackAdapter(callbacks=[logger])
+
+    # Step 1: No result
+    adapter.locals = {"dones": [False], "infos": [{}], "rewards": [1.0]}
+    adapter.num_timesteps = 1
+    adapter._on_step()
+
+    # Step 2: Collision occurred
+    adapter.locals = {"dones": [False], "infos": [{"collision": True}], "rewards": [-5.0]}
+    adapter.num_timesteps = 2
+    adapter._on_step()
+
+    # Step 3: Success flag reported
+    adapter.locals = {"dones": [False], "infos": [{"success": True}], "rewards": [10.0]}
+    adapter.num_timesteps = 3
+    adapter._on_step()
+
+    # Step 4: Truncated timeout
+    adapter.locals = {
+        "dones": [True],
+        "infos": [{"TimeLimit.truncated": True}],
+        "rewards": [0.0],
+    }
+    adapter.num_timesteps = 4
+    adapter._on_step()
+
+    assert len(logger.episode_metrics) == 1
+    m = logger.episode_metrics[0]
+    # Universal invariant: collision overrides success
+    assert m.collision is True
+    assert m.success is False
+    # Truncation preserved
+    assert m.truncated is True
+    assert m.terminated is False
+    assert m.length == 4
+    assert m.reward == 6.0
+
+
+def test_full_lifecycle_mixed_batch_denominators(tmp_path: Path) -> None:
+    """Verify mixed batch [True, False, None] aggregates using defined-episodes denominator and serializes cleanly."""
+    from adaptive_rl.experiments.metadata import EpisodeRecord, save_episodes_csv
+    from adaptive_rl.training.callbacks import MetricLoggerCallback, SB3CallbackAdapter
+
+    logger = MetricLoggerCallback()
+    adapter = SB3CallbackAdapter(callbacks=[logger])
+
+    # Ep 1: Success=True, Collision=False
+    adapter.locals = {
+        "dones": [True],
+        "infos": [{"success": True, "collision": False}],
+        "rewards": [10.0],
+    }
+    adapter.num_timesteps = 1
+    adapter._on_step()
+
+    # Ep 2: Success=False, Collision=False
+    adapter.locals = {
+        "dones": [True],
+        "infos": [{"success": False, "collision": False}],
+        "rewards": [0.0],
+    }
+    adapter.num_timesteps = 2
+    adapter._on_step()
+
+    # Ep 3: Undefined outcomes
+    adapter.locals = {
+        "dones": [True],
+        "infos": [{}],
+        "rewards": [5.0],
+    }
+    adapter.num_timesteps = 3
+    adapter._on_step()
+
+    assert logger.total_episodes == 3
+    # Defined episodes: Ep 1 (True), Ep 2 (False) -> 1 / 2 = 0.5
+    assert logger.success_rate == 0.5
+    # Defined episodes for collision: Ep 1 (False), Ep 2 (False) -> 0 / 2 = 0.0
+    assert logger.collision_rate == 0.0
+
+    records = [
+        EpisodeRecord(
+            episode=i + 1,
+            reward=m.reward,
+            length=m.length,
+            success=m.success,
+            collision=m.collision,
+            timestep=i + 1,
+        )
+        for i, m in enumerate(logger.episode_metrics)
+    ]
+
+    csv_path = save_episodes_csv(records, tmp_path, "mixed_batch")
+    with open(csv_path) as f:
+        rows = list(csv.DictReader(f))
+
+    assert len(rows) == 3
+    assert rows[0]["success"] == "True"
+    assert rows[0]["collision"] == "False"
+    assert rows[1]["success"] == "False"
+    assert rows[1]["collision"] == "False"
+    assert rows[2]["success"] == ""
+    assert rows[2]["collision"] == ""

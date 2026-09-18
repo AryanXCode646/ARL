@@ -47,8 +47,8 @@ class TrainingResult:
     checkpoints: List[Dict[str, Any]] = field(default_factory=list)
     episode_rewards: List[float] = field(default_factory=list)
     episode_lengths: List[int] = field(default_factory=list)
-    success_rate: float = 0.0
-    collision_rate: float = 0.0
+    success_rate: Optional[float] = None
+    collision_rate: Optional[float] = None
     metadata_path: Optional[Path] = None
     episodes_csv_path: Optional[Path] = None
 
@@ -193,8 +193,8 @@ class PPOTrainer(BaseTrainer):
                         episode=i + 1,
                         reward=float(m.reward),
                         length=int(m.length),
-                        success=bool(m.success) if m.success is not None else False,
-                        collision=bool(m.collision) if m.collision is not None else False,
+                        success=m.success,
+                        collision=m.collision,
                         timestep=cumulative_ts,
                     )
                 )
@@ -208,8 +208,8 @@ class PPOTrainer(BaseTrainer):
                         episode=i + 1,
                         reward=float(rew),
                         length=int(length),
-                        success=False,
-                        collision=False,
+                        success=None,
+                        collision=None,
                         timestep=cumulative_ts,
                     )
                 )
@@ -419,8 +419,8 @@ class SACTrainer(BaseTrainer):
                         episode=i + 1,
                         reward=float(m.reward),
                         length=int(m.length),
-                        success=bool(m.success) if m.success is not None else False,
-                        collision=bool(m.collision) if m.collision is not None else False,
+                        success=m.success,
+                        collision=m.collision,
                         timestep=cumulative_ts,
                     )
                 )
@@ -434,8 +434,8 @@ class SACTrainer(BaseTrainer):
                         episode=i + 1,
                         reward=float(rew),
                         length=int(length),
-                        success=False,
-                        collision=False,
+                        success=None,
+                        collision=None,
                         timestep=cumulative_ts,
                     )
                 )

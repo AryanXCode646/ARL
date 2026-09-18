@@ -6,6 +6,20 @@ from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# Backward-compatible re-exports from canonical adaptive_rl.metrics module
+from adaptive_rl.metrics import (
+    EpisodeMetrics as EpisodeMetrics,
+)
+from adaptive_rl.metrics import (
+    EpisodeMetricsAccumulator as EpisodeMetricsAccumulator,
+)
+from adaptive_rl.metrics import (
+    compute_rate as compute_rate,
+)
+from adaptive_rl.metrics import (
+    extract_episode_metrics as extract_episode_metrics,
+)
+
 
 class EvaluationMetrics(BaseModel):
     """Container for reinforcement learning evaluation results.
@@ -16,10 +30,11 @@ class EvaluationMetrics(BaseModel):
     set to None, never silently collapsed into 0.0.
 
     Rate Denominator Semantics:
-        Outcome rates (success_rate, collision_rate, overflow_rate) use total evaluation
-        episodes as the canonical denominator when telemetry is available. Episodes where
-        the metric was False or unavailable (None) do not contribute to the numerator.
-        If unavailable across all episodes, the rate evaluates to None.
+        Outcome rates (success_rate, collision_rate, overflow_rate) are calculated
+        among episodes where the metric is defined (non-None). Episodes where
+        the metric was not tracked or unavailable (None) are excluded from both
+        numerator and denominator. If a metric is unavailable across all episodes
+        (all None), the rate evaluates to None.
     """
 
     model_config = ConfigDict(extra="ignore")

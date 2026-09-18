@@ -17,6 +17,7 @@ from adaptive_rl.evaluation.scenarios import EvaluationScenario
 from adaptive_rl.metrics import (
     EpisodeMetrics,
     EpisodeMetricsAccumulator,
+    compute_rate,
 )
 
 
@@ -96,20 +97,15 @@ class Evaluator(BaseEvaluator):
         Returns:
             EvaluationMetrics: Standardized aggregated performance metrics.
                 Rate denominator semantics: success_rate, collision_rate, and overflow_rate
-                use total evaluation episodes (num_episodes) as canonical denominator when
-                telemetry is available. If a metric is unavailable across all episodes (all None),
-                the rate evaluates to None. Episodes with False or None do not contribute to the numerator.
+                are calculated among episodes where the metric is defined (non-None). If a
+                metric is unavailable across all episodes (all None), the rate evaluates to None.
         """
         if num_episodes <= 0:
             raise ValueError(f"num_episodes must be positive, got {num_episodes}")
 
         episode_metrics: List[EpisodeMetrics] = []
 
-        # Flags tracking whether environments expose specific metrics
-        has_overflow_info = False
         is_traffic_env = False
-
-        episode_overflows: List[bool] = []
 
         # Traffic telemetry accumulators
         all_step_queues: List[int] = []
@@ -126,7 +122,6 @@ class Evaluator(BaseEvaluator):
             acc = EpisodeMetricsAccumulator(is_traffic=is_traffic_env if is_traffic_env else None)
             done = False
 
-            ep_had_overflow = False
             ep_step_max_waits: List[int] = []
             last_step_info: Dict[str, Any] = dict(info or {})
 
@@ -145,20 +140,6 @@ class Evaluator(BaseEvaluator):
                 )
                 last_step_info = step_info
 
-                # Track overflow
-                if (
-                    "overflow" in step_info
-                    or "had_overflow" in step_info
-                    or "step_overflow" in step_info
-                ):
-                    has_overflow_info = True
-                    if (
-                        step_info.get("overflow")
-                        or step_info.get("had_overflow")
-                        or step_info.get("step_overflow")
-                    ):
-                        ep_had_overflow = True
-
                 # Track traffic telemetry
                 if "total_queue" in step_info or "queue_lengths" in step_info:
                     is_traffic_env = True
@@ -174,9 +155,6 @@ class Evaluator(BaseEvaluator):
 
             m = acc.finish()
             episode_metrics.append(m)
-
-            if has_overflow_info:
-                episode_overflows.append(ep_had_overflow)
 
             if is_traffic_env:
                 ep_max_waits.append(max(ep_step_max_waits) if ep_step_max_waits else 0)
@@ -195,25 +173,23 @@ class Evaluator(BaseEvaluator):
         mean_len = float(np.mean(lengths))
         std_len = float(np.std(lengths))
 
-        has_success_info = any(m.success is not None for m in episode_metrics)
-        has_collision_info = any(m.collision is not None for m in episode_metrics)
-
         # Rate aggregation denominator semantics:
-        # Rates (success_rate, collision_rate, overflow_rate) use total evaluation episodes (num_episodes)
-        # as the canonical denominator. If a metric was unavailable across all episodes (all None),
-        # the rate evaluates to None. Episodes with False or None do not contribute to the numerator.
-        success_rate: Optional[float] = (
-            float(sum(1 for m in episode_metrics if m.success is True) / num_episodes)
-            if has_success_info
+        # Rates (success_rate, collision_rate, overflow_rate) are calculated among defined episodes
+        # (non-None). If a metric is unavailable across all episodes (all None), the rate evaluates to None.
+        has_overflow_info = any("had_overflow" in m.additional_metrics for m in episode_metrics)
+
+        success_rate = compute_rate([m.success for m in episode_metrics])
+        collision_rate = compute_rate([m.collision for m in episode_metrics])
+        overflow_rate = (
+            compute_rate(
+                [
+                    m.additional_metrics["had_overflow"]
+                    for m in episode_metrics
+                    if "had_overflow" in m.additional_metrics
+                ]
+            )
+            if has_overflow_info
             else None
-        )
-        collision_rate: Optional[float] = (
-            float(sum(1 for m in episode_metrics if m.collision is True) / num_episodes)
-            if has_collision_info
-            else None
-        )
-        overflow_rate: Optional[float] = (
-            float(sum(episode_overflows) / num_episodes) if has_overflow_info else None
         )
         truncation_rate: Optional[float] = float(
             sum(1 for m in episode_metrics if m.truncated) / num_episodes

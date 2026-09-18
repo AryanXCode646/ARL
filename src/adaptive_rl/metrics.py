@@ -105,6 +105,94 @@ class EpisodeMetrics:
         }
 
 
+class OutcomePolicy:
+    """Base outcome policy governing episode success resolution."""
+
+    def record_step(
+        self,
+        info: Mapping[str, Any],
+        terminated: bool,
+        truncated: bool,
+    ) -> None:
+        """Process a step transition for domain-specific outcome tracking."""
+        pass
+
+    def resolve_success(
+        self,
+        accumulator: EpisodeMetricsAccumulator,
+    ) -> Optional[bool]:
+        """Resolve final episode success outcome."""
+        if not accumulator.has_success_info:
+            return None
+        term_succ = _extract_flag(accumulator.last_info, SUCCESS_KEYS)
+        if term_succ is not None:
+            return term_succ
+        return accumulator.had_success
+
+    def get_additional_metrics(self) -> Dict[str, Any]:
+        """Return domain-specific metrics to merge into EpisodeMetrics.additional_metrics."""
+        return {}
+
+
+class DefaultOutcomePolicy(OutcomePolicy):
+    """Standard goal-directed outcome policy (navigation, continuous control, gridworld).
+
+    Rules:
+    - If no success telemetry was monitored on any step, success is None.
+    - If the terminal step explicitly reports success, that terminal outcome is authoritative.
+    - If an intermediate step reported success and terminal step did not repeat/contradict it,
+      had_success is preserved.
+    - An episode with collision is overridden to False in the accumulator finish step (Universal Invariant).
+    """
+
+    pass
+
+
+class TrafficOutcomePolicy(OutcomePolicy):
+    """Traffic domain outcome policy governing queue overflow and traffic success semantics.
+
+    Traffic Success Contract:
+    An episode succeeded iff:
+    - No queue overflow occurred across the entire episode (not had_overflow)
+    - Episode did not terminate early due to failure/overflow (not terminated; horizon completion is truncated)
+    - Final queue was controlled (terminal step success is True)
+    Any episode with queue overflow or premature termination is strictly marked success=False.
+    """
+
+    def __init__(self) -> None:
+        self.has_overflow_info: bool = False
+        self.had_overflow: bool = False
+
+    def record_step(
+        self,
+        info: Mapping[str, Any],
+        terminated: bool,
+        truncated: bool,
+    ) -> None:
+        ovf_flag = _extract_flag(info, OVERFLOW_KEYS)
+        if ovf_flag is not None:
+            self.has_overflow_info = True
+            if ovf_flag:
+                self.had_overflow = True
+
+    def resolve_success(
+        self,
+        accumulator: EpisodeMetricsAccumulator,
+    ) -> Optional[bool]:
+        if accumulator.has_success_info or self.has_overflow_info:
+            if self.had_overflow or accumulator.terminated:
+                return False
+            term_succ = _extract_flag(accumulator.last_info, SUCCESS_KEYS)
+            return bool(term_succ) if term_succ is not None else accumulator.had_success
+        return None
+
+    def get_additional_metrics(self) -> Dict[str, Any]:
+        extra: Dict[str, Any] = {}
+        if self.has_overflow_info:
+            extra["had_overflow"] = self.had_overflow
+        return extra
+
+
 class EpisodeMetricsAccumulator:
     """Accumulates step-level transitions across an entire episode to construct canonical EpisodeMetrics.
 
@@ -113,18 +201,27 @@ class EpisodeMetricsAccumulator:
       the episode is marked collision=True. If collision keys are monitored and no collision occurred,
       collision=False. If no collision info was present on any step, collision=None.
     - Multi-step success tracking:
-      * Standard / navigation environments: Success is achieved if the agent reached the goal on ANY step.
-        If collision occurred at any step, collision overrides success to False (Universal Invariant).
-      * Traffic environments: Follows the traffic success contract. An episode is successful iff no queue
-        overflow occurred across the entire episode (not had_overflow), the episode did not terminate early
-        due to failure/overflow (not terminated; horizon completion is truncated), and the terminal step
-        achieved controlled queues (terminal step success is True). Any episode with queue overflow or
-        premature termination is strictly marked success=False.
+      * Standard / navigation environments: Uses DefaultOutcomePolicy where success is preserved from
+        intermediate or terminal steps.
+      * Traffic environments: Uses TrafficOutcomePolicy enforcing the traffic queue overflow contract.
+    - Universal Invariant: collision=True overrides any conflicting positive success flag to False.
     - Preserves terminal environment telemetry in additional_metrics.
     """
 
-    def __init__(self, is_traffic: Optional[bool] = None) -> None:
-        self.is_traffic: Optional[bool] = is_traffic
+    def __init__(
+        self,
+        outcome_policy: Optional[OutcomePolicy] = None,
+        *,
+        is_traffic: Optional[bool] = None,
+    ) -> None:
+        self._explicit_traffic: Optional[bool] = is_traffic
+        if outcome_policy is not None:
+            self.outcome_policy = outcome_policy
+        elif is_traffic:
+            self.outcome_policy = TrafficOutcomePolicy()
+        else:
+            self.outcome_policy = DefaultOutcomePolicy()
+
         self.reward: float = 0.0
         self.length: int = 0
         self.terminated: bool = False
@@ -136,11 +233,51 @@ class EpisodeMetricsAccumulator:
         self.has_success_info: bool = False
         self.had_success: bool = False
 
-        self.has_overflow_info: bool = False
-        self.had_overflow: bool = False
-
         self.last_info: Dict[str, Any] = {}
         self.step_infos: List[Mapping[str, Any]] = []
+
+    @property
+    def is_traffic(self) -> bool:
+        """Indicate whether the accumulator is configured with a TrafficOutcomePolicy."""
+        return isinstance(self.outcome_policy, TrafficOutcomePolicy)
+
+    @is_traffic.setter
+    def is_traffic(self, val: Optional[bool]) -> None:
+        self._explicit_traffic = val
+        if val and not isinstance(self.outcome_policy, TrafficOutcomePolicy):
+            self.outcome_policy = TrafficOutcomePolicy()
+        elif val is False and isinstance(self.outcome_policy, TrafficOutcomePolicy):
+            self.outcome_policy = DefaultOutcomePolicy()
+
+    @property
+    def has_overflow_info(self) -> bool:
+        """Indicate whether queue overflow was monitored during the episode."""
+        if isinstance(self.outcome_policy, TrafficOutcomePolicy):
+            return self.outcome_policy.has_overflow_info
+        return False
+
+    @has_overflow_info.setter
+    def has_overflow_info(self, val: bool) -> None:
+        if not isinstance(self.outcome_policy, TrafficOutcomePolicy) and val:
+            self.outcome_policy = TrafficOutcomePolicy()
+        if isinstance(self.outcome_policy, TrafficOutcomePolicy):
+            self.outcome_policy.has_overflow_info = val
+
+    @property
+    def had_overflow(self) -> bool:
+        """Indicate whether queue overflow occurred during the episode."""
+        if isinstance(self.outcome_policy, TrafficOutcomePolicy):
+            return self.outcome_policy.had_overflow
+        return False
+
+    @had_overflow.setter
+    def had_overflow(self, val: bool) -> None:
+        if not isinstance(self.outcome_policy, TrafficOutcomePolicy) and val:
+            self.outcome_policy = TrafficOutcomePolicy()
+        if isinstance(self.outcome_policy, TrafficOutcomePolicy):
+            self.outcome_policy.had_overflow = val
+            if val:
+                self.outcome_policy.has_overflow_info = True
 
     def record_step(
         self,
@@ -160,10 +297,16 @@ class EpisodeMetricsAccumulator:
             self.last_info = info_dict
             self.step_infos.append(info_dict)
 
-            # Auto-detect traffic environment if not explicitly set
-            if self.is_traffic is None:
+            # Auto-detect traffic environment if using DefaultOutcomePolicy and not explicitly configured
+            if (
+                isinstance(self.outcome_policy, DefaultOutcomePolicy)
+                and self._explicit_traffic is None
+            ):
                 if any(k in info_dict for k in TRAFFIC_KEYS):
-                    self.is_traffic = True
+                    traffic_policy = TrafficOutcomePolicy()
+                    for s_info in self.step_infos:
+                        traffic_policy.record_step(s_info, False, False)
+                    self.outcome_policy = traffic_policy
 
             # Track collision across steps
             col_flag = _extract_flag(info_dict, COLLISION_KEYS)
@@ -172,19 +315,15 @@ class EpisodeMetricsAccumulator:
                 if col_flag:
                     self.had_collision = True
 
-            # Track overflow across steps
-            ovf_flag = _extract_flag(info_dict, OVERFLOW_KEYS)
-            if ovf_flag is not None:
-                self.has_overflow_info = True
-                if ovf_flag:
-                    self.had_overflow = True
-
             # Track success across steps
             succ_flag = _extract_flag(info_dict, SUCCESS_KEYS)
             if succ_flag is not None:
                 self.has_success_info = True
                 if succ_flag:
                     self.had_success = True
+
+            # Delegate domain-specific step tracking to outcome policy
+            self.outcome_policy.record_step(info_dict, self.terminated, self.truncated)
 
     def finish(
         self,
@@ -199,36 +338,8 @@ class EpisodeMetricsAccumulator:
         else:
             collision = self.had_collision
 
-        # 2. Resolve success state according to environment-specific semantics
-        success: Optional[bool]
-        if self.is_traffic:
-            # Traffic success contract:
-            # Episode succeeded iff:
-            # - No queue overflow occurred at any step (not had_overflow)
-            # - Episode did not terminate prematurely (not terminated)
-            # - Final queue was controlled (terminal step success is True)
-            if self.has_success_info or self.has_overflow_info:
-                if self.had_overflow or self.terminated:
-                    success = False
-                else:
-                    # In traffic, success is evaluated at terminal/horizon step
-                    term_succ = _extract_flag(self.last_info, SUCCESS_KEYS)
-                    success = bool(term_succ) if term_succ is not None else self.had_success
-            else:
-                success = None
-        else:
-            # Goal-directed navigation / standard contract:
-            # Preserves success signals occurring before the terminal step when not repeated.
-            # However, if terminal step explicitly reports success=False, that terminal outcome
-            # is authoritative (Invariant 1: Intermediate step success does not latch episode success).
-            if not self.has_success_info:
-                success = None
-            else:
-                term_succ = _extract_flag(self.last_info, SUCCESS_KEYS)
-                if term_succ is not None:
-                    success = term_succ
-                else:
-                    success = self.had_success
+        # 2. Resolve success state via composed outcome policy
+        success: Optional[bool] = self.outcome_policy.resolve_success(self)
 
         # 3. Universal invariant: collision overrides success
         if collision is True and success is True:
@@ -239,6 +350,12 @@ class EpisodeMetricsAccumulator:
         else:
             extra = {k: v for k, v in self.last_info.items() if k not in _EXCLUDED_OUTCOME_KEYS}
 
+        # Merge domain policy additional metrics
+        policy_extra = self.outcome_policy.get_additional_metrics()
+        for k, v in policy_extra.items():
+            if k not in extra:
+                extra[k] = v
+
         return EpisodeMetrics(
             reward=self.reward,
             length=self.length,
@@ -248,6 +365,32 @@ class EpisodeMetricsAccumulator:
             truncated=self.truncated,
             additional_metrics=extra,
         )
+
+
+def compute_rate(values: Sequence[Optional[bool]]) -> Optional[float]:
+    """Compute the rate of True outcomes among defined (non-None) episode outcomes.
+
+    Canonical denominator semantics:
+    - Only episodes where the metric is defined (value is not None) contribute to the denominator.
+    - True contributes 1 to the numerator.
+    - False contributes 0 to the numerator.
+    - None is excluded from both numerator and denominator.
+    - If no episodes have a defined outcome (empty or all None), returns None.
+
+    Examples:
+        >>> compute_rate([True, False, None])
+        0.5
+        >>> compute_rate([None, None])
+        None
+        >>> compute_rate([True, True])
+        1.0
+        >>> compute_rate([False, False])
+        0.0
+    """
+    valid = [v for v in values if v is not None]
+    if not valid:
+        return None
+    return float(sum(1 for v in valid if v is True) / len(valid))
 
 
 def extract_episode_metrics(
@@ -263,23 +406,12 @@ def extract_episode_metrics(
     had_success: Optional[bool] = None,
     had_overflow: Optional[bool] = None,
     is_traffic: Optional[bool] = None,
+    outcome_policy: Optional[OutcomePolicy] = None,
 ) -> EpisodeMetrics:
-    """Canonical extractor producing an EpisodeMetrics instance.
+    """Canonical convenience extractor producing an EpisodeMetrics instance.
 
-    Conforms to strict architectural requirements:
-    - Success precedence: `episode_success` -> `success` -> `is_success`
-    - Collision precedence: `collision` -> `is_collision` -> `had_collision`
-    - Missing metrics remain None (never replaced with False).
-    - Explicit False remains False.
-    - Multi-step accumulation: supports full step traces via `step_infos` or accumulated
-      flags (`had_collision`, `had_success`, `had_overflow`).
-    - Traffic success contract: In traffic environments (or when overflow is tracked),
-      queue overflow or premature termination strictly forces success to False.
-    - Universal Invariant: An episode with collision is never a success. If collision
-      occurred (collision is True), any conflicting positive success flag is overridden to False.
-    - No heuristics: does not infer success/collision from reward, termination, or length.
-    - `terminated` and `truncated` are taken directly from Gymnasium step-return flags.
-    - Environment-specific terminal values from `info` are preserved in `additional_metrics`.
+    Thin convenience API wrapping EpisodeMetricsAccumulator. Preserves all
+    canonical semantics without duplicating outcome derivation logic.
 
     Args:
         reward: Cumulative episodic reward.
@@ -293,11 +425,12 @@ def extract_episode_metrics(
         had_success: Optional override indicating whether success was achieved during the episode.
         had_overflow: Optional override indicating whether queue overflow occurred during the episode.
         is_traffic: Optional flag explicitly designating environment as a traffic environment.
+        outcome_policy: Optional explicit domain OutcomePolicy instance.
 
     Returns:
         EpisodeMetrics: Immutable, canonical episode metrics instance.
     """
-    acc = EpisodeMetricsAccumulator(is_traffic=is_traffic)
+    acc = EpisodeMetricsAccumulator(outcome_policy=outcome_policy, is_traffic=is_traffic)
 
     if step_infos:
         for s_info in step_infos:
@@ -320,7 +453,6 @@ def extract_episode_metrics(
         acc.had_success = bool(had_success)
 
     if had_overflow is not None:
-        acc.has_overflow_info = True
         acc.had_overflow = bool(had_overflow)
 
     return acc.finish(additional_metrics=additional_metrics)
@@ -328,10 +460,14 @@ def extract_episode_metrics(
 
 __all__ = [
     "COLLISION_KEYS",
+    "DefaultOutcomePolicy",
     "EpisodeMetrics",
     "EpisodeMetricsAccumulator",
     "OVERFLOW_KEYS",
+    "OutcomePolicy",
     "SUCCESS_KEYS",
     "TRAFFIC_KEYS",
+    "TrafficOutcomePolicy",
+    "compute_rate",
     "extract_episode_metrics",
 ]

@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 
 from adaptive_rl.curriculum.curriculum import Curriculum
 from adaptive_rl.curriculum.wrapper import CurriculumEnvWrapper
-from adaptive_rl.metrics import EpisodeMetrics, extract_episode_metrics
+from adaptive_rl.metrics import EpisodeMetrics, compute_rate, extract_episode_metrics
 from adaptive_rl.training.callbacks import BaseCallback
 
 
@@ -33,7 +33,7 @@ class CurriculumCallback(BaseCallback):
 
         self.window_size = curriculum.eval_window
         self.recent_rewards: deque[float] = deque(maxlen=self.window_size)
-        self.recent_successes: deque[float] = deque(maxlen=self.window_size)
+        self.recent_successes: deque[Optional[bool]] = deque(maxlen=self.window_size)
 
         self.stage_episodes = 0
         self.stage_timesteps = 0
@@ -47,12 +47,9 @@ class CurriculumCallback(BaseCallback):
         # Check timestep-based timeout trigger
         stage = self.curriculum.current_stage
         if stage.max_timesteps is not None and self.stage_timesteps >= stage.max_timesteps:
+            computed_sr = compute_rate(list(self.recent_successes))
             rolling_metrics = {
-                "success_rate": (
-                    float(sum(self.recent_successes) / len(self.recent_successes))
-                    if self.recent_successes
-                    else 0.0
-                ),
+                "success_rate": computed_sr if computed_sr is not None else 0.0,
                 "mean_reward": (
                     float(sum(self.recent_rewards) / len(self.recent_rewards))
                     if self.recent_rewards
@@ -105,15 +102,11 @@ class CurriculumCallback(BaseCallback):
                 info=info_dict,
             )
 
-        is_success = 1.0 if metrics.success is True else 0.0
-        self.recent_successes.append(is_success)
+        self.recent_successes.append(metrics.success)
 
         mean_reward = float(sum(self.recent_rewards) / len(self.recent_rewards))
-        success_rate = (
-            float(sum(self.recent_successes) / len(self.recent_successes))
-            if self.recent_successes
-            else 0.0
-        )
+        computed_sr = compute_rate(list(self.recent_successes))
+        success_rate = computed_sr if computed_sr is not None else 0.0
 
         rolling_metrics = {
             "success_rate": success_rate,

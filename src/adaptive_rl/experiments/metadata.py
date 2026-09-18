@@ -64,9 +64,9 @@ class ExperimentMetadata:
     actual_timesteps: int
     episodes_completed: int
     mean_reward: float
-    success_rate: float
-    collision_rate: float
-    final_model_path: str
+    success_rate: Optional[float] = None
+    collision_rate: Optional[float] = None
+    final_model_path: str = ""
     checkpoint_paths: List[str] = field(default_factory=list)
     config_snapshot: Dict[str, Any] = field(default_factory=dict)
     python_version: str = field(default_factory=lambda: sys.version)
@@ -118,9 +118,9 @@ class EpisodeRecord:
     episode: int
     reward: float
     length: int
-    success: bool
-    collision: bool
-    timestep: int
+    success: Optional[bool] = None
+    collision: Optional[bool] = None
+    timestep: int = 0
 
 
 def save_episodes_csv(
@@ -147,6 +147,7 @@ def save_episodes_csv(
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for rec in records:
-            writer.writerow(asdict(rec))
+            d = asdict(rec)
+            writer.writerow({k: ("" if v is None else v) for k, v in d.items()})
 
     return csv_path

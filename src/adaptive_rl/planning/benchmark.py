@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from adaptive_rl.environments.registry import make_env
-from adaptive_rl.metrics import EpisodeMetricsAccumulator
+from adaptive_rl.metrics import EpisodeMetricsAccumulator, compute_rate
 from adaptive_rl.planning.astar import AStarPlannerPolicy
 from adaptive_rl.planning.base import PlannerPolicy
 from adaptive_rl.planning.rrt import RRTPlannerPolicy
@@ -24,10 +24,10 @@ class PlannerComparisonResult:
 
     Attributes:
         seed: Environment procedural generation seed.
-        planner_success: Whether classical planner reached goal.
-        rl_success: Whether RL policy reached goal.
-        planner_collision: Whether classical planner collided with obstacle.
-        rl_collision: Whether RL policy collided with obstacle.
+        planner_success: Whether classical planner reached goal (or None if undefined).
+        rl_success: Whether RL policy reached goal (or None if undefined).
+        planner_collision: Whether classical planner collided with obstacle (or None if undefined).
+        rl_collision: Whether RL policy collided with obstacle (or None if undefined).
         planner_reward: Cumulative episodic reward earned by classical planner.
         rl_reward: Cumulative episodic reward earned by RL policy.
         planner_steps: Episode duration in steps for classical planner.
@@ -40,19 +40,19 @@ class PlannerComparisonResult:
     """
 
     seed: int
-    planner_success: bool
-    rl_success: bool
-    planner_collision: bool
-    rl_collision: bool
-    planner_reward: float
-    rl_reward: float
-    planner_steps: int
-    rl_steps: int
-    planner_path_length: float
-    rl_path_length: float
-    path_length_ratio: float
-    planner_planning_time_ms: float
-    rl_mean_step_time_ms: float
+    planner_success: Optional[bool] = None
+    rl_success: Optional[bool] = None
+    planner_collision: Optional[bool] = None
+    rl_collision: Optional[bool] = None
+    planner_reward: float = 0.0
+    rl_reward: float = 0.0
+    planner_steps: int = 0
+    rl_steps: int = 0
+    planner_path_length: float = 0.0
+    rl_path_length: float = 0.0
+    path_length_ratio: float = 1.0
+    planner_planning_time_ms: float = 0.0
+    rl_mean_step_time_ms: float = 0.0
 
 
 @dataclass
@@ -65,19 +65,19 @@ class ClassicalBenchmarkReport:
     rl_algorithm_name: str
     seeds: List[int]
     total_episodes: int
-    planner_success_rate: float
-    rl_success_rate: float
-    planner_collision_rate: float
-    rl_collision_rate: float
-    planner_mean_reward: float
-    rl_mean_reward: float
-    planner_mean_steps: float
-    rl_mean_steps: float
-    planner_mean_path_length: float
-    rl_mean_path_length: float
-    mean_path_length_ratio: float
-    planner_mean_planning_time_ms: float
-    rl_mean_step_time_ms: float
+    planner_success_rate: Optional[float] = None
+    rl_success_rate: Optional[float] = None
+    planner_collision_rate: Optional[float] = None
+    rl_collision_rate: Optional[float] = None
+    planner_mean_reward: float = 0.0
+    rl_mean_reward: float = 0.0
+    planner_mean_steps: float = 0.0
+    rl_mean_steps: float = 0.0
+    planner_mean_path_length: float = 0.0
+    rl_mean_path_length: float = 0.0
+    mean_path_length_ratio: float = 1.0
+    planner_mean_planning_time_ms: float = 0.0
+    rl_mean_step_time_ms: float = 0.0
     detailed_results: List[PlannerComparisonResult] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -148,7 +148,7 @@ class ClassicalBenchmarkRunner:
         policy: Any,
         seed: int,
         is_rl: bool = False,
-    ) -> Tuple[bool, bool, float, int, float, float]:
+    ) -> Tuple[Optional[bool], Optional[bool], float, int, float, float]:
         """Execute single episode on environment with specified policy.
 
         Returns:
@@ -189,8 +189,8 @@ class ClassicalBenchmarkRunner:
             done = terminated or truncated
 
         ep_metrics = acc.finish()
-        success = bool(ep_metrics.success) if ep_metrics.success is not None else False
-        collision = bool(ep_metrics.collision) if ep_metrics.collision is not None else False
+        success = ep_metrics.success
+        collision = ep_metrics.collision
         total_reward = ep_metrics.reward
         steps = ep_metrics.length
 
@@ -231,7 +231,7 @@ class ClassicalBenchmarkRunner:
         rl_name = (
             getattr(rl_algorithm, "name", type(rl_algorithm).__name__)
             if rl_algorithm is not None
-            else "None (Planner Only)"
+            else "None"
         )
 
         for seed in seeds:
@@ -247,8 +247,8 @@ class ClassicalBenchmarkRunner:
                 )
             else:
                 r_succ, r_coll, r_rew, r_steps, r_dist, r_step_ms = (
-                    False,
-                    False,
+                    None,
+                    None,
                     0.0,
                     0,
                     0.0,
@@ -279,10 +279,14 @@ class ClassicalBenchmarkRunner:
         test_env.close()
 
         n = len(seeds)
-        p_succ_rate = float(sum(1 for r in results if r.planner_success) / n) if n > 0 else 0.0
-        r_succ_rate = float(sum(1 for r in results if r.rl_success) / n) if n > 0 else 0.0
-        p_coll_rate = float(sum(1 for r in results if r.planner_collision) / n) if n > 0 else 0.0
-        r_coll_rate = float(sum(1 for r in results if r.rl_collision) / n) if n > 0 else 0.0
+        p_succ_rate = compute_rate([r.planner_success for r in results])
+        r_succ_rate = (
+            compute_rate([r.rl_success for r in results]) if rl_algorithm is not None else None
+        )
+        p_coll_rate = compute_rate([r.planner_collision for r in results])
+        r_coll_rate = (
+            compute_rate([r.rl_collision for r in results]) if rl_algorithm is not None else None
+        )
 
         p_mean_rew = float(np.mean([r.planner_reward for r in results])) if n > 0 else 0.0
         r_mean_rew = float(np.mean([r.rl_reward for r in results])) if n > 0 else 0.0

@@ -11,6 +11,7 @@ from stable_baselines3.common.callbacks import BaseCallback as SB3BaseCallback
 from adaptive_rl.metrics import (
     EpisodeMetrics,
     EpisodeMetricsAccumulator,
+    compute_rate,
     extract_episode_metrics,
 )
 
@@ -121,18 +122,18 @@ class MetricLoggerCallback(BaseCallback):
         return float(np.mean(window))
 
     @property
-    def success_rate(self) -> float:
-        """Proportion of completed episodes that achieved the goal."""
-        if self.total_episodes == 0:
-            return 0.0
-        return self.successes / self.total_episodes
+    def success_rate(self) -> Optional[float]:
+        """Proportion of completed episodes that achieved the goal among defined episodes."""
+        if not self.episode_metrics:
+            return None
+        return compute_rate([m.success for m in self.episode_metrics])
 
     @property
-    def collision_rate(self) -> float:
-        """Proportion of completed episodes that ended in collision."""
-        if self.total_episodes == 0:
-            return 0.0
-        return self.collisions / self.total_episodes
+    def collision_rate(self) -> Optional[float]:
+        """Proportion of completed episodes that ended in collision among defined episodes."""
+        if not self.episode_metrics:
+            return None
+        return compute_rate([m.collision for m in self.episode_metrics])
 
 
 class CheckpointCallback(BaseCallback):
