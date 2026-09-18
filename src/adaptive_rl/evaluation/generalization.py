@@ -205,9 +205,7 @@ class GeneralizationEvaluator:
             else None
         )
         truncation_rate: Optional[float] = (
-            float(sum(1 for m in episode_metrics if m.truncated) / total)
-            if total > 0
-            else None
+            float(sum(1 for m in episode_metrics if m.truncated) / total) if total > 0 else None
         )
 
         return EvaluationMetrics(
@@ -255,7 +253,6 @@ class GeneralizationEvaluator:
             distribution.test_seeds, deterministic=deterministic
         )
         self.last_test_metrics = list(self.last_episode_metrics)
-
 
         if train_metrics.success_rate is not None and test_metrics.success_rate is not None:
             gap_success: Optional[float] = float(

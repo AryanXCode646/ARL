@@ -269,7 +269,6 @@ class Evaluator(BaseEvaluator):
             additional_metrics=additional,
         )
 
-
     def evaluate_scenarios(
         self,
         scenarios: List[EvaluationScenario],

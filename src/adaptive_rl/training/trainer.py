@@ -302,7 +302,6 @@ class PPOTrainer(BaseTrainer):
         return float(np.mean(rewards)), float(np.std(rewards))
 
 
-
 class SACTrainer(BaseTrainer):
     """Concrete SAC training engine coordinating environment, algorithm, callbacks, and checkpoints."""
 
@@ -536,7 +535,6 @@ class SACTrainer(BaseTrainer):
 
         rewards = [m.reward for m in metrics_list]
         return float(np.mean(rewards)), float(np.std(rewards))
-
 
 
 def get_trainer(

@@ -31,4 +31,3 @@ __all__ = [
     "load_config",
     "save_config",
 ]
-

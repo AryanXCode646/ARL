@@ -1,5 +1,6 @@
 """Tests verifying Typer CLI commands and execution."""
 
+import re
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -201,5 +202,6 @@ def test_cli_studio_help() -> None:
     """Verify adaptive-rl studio --help prints studio options."""
     result = runner.invoke(app, ["studio", "--help"])
     assert result.exit_code == 0
-    assert "AdaptiveRL Studio" in result.output
-    assert "--output-dir" in result.output
+    clean_output = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", result.output)
+    assert "AdaptiveRL Studio" in clean_output
+    assert "--output-dir" in clean_output

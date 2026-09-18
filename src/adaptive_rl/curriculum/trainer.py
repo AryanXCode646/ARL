@@ -270,4 +270,3 @@ class CurriculumTrainer(BaseTrainer):
 
         rewards = [m.reward for m in metrics_list]
         return float(np.mean(rewards)), float(np.std(rewards))
-
