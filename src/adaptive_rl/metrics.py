@@ -157,6 +157,8 @@ class TrafficOutcomePolicy(OutcomePolicy):
     - Episode did not terminate early due to failure/overflow (not terminated; horizon completion is truncated)
     - Final queue was controlled (terminal step success is True)
     Any episode with queue overflow or premature termination is strictly marked success=False.
+    Intermediate success signals are transient and NEVER latch to establish final episode success.
+    If terminal success information is missing (None) and no failure/overflow occurred, success is None.
     """
 
     def __init__(self) -> None:
@@ -179,11 +181,24 @@ class TrafficOutcomePolicy(OutcomePolicy):
         self,
         accumulator: EpisodeMetricsAccumulator,
     ) -> Optional[bool]:
-        if accumulator.has_success_info or self.has_overflow_info:
-            if self.had_overflow or accumulator.terminated:
-                return False
-            term_succ = _extract_flag(accumulator.last_info, SUCCESS_KEYS)
-            return bool(term_succ) if term_succ is not None else accumulator.had_success
+        # 1. Catastrophic overflow on ANY step forces success=False
+        if self.had_overflow:
+            return False
+
+        # 2. Premature failure termination in traffic forces success=False
+        if accumulator.terminated:
+            return False
+
+        # 3. In traffic, episode outcome is strictly established at the terminal step
+        term_succ = _extract_flag(accumulator.last_info, SUCCESS_KEYS)
+        if term_succ is not None:
+            return bool(term_succ)
+
+        # 4. Check if an explicit episode-level override was provided
+        if accumulator.explicit_success is not None:
+            return accumulator.explicit_success
+
+        # 5. Otherwise, if terminal step provides no success info, success is undefined (None)
         return None
 
     def get_additional_metrics(self) -> Dict[str, Any]:
@@ -232,6 +247,7 @@ class EpisodeMetricsAccumulator:
 
         self.has_success_info: bool = False
         self.had_success: bool = False
+        self.explicit_success: Optional[bool] = None
 
         self.last_info: Dict[str, Any] = {}
         self.step_infos: List[Mapping[str, Any]] = []
@@ -292,11 +308,11 @@ class EpisodeMetricsAccumulator:
         self.terminated = bool(terminated)
         self.truncated = bool(truncated)
 
-        if info:
-            info_dict = dict(info)
-            self.last_info = info_dict
-            self.step_infos.append(info_dict)
+        info_dict = dict(info) if info is not None else {}
+        self.last_info = info_dict
+        self.step_infos.append(info_dict)
 
+        if info_dict:
             # Auto-detect traffic environment if using DefaultOutcomePolicy and not explicitly configured
             if (
                 isinstance(self.outcome_policy, DefaultOutcomePolicy)
@@ -451,6 +467,7 @@ def extract_episode_metrics(
     if had_success is not None:
         acc.has_success_info = True
         acc.had_success = bool(had_success)
+        acc.explicit_success = bool(had_success)
 
     if had_overflow is not None:
         acc.had_overflow = bool(had_overflow)

@@ -178,7 +178,21 @@ class CheckpointCallback(BaseCallback):
 
 
 class SB3CallbackAdapter(SB3BaseCallback):
-    """Adapter bridging AdaptiveRL BaseCallbacks to Stable-Baselines3 callbacks."""
+    """Adapter bridging AdaptiveRL BaseCallbacks to Stable-Baselines3 callbacks.
+
+    Metrics Data Flow:
+        PPO / SAC training step
+            ↓ (emits locals: dones, infos, rewards)
+        SB3CallbackAdapter._on_step()
+            ↓ (accumulates transition stream)
+        EpisodeMetricsAccumulator.record_step()
+            ↓ (when done=True)
+        EpisodeMetricsAccumulator.finish() -> EpisodeMetrics (canonical immutable contract)
+            ↓ (invokes on_episode_end with metrics=ep_metrics)
+        MetricLoggerCallback / CurriculumCallback
+            ↓
+        EpisodeRecord / TrainingResult / serialization
+    """
 
     def __init__(
         self,

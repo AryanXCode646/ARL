@@ -49,7 +49,7 @@ class CurriculumCallback(BaseCallback):
         if stage.max_timesteps is not None and self.stage_timesteps >= stage.max_timesteps:
             computed_sr = compute_rate(list(self.recent_successes))
             rolling_metrics = {
-                "success_rate": computed_sr if computed_sr is not None else 0.0,
+                "success_rate": computed_sr,
                 "mean_reward": (
                     float(sum(self.recent_rewards) / len(self.recent_rewards))
                     if self.recent_rewards
@@ -106,10 +106,9 @@ class CurriculumCallback(BaseCallback):
 
         mean_reward = float(sum(self.recent_rewards) / len(self.recent_rewards))
         computed_sr = compute_rate(list(self.recent_successes))
-        success_rate = computed_sr if computed_sr is not None else 0.0
 
         rolling_metrics = {
-            "success_rate": success_rate,
+            "success_rate": computed_sr,
             "mean_reward": mean_reward,
             "window_size": len(self.recent_rewards),
         }
@@ -127,10 +126,11 @@ class CurriculumCallback(BaseCallback):
 
             if new_stage is not None:
                 if self.verbose > 0:
+                    sr_str = f"{computed_sr * 100:.1f}%" if computed_sr is not None else "N/A"
                     print(
                         f"\n[Curriculum] >>> ADVANCED to Stage {new_stage.stage_id}: "
                         f"'{new_stage.name}' at timestep {self.total_timesteps} "
-                        f"(SR: {success_rate * 100:.1f}%, Return: {mean_reward:.2f}) <<<"
+                        f"(SR: {sr_str}, Return: {mean_reward:.2f}) <<<"
                     )
 
                 # Reset stage metrics for the new difficulty tier

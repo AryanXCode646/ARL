@@ -1438,3 +1438,131 @@ def test_full_lifecycle_mixed_batch_denominators(tmp_path: Path) -> None:
     assert rows[1]["collision"] == "False"
     assert rows[2]["success"] == ""
     assert rows[2]["collision"] == ""
+
+
+def test_traffic_terminal_success_semantics() -> None:
+    """Explicitly verify the deterministic traffic terminal success rules required by Blocker #4:
+    - intermediate success=True + terminal missing -> None (intermediate does NOT latch)
+    - intermediate success=False + terminal missing -> None
+    - terminal success=True -> True
+    - terminal success=False -> False
+    - terminal success=None -> None
+    - overflow + terminal success -> False (overflow overrides positive terminal success)
+    - truncation + terminal success -> True (controlled horizon completion)
+    """
+    # 1. intermediate success=True + terminal missing -> None
+    acc1 = EpisodeMetricsAccumulator(is_traffic=True)
+    acc1.record_step(reward=1.0, info={"success": True, "step_controlled": True})
+    acc1.record_step(reward=1.0, info={"step_controlled": True}, truncated=True)
+    m1 = acc1.finish()
+    assert m1.success is None, (
+        "Intermediate success=True must NOT latch when terminal success is missing"
+    )
+
+    # 2. intermediate success=False + terminal missing -> None
+    acc2 = EpisodeMetricsAccumulator(is_traffic=True)
+    acc2.record_step(reward=-1.0, info={"success": False})
+    acc2.record_step(reward=0.0, info={}, truncated=True)
+    m2 = acc2.finish()
+    assert m2.success is None, (
+        "Intermediate success=False must NOT latch when terminal success is missing"
+    )
+
+    # 3. terminal success=True -> True
+    acc3 = EpisodeMetricsAccumulator(is_traffic=True)
+    acc3.record_step(reward=1.0, info={})
+    acc3.record_step(reward=1.0, info={"success": True}, truncated=True)
+    m3 = acc3.finish()
+    assert m3.success is True
+
+    # 4. terminal success=False -> False
+    acc4 = EpisodeMetricsAccumulator(is_traffic=True)
+    acc4.record_step(reward=1.0, info={})
+    acc4.record_step(reward=1.0, info={"success": False}, truncated=True)
+    m4 = acc4.finish()
+    assert m4.success is False
+
+    # 5. terminal success=None -> None
+    acc5 = EpisodeMetricsAccumulator(is_traffic=True)
+    acc5.record_step(reward=1.0, info={})
+    acc5.record_step(reward=1.0, info={}, truncated=True)
+    m5 = acc5.finish()
+    assert m5.success is None
+
+    # 6. overflow + terminal success -> False
+    acc6 = EpisodeMetricsAccumulator(is_traffic=True)
+    acc6.record_step(reward=-10.0, info={"had_overflow": True})
+    acc6.record_step(reward=1.0, info={"success": True}, truncated=True)
+    m6 = acc6.finish()
+    assert m6.success is False, "Overflow on any step must override terminal success to False"
+    assert m6.additional_metrics.get("had_overflow") is True
+
+    # 7. truncation + terminal success -> True
+    acc7 = EpisodeMetricsAccumulator(is_traffic=True)
+    acc7.record_step(reward=1.0, info={"had_overflow": False})
+    acc7.record_step(reward=1.0, info={"had_overflow": False, "success": True}, truncated=True)
+    m7 = acc7.finish()
+    assert m7.success is True
+    assert m7.truncated is True
+    assert m7.terminated is False
+
+
+def test_episodes_csv_roundtrip_preserves_nullability(tmp_path: Path) -> None:
+    """Verify that serialization to CSV and deserialization preserves the exact tri-state semantics:
+    None -> serialize -> deserialize -> None
+    False -> serialize -> deserialize -> False
+    True -> serialize -> deserialize -> True
+    """
+    from adaptive_rl.experiments.metadata import (
+        EpisodeRecord,
+        load_episodes_csv,
+        save_episodes_csv,
+    )
+
+    records = [
+        EpisodeRecord(episode=1, reward=10.0, length=5, success=None, collision=None, timestep=5),
+        EpisodeRecord(
+            episode=2, reward=0.0, length=10, success=False, collision=False, timestep=15
+        ),
+        EpisodeRecord(episode=3, reward=25.0, length=8, success=True, collision=False, timestep=23),
+        EpisodeRecord(
+            episode=4, reward=-50.0, length=4, success=False, collision=True, timestep=27
+        ),
+    ]
+
+    csv_path = save_episodes_csv(records, tmp_path, "roundtrip_test")
+    loaded = load_episodes_csv(csv_path)
+
+    assert len(loaded) == 4
+
+    # Record 1: None / None
+    assert loaded[0].episode == 1
+    assert loaded[0].reward == 10.0
+    assert loaded[0].length == 5
+    assert loaded[0].success is None
+    assert loaded[0].collision is None
+    assert loaded[0].timestep == 5
+
+    # Record 2: False / False
+    assert loaded[1].episode == 2
+    assert loaded[1].reward == 0.0
+    assert loaded[1].length == 10
+    assert loaded[1].success is False
+    assert loaded[1].collision is False
+    assert loaded[1].timestep == 15
+
+    # Record 3: True / False
+    assert loaded[2].episode == 3
+    assert loaded[2].reward == 25.0
+    assert loaded[2].length == 8
+    assert loaded[2].success is True
+    assert loaded[2].collision is False
+    assert loaded[2].timestep == 23
+
+    # Record 4: False / True
+    assert loaded[3].episode == 4
+    assert loaded[3].reward == -50.0
+    assert loaded[3].length == 4
+    assert loaded[3].success is False
+    assert loaded[3].collision is True
+    assert loaded[3].timestep == 27
