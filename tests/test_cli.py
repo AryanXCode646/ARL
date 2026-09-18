@@ -195,3 +195,11 @@ output_dir: "non_existent_results_dir"
     result = runner.invoke(app, ["evaluate", "--config", str(config_path)])
     assert result.exit_code == 1
     assert "No model weights provided" in result.output
+
+
+def test_cli_studio_help() -> None:
+    """Verify adaptive-rl studio --help prints studio options."""
+    result = runner.invoke(app, ["studio", "--help"])
+    assert result.exit_code == 0
+    assert "AdaptiveRL Studio" in result.output
+    assert "--output-dir" in result.output

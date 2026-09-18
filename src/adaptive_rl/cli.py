@@ -1194,5 +1194,38 @@ def dashboard(
     )
 
 
+# ---------------------------------------------------------------------------
+# Studio desktop command
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def studio(
+    output_dir: Optional[Path] = typer.Option(
+        None, "--output-dir", "-o", help="Experiments base directory (default: experiments/results)"
+    ),
+) -> None:
+    """Open the AdaptiveRL Studio desktop interface.
+
+    Displays a PySide6 desktop control center for environment inspection,
+    background training, and experiment artifact exploration.
+
+    Usage examples:
+        adaptive-rl studio
+        adaptive-rl studio --output-dir experiments/results
+    """
+    try:
+        from adaptive_rl.studio import launch_studio
+    except ImportError as err:
+        console.print(
+            f'[bold red]AdaptiveRL Studio requires PySide6.[/bold red] Install with: pip install -e ".[studio]"\n({err})'
+        )
+        raise typer.Exit(code=1)
+
+    code = launch_studio(output_dir=output_dir)
+    if code != 0:
+        raise typer.Exit(code=code)
+
+
 if __name__ == "__main__":
     app()

@@ -14,6 +14,7 @@ from adaptive_rl.algorithms.base import BaseAlgorithm
 from adaptive_rl.environments.registry import make_env
 from adaptive_rl.evaluation.metrics import EvaluationMetrics
 from adaptive_rl.evaluation.scenarios import EvaluationScenario
+from adaptive_rl.metrics import EpisodeMetrics, extract_episode_metrics
 
 
 class BaseEvaluator(ABC):
@@ -74,6 +75,8 @@ class Evaluator(BaseEvaluator):
         else:
             raise ValueError("Evaluator requires either 'env' or 'env_name'.")
 
+        self.last_episode_metrics: List[EpisodeMetrics] = []
+
     def evaluate(
         self,
         num_episodes: int = 10,
@@ -93,20 +96,13 @@ class Evaluator(BaseEvaluator):
         if num_episodes <= 0:
             raise ValueError(f"num_episodes must be positive, got {num_episodes}")
 
-        rewards: List[float] = []
-        lengths: List[int] = []
+        episode_metrics: List[EpisodeMetrics] = []
 
         # Flags tracking whether environments expose specific metrics
-        has_success_info = False
-        has_collision_info = False
         has_overflow_info = False
         is_traffic_env = False
 
-        # Per-episode outcomes
-        episode_successes: List[bool] = []
-        episode_collisions: List[bool] = []
         episode_overflows: List[bool] = []
-        episode_truncations: List[bool] = []
 
         # Traffic telemetry accumulators
         all_step_queues: List[int] = []
@@ -124,7 +120,6 @@ class Evaluator(BaseEvaluator):
             ep_length = 0
             done = False
 
-            ep_had_collision = False
             ep_had_overflow = False
             ep_step_max_waits: List[int] = []
             last_step_info: Dict[str, Any] = dict(info or {})
@@ -143,12 +138,6 @@ class Evaluator(BaseEvaluator):
                 last_step_info = step_info
                 last_terminated = terminated
                 last_truncated = truncated
-
-                # Track collision
-                if "collision" in step_info:
-                    has_collision_info = True
-                    if step_info["collision"]:
-                        ep_had_collision = True
 
                 # Track overflow
                 if (
@@ -173,41 +162,29 @@ class Evaluator(BaseEvaluator):
                     if "mean_wait" in step_info:
                         all_step_mean_waits.append(float(step_info["mean_wait"]))
 
-                # Check if environment provides success flag
-                if "success" in step_info:
-                    has_success_info = True
-
                 done = terminated or truncated
 
-            rewards.append(ep_reward)
-            lengths.append(ep_length)
-            episode_truncations.append(last_truncated)
-
-            if has_collision_info:
-                episode_collisions.append(ep_had_collision)
+            m = extract_episode_metrics(
+                reward=ep_reward,
+                length=ep_length,
+                terminated=last_terminated,
+                truncated=last_truncated,
+                info=last_step_info,
+            )
+            episode_metrics.append(m)
 
             if has_overflow_info:
                 episode_overflows.append(ep_had_overflow)
 
-            # Determine EPISODE-LEVEL success outcome:
-            # Success must be an episode-level outcome, never latched from a transient intermediate step.
             if is_traffic_env:
-                # Traffic contract: Episode succeeded iff no queue overflow occurred and final queue was controlled.
-                # An overflowed or early-terminated episode is NEVER successful.
-                traffic_success = (
-                    (not ep_had_overflow)
-                    and (not last_terminated)
-                    and bool(last_step_info.get("success", False))
-                )
-                episode_successes.append(traffic_success)
-                has_success_info = True
                 ep_max_waits.append(max(ep_step_max_waits) if ep_step_max_waits else 0)
                 ep_final_departures.append(int(last_step_info.get("cumulative_departures", 0)))
                 ep_final_delays.append(float(last_step_info.get("cumulative_delay", 0.0)))
-            elif has_success_info:
-                # Goal-directed navigation contract: Success requires reaching goal at termination without collision.
-                goal_success = (not ep_had_collision) and bool(last_step_info.get("success", False))
-                episode_successes.append(goal_success)
+
+        self.last_episode_metrics = episode_metrics
+
+        rewards = [m.reward for m in episode_metrics]
+        lengths = [m.length for m in episode_metrics]
 
         mean_rew = float(np.mean(rewards))
         std_rew = float(np.std(rewards))
@@ -216,16 +193,30 @@ class Evaluator(BaseEvaluator):
         mean_len = float(np.mean(lengths))
         std_len = float(np.std(lengths))
 
+        has_success_info = any(m.success is not None for m in episode_metrics)
+        has_collision_info = any(m.collision is not None for m in episode_metrics)
+
+        # Episode-level outcomes aggregated from canonical EpisodeMetrics
+        # Invariant: an episode that ended in collision is never a success
         success_rate: Optional[float] = (
-            float(sum(episode_successes) / num_episodes) if has_success_info else None
+            float(
+                sum(1 for m in episode_metrics if m.success is True and m.collision is not True)
+                / num_episodes
+            )
+            if has_success_info
+            else None
         )
         collision_rate: Optional[float] = (
-            float(sum(episode_collisions) / num_episodes) if has_collision_info else None
+            float(sum(1 for m in episode_metrics if m.collision is True) / num_episodes)
+            if has_collision_info
+            else None
         )
         overflow_rate: Optional[float] = (
             float(sum(episode_overflows) / num_episodes) if has_overflow_info else None
         )
-        truncation_rate: Optional[float] = float(sum(episode_truncations) / num_episodes)
+        truncation_rate: Optional[float] = float(
+            sum(1 for m in episode_metrics if m.truncated) / num_episodes
+        )
 
         additional: Dict[str, Any] = {
             "all_rewards": rewards,
@@ -277,6 +268,7 @@ class Evaluator(BaseEvaluator):
             std_episode_length=std_len,
             additional_metrics=additional,
         )
+
 
     def evaluate_scenarios(
         self,

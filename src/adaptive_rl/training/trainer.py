@@ -22,6 +22,7 @@ from adaptive_rl.experiments.metadata import (
     ExperimentMetadata,
     save_episodes_csv,
 )
+from adaptive_rl.metrics import EpisodeMetrics, extract_episode_metrics
 from adaptive_rl.training.callbacks import (
     BaseCallback,
     CheckpointCallback,
@@ -178,23 +179,37 @@ class PPOTrainer(BaseTrainer):
         finished_at = time.time()
         duration = finished_at - started_at
 
-        # Build per-episode records for CSV export
+        # Build per-episode records for CSV export from canonical EpisodeMetrics
         episode_records: List[EpisodeRecord] = []
         cumulative_ts = 0
-        for i, (rew, length) in enumerate(
-            zip(self.metric_logger.episode_rewards, self.metric_logger.episode_lengths)
-        ):
-            cumulative_ts += length
-            episode_records.append(
-                EpisodeRecord(
-                    episode=i + 1,
-                    reward=float(rew),
-                    length=int(length),
-                    success=False,  # per-episode success not tracked separately at this level
-                    collision=False,
-                    timestep=cumulative_ts,
+        if self.metric_logger.episode_metrics:
+            for i, m in enumerate(self.metric_logger.episode_metrics):
+                cumulative_ts += m.length
+                episode_records.append(
+                    EpisodeRecord(
+                        episode=i + 1,
+                        reward=float(m.reward),
+                        length=int(m.length),
+                        success=bool(m.success) if m.success is not None else False,
+                        collision=bool(m.collision) if m.collision is not None else False,
+                        timestep=cumulative_ts,
+                    )
                 )
-            )
+        else:
+            for i, (rew, length) in enumerate(
+                zip(self.metric_logger.episode_rewards, self.metric_logger.episode_lengths)
+            ):
+                cumulative_ts += length
+                episode_records.append(
+                    EpisodeRecord(
+                        episode=i + 1,
+                        reward=float(rew),
+                        length=int(length),
+                        success=False,
+                        collision=False,
+                        timestep=cumulative_ts,
+                    )
+                )
 
         # Save metadata.json and episodes.csv in metadata subdir
         metadata_dir = self.config.output_dir / "metadata"
@@ -246,7 +261,7 @@ class PPOTrainer(BaseTrainer):
         episodes: int = 10,
         deterministic: bool = True,
     ) -> tuple[float, float]:
-        """Evaluate current policy on the environment.
+        """Evaluate current policy on the environment using canonical EpisodeMetrics.
 
         Args:
             episodes: Number of evaluation episodes.
@@ -255,19 +270,37 @@ class PPOTrainer(BaseTrainer):
         Returns:
             tuple[float, float]: (mean_reward, std_reward)
         """
-        rewards: List[float] = []
+        metrics_list: List[EpisodeMetrics] = []
         for ep in range(episodes):
-            obs, _ = self.env.reset(seed=self.config.seed + ep if self.config.seed else None)
+            obs, info = self.env.reset(seed=self.config.seed + ep if self.config.seed else None)
             ep_reward = 0.0
+            ep_length = 0
             done = False
+            last_step_info: Dict[str, Any] = dict(info or {})
+            last_terminated = False
+            last_truncated = False
             while not done:
                 action, _ = self.algorithm.predict(obs, deterministic=deterministic)
-                obs, reward, terminated, truncated, _ = self.env.step(action)
+                obs, reward, terminated, truncated, step_info = self.env.step(action)
                 ep_reward += float(reward)
+                ep_length += 1
+                last_step_info = step_info
+                last_terminated = terminated
+                last_truncated = truncated
                 done = terminated or truncated
-            rewards.append(ep_reward)
 
+            m = extract_episode_metrics(
+                reward=ep_reward,
+                length=ep_length,
+                terminated=last_terminated,
+                truncated=last_truncated,
+                info=last_step_info,
+            )
+            metrics_list.append(m)
+
+        rewards = [m.reward for m in metrics_list]
         return float(np.mean(rewards)), float(np.std(rewards))
+
 
 
 class SACTrainer(BaseTrainer):
@@ -382,23 +415,37 @@ class SACTrainer(BaseTrainer):
         finished_at = time.time()
         duration = finished_at - started_at
 
-        # Build per-episode records for CSV export
+        # Build per-episode records for CSV export from canonical EpisodeMetrics
         episode_records: List[EpisodeRecord] = []
         cumulative_ts = 0
-        for i, (rew, length) in enumerate(
-            zip(self.metric_logger.episode_rewards, self.metric_logger.episode_lengths)
-        ):
-            cumulative_ts += length
-            episode_records.append(
-                EpisodeRecord(
-                    episode=i + 1,
-                    reward=float(rew),
-                    length=int(length),
-                    success=False,
-                    collision=False,
-                    timestep=cumulative_ts,
+        if self.metric_logger.episode_metrics:
+            for i, m in enumerate(self.metric_logger.episode_metrics):
+                cumulative_ts += m.length
+                episode_records.append(
+                    EpisodeRecord(
+                        episode=i + 1,
+                        reward=float(m.reward),
+                        length=int(m.length),
+                        success=bool(m.success) if m.success is not None else False,
+                        collision=bool(m.collision) if m.collision is not None else False,
+                        timestep=cumulative_ts,
+                    )
                 )
-            )
+        else:
+            for i, (rew, length) in enumerate(
+                zip(self.metric_logger.episode_rewards, self.metric_logger.episode_lengths)
+            ):
+                cumulative_ts += length
+                episode_records.append(
+                    EpisodeRecord(
+                        episode=i + 1,
+                        reward=float(rew),
+                        length=int(length),
+                        success=False,
+                        collision=False,
+                        timestep=cumulative_ts,
+                    )
+                )
 
         # Save metadata.json and episodes.csv
         metadata_dir = self.config.output_dir / "metadata"
@@ -450,7 +497,7 @@ class SACTrainer(BaseTrainer):
         episodes: int = 10,
         deterministic: bool = True,
     ) -> tuple[float, float]:
-        """Evaluate current policy on the environment.
+        """Evaluate current policy on the environment using canonical EpisodeMetrics.
 
         Args:
             episodes: Number of evaluation episodes.
@@ -459,19 +506,37 @@ class SACTrainer(BaseTrainer):
         Returns:
             tuple[float, float]: (mean_reward, std_reward)
         """
-        rewards: List[float] = []
+        metrics_list: List[EpisodeMetrics] = []
         for ep in range(episodes):
-            obs, _ = self.env.reset(seed=self.config.seed + ep if self.config.seed else None)
+            obs, info = self.env.reset(seed=self.config.seed + ep if self.config.seed else None)
             ep_reward = 0.0
+            ep_length = 0
             done = False
+            last_step_info: Dict[str, Any] = dict(info or {})
+            last_terminated = False
+            last_truncated = False
             while not done:
                 action, _ = self.algorithm.predict(obs, deterministic=deterministic)
-                obs, reward, terminated, truncated, _ = self.env.step(action)
+                obs, reward, terminated, truncated, step_info = self.env.step(action)
                 ep_reward += float(reward)
+                ep_length += 1
+                last_step_info = step_info
+                last_terminated = terminated
+                last_truncated = truncated
                 done = terminated or truncated
-            rewards.append(ep_reward)
 
+            m = extract_episode_metrics(
+                reward=ep_reward,
+                length=ep_length,
+                terminated=last_terminated,
+                truncated=last_truncated,
+                info=last_step_info,
+            )
+            metrics_list.append(m)
+
+        rewards = [m.reward for m in metrics_list]
         return float(np.mean(rewards)), float(np.std(rewards))
+
 
 
 def get_trainer(

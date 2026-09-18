@@ -6,6 +6,8 @@ from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from adaptive_rl.metrics import EpisodeMetrics, extract_episode_metrics
+
 
 class EvaluationMetrics(BaseModel):
     """Container for reinforcement learning evaluation results.
@@ -272,3 +274,11 @@ class StandardizedExperimentMetrics(BaseModel):
             else:
                 flat[k] = ""
         return flat
+
+
+__all__ = [
+    "EpisodeMetrics",
+    "EvaluationMetrics",
+    "StandardizedExperimentMetrics",
+    "extract_episode_metrics",
+]

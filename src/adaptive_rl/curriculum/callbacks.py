@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 
 from adaptive_rl.curriculum.curriculum import Curriculum
 from adaptive_rl.curriculum.wrapper import CurriculumEnvWrapper
+from adaptive_rl.metrics import EpisodeMetrics, extract_episode_metrics
 from adaptive_rl.training.callbacks import BaseCallback
 
 
@@ -84,13 +85,22 @@ class CurriculumCallback(BaseCallback):
         episode_reward: float,
         episode_length: int,
         info: Optional[Dict[str, Any]] = None,
+        metrics: Optional[EpisodeMetrics] = None,
     ) -> None:
         """Update rolling metrics and evaluate stage graduation criteria upon episode completion."""
         self.stage_episodes += 1
         self.recent_rewards.append(episode_reward)
 
-        step_info = info or {}
-        is_success = 1.0 if step_info.get("success", False) else 0.0
+        if metrics is None:
+            metrics = extract_episode_metrics(
+                reward=episode_reward,
+                length=episode_length,
+                terminated=True,
+                truncated=False,
+                info=info,
+            )
+
+        is_success = 1.0 if metrics.success is True else 0.0
         self.recent_successes.append(is_success)
 
         mean_reward = float(sum(self.recent_rewards) / len(self.recent_rewards))

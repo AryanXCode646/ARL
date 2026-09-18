@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback as SB3BaseCallback
 
+from adaptive_rl.metrics import EpisodeMetrics, extract_episode_metrics
+
 if TYPE_CHECKING:
     from adaptive_rl.algorithms.base import BaseAlgorithm
     from adaptive_rl.training.checkpointing import CheckpointManager
@@ -38,6 +40,7 @@ class BaseCallback(ABC):
         episode_reward: float,
         episode_length: int,
         info: Optional[Dict[str, Any]] = None,
+        metrics: Optional[EpisodeMetrics] = None,
     ) -> None:
         """Called upon completion of an environment episode."""
         pass
@@ -62,6 +65,7 @@ class MetricLoggerCallback(BaseCallback):
         self.total_episodes: int = 0
         self.successes: int = 0
         self.collisions: int = 0
+        self.episode_metrics: List[EpisodeMetrics] = []
 
     def on_episode_end(
         self,
@@ -69,17 +73,27 @@ class MetricLoggerCallback(BaseCallback):
         episode_reward: float,
         episode_length: int,
         info: Optional[Dict[str, Any]] = None,
+        metrics: Optional[EpisodeMetrics] = None,
     ) -> None:
         """Record episode outcomes."""
         self.total_episodes += 1
         self.episode_rewards.append(episode_reward)
         self.episode_lengths.append(episode_length)
 
-        if info:
-            if info.get("success", False):
-                self.successes += 1
-            if info.get("collision", False):
-                self.collisions += 1
+        if metrics is None:
+            metrics = extract_episode_metrics(
+                reward=episode_reward,
+                length=episode_length,
+                terminated=True,
+                truncated=False,
+                info=info,
+            )
+        self.episode_metrics.append(metrics)
+
+        if metrics.success is True:
+            self.successes += 1
+        if metrics.collision is True:
+            self.collisions += 1
 
     @property
     def mean_reward(self) -> float:
@@ -198,13 +212,32 @@ class SB3CallbackAdapter(SB3BaseCallback):
                 ep_reward = self._current_rewards.pop(i, 0.0)
                 ep_length = self._current_lengths.pop(i, 0)
 
+                is_truncated = bool(info.get("TimeLimit.truncated", False))
+                is_terminated = bool(done and not is_truncated)
+                ep_metrics = extract_episode_metrics(
+                    reward=ep_reward,
+                    length=ep_length,
+                    terminated=is_terminated,
+                    truncated=is_truncated,
+                    info=info,
+                )
+
                 for cb in self.callbacks:
-                    cb.on_episode_end(
-                        episode=self._episode_count,
-                        episode_reward=ep_reward,
-                        episode_length=ep_length,
-                        info=info,
-                    )
+                    try:
+                        cb.on_episode_end(
+                            episode=self._episode_count,
+                            episode_reward=ep_reward,
+                            episode_length=ep_length,
+                            info=info,
+                            metrics=ep_metrics,
+                        )
+                    except TypeError:
+                        cb.on_episode_end(
+                            episode=self._episode_count,
+                            episode_reward=ep_reward,
+                            episode_length=ep_length,
+                            info=info,
+                        )
 
         continue_training = True
         for cb in self.callbacks:

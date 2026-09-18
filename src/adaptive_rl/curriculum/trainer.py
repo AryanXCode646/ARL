@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import random
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import gymnasium as gym
 import numpy as np
@@ -20,6 +20,7 @@ from adaptive_rl.curriculum.presets import get_curriculum_preset
 from adaptive_rl.curriculum.stage import CurriculumStage
 from adaptive_rl.curriculum.wrapper import CurriculumEnvWrapper
 from adaptive_rl.environments.registry import make_env
+from adaptive_rl.metrics import EpisodeMetrics, extract_episode_metrics
 from adaptive_rl.training.callbacks import (
     BaseCallback,
     CheckpointCallback,
@@ -238,17 +239,35 @@ class CurriculumTrainer(BaseTrainer):
         episodes: int = 10,
         deterministic: bool = True,
     ) -> tuple[float, float]:
-        """Evaluate policy on current curriculum stage."""
-        rewards: List[float] = []
+        """Evaluate policy on current curriculum stage using canonical EpisodeMetrics."""
+        metrics_list: List[EpisodeMetrics] = []
         for ep in range(episodes):
-            obs, _ = self.env.reset(seed=self.config.seed + ep if self.config.seed else None)
+            obs, info = self.env.reset(seed=self.config.seed + ep if self.config.seed else None)
             ep_reward = 0.0
+            ep_length = 0
             done = False
+            last_step_info: dict[str, Any] = dict(info or {})
+            last_terminated = False
+            last_truncated = False
             while not done:
                 action, _ = self.algorithm.predict(obs, deterministic=deterministic)
-                obs, reward, terminated, truncated, _ = self.env.step(action)
+                obs, reward, terminated, truncated, step_info = self.env.step(action)
                 ep_reward += float(reward)
+                ep_length += 1
+                last_step_info = step_info
+                last_terminated = terminated
+                last_truncated = truncated
                 done = terminated or truncated
-            rewards.append(ep_reward)
 
+            m = extract_episode_metrics(
+                reward=ep_reward,
+                length=ep_length,
+                terminated=last_terminated,
+                truncated=last_truncated,
+                info=last_step_info,
+            )
+            metrics_list.append(m)
+
+        rewards = [m.reward for m in metrics_list]
         return float(np.mean(rewards)), float(np.std(rewards))
+

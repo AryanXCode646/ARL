@@ -14,6 +14,7 @@ from adaptive_rl.config import (
     load_config,
     save_config,
 )
+from adaptive_rl.metrics import EpisodeMetrics, extract_episode_metrics
 
 __version__ = "0.1.0"
 
@@ -22,9 +23,12 @@ __all__ = [
     "AlgorithmConfig",
     "ConfigError",
     "EnvironmentConfig",
+    "EpisodeMetrics",
     "EvaluationConfig",
     "ExperimentConfig",
     "TrainingConfig",
+    "extract_episode_metrics",
     "load_config",
     "save_config",
 ]
+

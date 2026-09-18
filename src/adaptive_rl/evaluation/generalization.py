@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from adaptive_rl.algorithms.base import BaseAlgorithm
 from adaptive_rl.environments.registry import make_env
 from adaptive_rl.evaluation.metrics import EvaluationMetrics
+from adaptive_rl.metrics import EpisodeMetrics, extract_episode_metrics
 
 
 class GeneralizationDistribution(BaseModel):
@@ -140,54 +141,84 @@ class GeneralizationEvaluator:
         else:
             raise ValueError("GeneralizationEvaluator requires either 'env' or 'env_name'.")
 
+        self.last_episode_metrics: List[EpisodeMetrics] = []
+        self.last_train_metrics: List[EpisodeMetrics] = []
+        self.last_test_metrics: List[EpisodeMetrics] = []
+
     def _evaluate_seed_list(
         self,
         seeds: Sequence[int],
         deterministic: bool = True,
     ) -> EvaluationMetrics:
         """Evaluate agent over exact list of seeds, one episode per seed."""
-        rewards: List[float] = []
-        lengths: List[int] = []
-        successes = 0
-        collisions = 0
+        episode_metrics: List[EpisodeMetrics] = []
 
         for seed in seeds:
-            obs, _ = self.env.reset(seed=int(seed))
+            obs, info = self.env.reset(seed=int(seed))
             done = False
             ep_reward = 0.0
             ep_len = 0
-            ep_success = False
-            ep_collision = False
+            last_step_info: Dict[str, Any] = dict(info or {})
+            last_terminated = False
+            last_truncated = False
 
             while not done:
                 action, _ = self.algorithm.predict(obs, deterministic=deterministic)
                 obs, reward, terminated, truncated, step_info = self.env.step(action)
                 ep_reward += float(reward)
                 ep_len += 1
-
-                if step_info.get("success", False):
-                    ep_success = True
-                if step_info.get("collision", False):
-                    ep_collision = True
-
+                last_step_info = step_info
+                last_terminated = terminated
+                last_truncated = truncated
                 done = terminated or truncated
 
-            rewards.append(ep_reward)
-            lengths.append(ep_len)
-            if ep_success:
-                successes += 1
-            if ep_collision:
-                collisions += 1
+            m = extract_episode_metrics(
+                reward=ep_reward,
+                length=ep_len,
+                terminated=last_terminated,
+                truncated=last_truncated,
+                info=last_step_info,
+            )
+            episode_metrics.append(m)
+
+        self.last_episode_metrics = episode_metrics
 
         total = len(seeds)
+        rewards = [m.reward for m in episode_metrics]
+        lengths = [m.length for m in episode_metrics]
+
+        has_success_info = any(m.success is not None for m in episode_metrics)
+        has_collision_info = any(m.collision is not None for m in episode_metrics)
+
+        # Invariant: an episode that ended in collision is never a success
+        success_rate: Optional[float] = (
+            float(
+                sum(1 for m in episode_metrics if m.success is True and m.collision is not True)
+                / total
+            )
+            if has_success_info and total > 0
+            else None
+        )
+        collision_rate: Optional[float] = (
+            float(sum(1 for m in episode_metrics if m.collision is True) / total)
+            if has_collision_info and total > 0
+            else None
+        )
+        truncation_rate: Optional[float] = (
+            float(sum(1 for m in episode_metrics if m.truncated) / total)
+            if total > 0
+            else None
+        )
+
         return EvaluationMetrics(
             episodes=total,
             mean_reward=float(np.mean(rewards)) if rewards else 0.0,
             std_reward=float(np.std(rewards)) if rewards else 0.0,
             min_reward=float(np.min(rewards)) if rewards else 0.0,
             max_reward=float(np.max(rewards)) if rewards else 0.0,
-            success_rate=float(successes / total) if total > 0 else 0.0,
-            collision_rate=float(collisions / total) if total > 0 else 0.0,
+            success_rate=success_rate,
+            collision_rate=collision_rate,
+            truncation_rate=truncation_rate,
             mean_episode_length=float(np.mean(lengths)) if lengths else 0.0,
             std_episode_length=float(np.std(lengths)) if lengths else 0.0,
             additional_metrics={
@@ -218,9 +249,13 @@ class GeneralizationEvaluator:
         train_metrics = self._evaluate_seed_list(
             distribution.train_seeds, deterministic=deterministic
         )
+        self.last_train_metrics = list(self.last_episode_metrics)
+
         test_metrics = self._evaluate_seed_list(
             distribution.test_seeds, deterministic=deterministic
         )
+        self.last_test_metrics = list(self.last_episode_metrics)
+
 
         if train_metrics.success_rate is not None and test_metrics.success_rate is not None:
             gap_success: Optional[float] = float(
