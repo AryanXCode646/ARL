@@ -171,37 +171,24 @@ class TrafficOutcomePolicy(OutcomePolicy):
 
     Traffic Success Contract:
     An episode succeeded iff:
-    - No queue overflow occurred across the entire episode (not had_overflow)
-    - Episode did not terminate early due to failure/overflow (not terminated; horizon completion is truncated)
+    - No queue overflow occurred across the entire episode (not accumulator.had_overflow)
+    - Episode did not terminate early due to failure/overflow (not accumulator.terminated; horizon completion is truncated)
     - Final queue was controlled (terminal step success is True)
     Any episode with queue overflow or premature termination is strictly marked success=False.
     Intermediate success signals are transient and NEVER latch to establish final episode success.
     If terminal success information is missing (None) and no failure/overflow occurred, success is None.
+
+    Policy instances are completely stateless and safe to share across multiple accumulators,
+    sequential episodes, and concurrent environments. All episodic facts are tracked in the
+    episode-local EpisodeMetricsAccumulator.
     """
-
-    def __init__(self) -> None:
-        self.has_overflow_info: bool = False
-        self.had_overflow: bool = False
-
-    def record_step(
-        self,
-        info: Mapping[str, Any],
-        terminated: bool,
-        truncated: bool,
-    ) -> None:
-        ovf_flag = _extract_flag(info, OVERFLOW_KEYS)
-        if ovf_flag is not None:
-            self.has_overflow_info = True
-            if ovf_flag:
-                self.had_overflow = True
 
     def resolve_success(
         self,
         accumulator: EpisodeMetricsAccumulator,
     ) -> Optional[bool]:
-        # 1. Catastrophic overflow on ANY step forces success=False
-        had_ovf = accumulator.had_overflow or self.had_overflow
-        if had_ovf:
+        # 1. Catastrophic overflow on ANY step of this episode forces success=False
+        if accumulator.had_overflow:
             return False
 
         # 2. Premature failure termination in traffic forces success=False
@@ -225,14 +212,8 @@ class TrafficOutcomePolicy(OutcomePolicy):
         accumulator: Optional[EpisodeMetricsAccumulator] = None,
     ) -> Dict[str, Any]:
         extra: Dict[str, Any] = {}
-        has_ovf = (
-            accumulator.has_overflow_info if accumulator is not None else False
-        ) or self.has_overflow_info
-        had_ovf = (
-            accumulator.had_overflow if accumulator is not None else False
-        ) or self.had_overflow
-        if has_ovf:
-            extra["had_overflow"] = had_ovf
+        if accumulator is not None and accumulator.has_overflow_info:
+            extra["had_overflow"] = accumulator.had_overflow
         return extra
 
 
@@ -340,10 +321,7 @@ class EpisodeMetricsAccumulator:
         Explicit policy selection always takes precedence.
         """
         if any(k in info_dict for k in TRAFFIC_KEYS):
-            traffic_policy = TrafficOutcomePolicy()
-            for s_info in self.step_infos:
-                traffic_policy.record_step(s_info, False, False)
-            self.outcome_policy = traffic_policy
+            self.outcome_policy = TrafficOutcomePolicy()
 
     def record_step(
         self,

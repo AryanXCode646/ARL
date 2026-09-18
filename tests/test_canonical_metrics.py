@@ -1799,3 +1799,73 @@ def test_evaluator_and_generalization_explicit_policy() -> None:
     report = gen_eval.evaluate_generalization(dist)
     assert report.train_metrics.episodes == 2
     assert report.test_metrics.episodes == 2
+
+
+def test_shared_traffic_outcome_policy_cross_episode_isolation() -> None:
+    """Verify that a single shared TrafficOutcomePolicy instance does NOT leak state across episodes or environments.
+
+    Regression test for: TrafficOutcomePolicy reused across multiple accumulators/episodes
+    must not allow overflow information from one episode/environment to contaminate another.
+    """
+    from adaptive_rl.metrics import EpisodeMetricsAccumulator, TrafficOutcomePolicy
+
+    shared_policy = TrafficOutcomePolicy()
+
+    # Episode 1: Suffers catastrophic queue overflow
+    acc1 = EpisodeMetricsAccumulator(outcome_policy=shared_policy)
+    acc1.record_step(reward=-10.0, info={"overflow": True})
+    acc1.record_step(reward=1.0, info={"success": True}, truncated=True)
+    m1 = acc1.finish()
+    assert m1.success is False
+    assert m1.additional_metrics.get("had_overflow") is True
+
+    # Episode 2: Clean episode reusing the exact same shared_policy instance!
+    acc2 = EpisodeMetricsAccumulator(outcome_policy=shared_policy)
+    acc2.record_step(reward=1.0, info={"queue_lengths": [1, 0], "overflow": False})
+    acc2.record_step(reward=1.0, info={"success": True}, truncated=True)
+    m2 = acc2.finish()
+    assert m2.success is True, (
+        "Episode 2 must NOT be marked failed due to overflow in previous Episode 1 sharing the same policy"
+    )
+    assert m2.additional_metrics.get("had_overflow") is False
+
+    # Episode 3: Premature termination on shared policy
+    acc3 = EpisodeMetricsAccumulator(outcome_policy=shared_policy)
+    acc3.record_step(reward=0.0, info={"success": True}, terminated=True, truncated=False)
+    m3 = acc3.finish()
+    assert m3.success is False
+    assert m3.terminated is True
+
+    # Episode 4: Clean truncated episode on shared policy
+    acc4 = EpisodeMetricsAccumulator(outcome_policy=shared_policy)
+    acc4.record_step(reward=1.0, info={"queue_lengths": [0, 0], "overflow": False})
+    acc4.record_step(reward=1.0, info={"success": True}, terminated=False, truncated=True)
+    m4 = acc4.finish()
+    assert m4.success is True, (
+        "Episode 4 must succeed; previous premature termination on shared policy must not leak"
+    )
+    assert m4.terminated is False
+    assert m4.truncated is True
+
+    # Vectorized / concurrent environments sharing the same policy instance
+    acc_env_a = EpisodeMetricsAccumulator(outcome_policy=shared_policy)
+    acc_env_b = EpisodeMetricsAccumulator(outcome_policy=shared_policy)
+
+    # Step 1: Env A overflows, Env B is clean
+    acc_env_a.record_step(reward=-5.0, info={"had_overflow": True})
+    acc_env_b.record_step(reward=1.0, info={"had_overflow": False})
+
+    # Step 2: Both finish with terminal success=True
+    acc_env_a.record_step(reward=1.0, info={"success": True}, truncated=True)
+    acc_env_b.record_step(reward=1.0, info={"success": True}, truncated=True)
+
+    m_env_a = acc_env_a.finish()
+    m_env_b = acc_env_b.finish()
+
+    assert m_env_a.success is False, "Env A had overflow and must fail"
+    assert m_env_a.additional_metrics.get("had_overflow") is True
+
+    assert m_env_b.success is True, (
+        "Env B had no overflow and must succeed; must not be contaminated by concurrent Env A sharing same policy"
+    )
+    assert m_env_b.additional_metrics.get("had_overflow") is False
