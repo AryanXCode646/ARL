@@ -23,8 +23,11 @@ from adaptive_rl.experiments.metadata import (
     save_episodes_csv,
 )
 from adaptive_rl.metrics import (
+    DefaultOutcomePolicy,
     EpisodeMetrics,
     EpisodeMetricsAccumulator,
+    OutcomePolicy,
+    TrafficOutcomePolicy,
 )
 from adaptive_rl.training.callbacks import (
     BaseCallback,
@@ -98,6 +101,11 @@ class PPOTrainer(BaseTrainer):
                 **self.config.environment.parameters,
             )
 
+        if "traffic" in self.config.environment.name.lower():
+            self.outcome_policy: OutcomePolicy = TrafficOutcomePolicy()
+        else:
+            self.outcome_policy = DefaultOutcomePolicy()
+
         # 2. Checkpoint management
         checkpoint_dir = self.config.output_dir / "checkpoints" / self.config.name
         self.checkpoint_manager = CheckpointManager(checkpoint_dir=checkpoint_dir)
@@ -164,6 +172,7 @@ class PPOTrainer(BaseTrainer):
         adapter = SB3CallbackAdapter(
             callbacks=self._callbacks,
             algorithm=self.algorithm,
+            outcome_policy=self.outcome_policy,
         )
 
         assert self.config.training is not None
@@ -276,7 +285,7 @@ class PPOTrainer(BaseTrainer):
         metrics_list: List[EpisodeMetrics] = []
         for ep in range(episodes):
             obs, info = self.env.reset(seed=self.config.seed + ep if self.config.seed else None)
-            acc = EpisodeMetricsAccumulator()
+            acc = EpisodeMetricsAccumulator(outcome_policy=self.outcome_policy)
             done = False
             while not done:
                 action, _ = self.algorithm.predict(obs, deterministic=deterministic)
@@ -323,6 +332,11 @@ class SACTrainer(BaseTrainer):
                 self.config.environment.name,
                 **self.config.environment.parameters,
             )
+
+        if "traffic" in self.config.environment.name.lower():
+            self.outcome_policy: OutcomePolicy = TrafficOutcomePolicy()
+        else:
+            self.outcome_policy = DefaultOutcomePolicy()
 
         # 2. Checkpoint management
         checkpoint_dir = self.config.output_dir / "checkpoints" / self.config.name
@@ -390,6 +404,7 @@ class SACTrainer(BaseTrainer):
         adapter = SB3CallbackAdapter(
             callbacks=self._callbacks,
             algorithm=self.algorithm,
+            outcome_policy=self.outcome_policy,
         )
 
         assert self.config.training is not None
@@ -502,7 +517,7 @@ class SACTrainer(BaseTrainer):
         metrics_list: List[EpisodeMetrics] = []
         for ep in range(episodes):
             obs, info = self.env.reset(seed=self.config.seed + ep if self.config.seed else None)
-            acc = EpisodeMetricsAccumulator()
+            acc = EpisodeMetricsAccumulator(outcome_policy=self.outcome_policy)
             done = False
             while not done:
                 action, _ = self.algorithm.predict(obs, deterministic=deterministic)

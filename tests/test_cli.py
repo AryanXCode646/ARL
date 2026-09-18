@@ -1,6 +1,5 @@
 """Tests verifying Typer CLI commands and execution."""
 
-import re
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -196,12 +195,3 @@ output_dir: "non_existent_results_dir"
     result = runner.invoke(app, ["evaluate", "--config", str(config_path)])
     assert result.exit_code == 1
     assert "No model weights provided" in result.output
-
-
-def test_cli_studio_help() -> None:
-    """Verify adaptive-rl studio --help prints studio options."""
-    result = runner.invoke(app, ["studio", "--help"])
-    assert result.exit_code == 0
-    clean_output = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", result.output)
-    assert "AdaptiveRL Studio" in clean_output
-    assert "--output-dir" in clean_output

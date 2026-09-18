@@ -21,8 +21,11 @@ from adaptive_rl.curriculum.stage import CurriculumStage
 from adaptive_rl.curriculum.wrapper import CurriculumEnvWrapper
 from adaptive_rl.environments.registry import make_env
 from adaptive_rl.metrics import (
+    DefaultOutcomePolicy,
     EpisodeMetrics,
     EpisodeMetricsAccumulator,
+    OutcomePolicy,
+    TrafficOutcomePolicy,
 )
 from adaptive_rl.training.callbacks import (
     BaseCallback,
@@ -132,6 +135,11 @@ class CurriculumTrainer(BaseTrainer):
             )
         training_cfg = self.config.training
 
+        if "traffic" in self.config.environment.name.lower():
+            self.outcome_policy: OutcomePolicy = TrafficOutcomePolicy()
+        else:
+            self.outcome_policy = DefaultOutcomePolicy()
+
         self._callbacks: List[BaseCallback] = [self.metric_logger, self.curriculum_callback]
 
         if training_cfg.checkpoint_freq > 0:
@@ -199,6 +207,7 @@ class CurriculumTrainer(BaseTrainer):
         adapter = SB3CallbackAdapter(
             callbacks=self._callbacks,
             algorithm=self.algorithm,
+            outcome_policy=self.outcome_policy,
         )
 
         assert self.config.training is not None
@@ -246,7 +255,7 @@ class CurriculumTrainer(BaseTrainer):
         metrics_list: List[EpisodeMetrics] = []
         for ep in range(episodes):
             obs, info = self.env.reset(seed=self.config.seed + ep if self.config.seed else None)
-            acc = EpisodeMetricsAccumulator()
+            acc = EpisodeMetricsAccumulator(outcome_policy=self.outcome_policy)
             done = False
             while not done:
                 action, _ = self.algorithm.predict(obs, deterministic=deterministic)

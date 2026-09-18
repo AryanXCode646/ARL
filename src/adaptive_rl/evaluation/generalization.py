@@ -15,8 +15,11 @@ from adaptive_rl.algorithms.base import BaseAlgorithm
 from adaptive_rl.environments.registry import make_env
 from adaptive_rl.evaluation.metrics import EvaluationMetrics
 from adaptive_rl.metrics import (
+    DefaultOutcomePolicy,
     EpisodeMetrics,
     EpisodeMetricsAccumulator,
+    OutcomePolicy,
+    TrafficOutcomePolicy,
     compute_rate,
 )
 
@@ -120,6 +123,7 @@ class GeneralizationEvaluator:
         env: Optional[gym.Env] = None,
         env_name: Optional[str] = None,
         env_kwargs: Optional[Dict[str, Any]] = None,
+        outcome_policy: Optional[OutcomePolicy] = None,
     ) -> None:
         """Initialize generalization evaluator.
 
@@ -128,6 +132,7 @@ class GeneralizationEvaluator:
             env: Instantiated Gymnasium environment (optional).
             env_name: Registered environment name (optional).
             env_kwargs: Parameters passed to make_env.
+            outcome_policy: Optional explicit domain OutcomePolicy instance.
         """
         self.algorithm = algorithm
         self.env_kwargs = dict(env_kwargs or {})
@@ -145,6 +150,16 @@ class GeneralizationEvaluator:
         else:
             raise ValueError("GeneralizationEvaluator requires either 'env' or 'env_name'.")
 
+        if outcome_policy is not None:
+            self.outcome_policy: OutcomePolicy = outcome_policy
+            self._explicit_policy = True
+        elif "traffic" in self.env_name.lower():
+            self.outcome_policy = TrafficOutcomePolicy()
+            self._explicit_policy = False
+        else:
+            self.outcome_policy = DefaultOutcomePolicy()
+            self._explicit_policy = False
+
         self.last_episode_metrics: List[EpisodeMetrics] = []
         self.last_train_metrics: List[EpisodeMetrics] = []
         self.last_test_metrics: List[EpisodeMetrics] = []
@@ -159,7 +174,7 @@ class GeneralizationEvaluator:
 
         for seed in seeds:
             obs, info = self.env.reset(seed=int(seed))
-            acc = EpisodeMetricsAccumulator()
+            acc = EpisodeMetricsAccumulator(outcome_policy=self.outcome_policy)
             done = False
 
             while not done:

@@ -1566,3 +1566,236 @@ def test_episodes_csv_roundtrip_preserves_nullability(tmp_path: Path) -> None:
     assert loaded[3].success is False
     assert loaded[3].collision is True
     assert loaded[3].timestep == 27
+
+
+def test_accumulator_configuration_matrix() -> None:
+    """Verify outcome policy selection, compatibility mode, matching flags, and rejection of conflicting configs."""
+    import pytest
+
+    from adaptive_rl.metrics import (
+        DefaultOutcomePolicy,
+        EpisodeMetricsAccumulator,
+        TrafficOutcomePolicy,
+        extract_episode_metrics,
+    )
+
+    # 1. no policy + no is_traffic -> DefaultOutcomePolicy
+    acc_none = EpisodeMetricsAccumulator()
+    assert isinstance(acc_none.outcome_policy, DefaultOutcomePolicy)
+    assert acc_none.is_traffic is False
+
+    # 2. traffic compatibility mode (is_traffic=True)
+    acc_compat_traffic = EpisodeMetricsAccumulator(is_traffic=True)
+    assert isinstance(acc_compat_traffic.outcome_policy, TrafficOutcomePolicy)
+    assert acc_compat_traffic.is_traffic is True
+
+    # 3. non-traffic compatibility mode (is_traffic=False)
+    acc_compat_default = EpisodeMetricsAccumulator(is_traffic=False)
+    assert isinstance(acc_compat_default.outcome_policy, DefaultOutcomePolicy)
+    assert acc_compat_default.is_traffic is False
+
+    # 4. explicit default policy
+    acc_explicit_default = EpisodeMetricsAccumulator(outcome_policy=DefaultOutcomePolicy())
+    assert isinstance(acc_explicit_default.outcome_policy, DefaultOutcomePolicy)
+    assert acc_explicit_default.is_traffic is False
+
+    # 5. explicit traffic policy
+    acc_explicit_traffic = EpisodeMetricsAccumulator(outcome_policy=TrafficOutcomePolicy())
+    assert isinstance(acc_explicit_traffic.outcome_policy, TrafficOutcomePolicy)
+    assert acc_explicit_traffic.is_traffic is True
+
+    # 6. explicit policy + matching is_traffic
+    acc_match_def = EpisodeMetricsAccumulator(
+        outcome_policy=DefaultOutcomePolicy(), is_traffic=False
+    )
+    assert isinstance(acc_match_def.outcome_policy, DefaultOutcomePolicy)
+
+    acc_match_traf = EpisodeMetricsAccumulator(
+        outcome_policy=TrafficOutcomePolicy(), is_traffic=True
+    )
+    assert isinstance(acc_match_traf.outcome_policy, TrafficOutcomePolicy)
+
+    # 7. explicit policy + conflicting is_traffic -> clear ValueError
+    with pytest.raises(ValueError, match="Conflicting configuration"):
+        EpisodeMetricsAccumulator(outcome_policy=DefaultOutcomePolicy(), is_traffic=True)
+
+    with pytest.raises(ValueError, match="Conflicting configuration"):
+        EpisodeMetricsAccumulator(outcome_policy=TrafficOutcomePolicy(), is_traffic=False)
+
+    # 8. extract_episode_metrics with conflicting configuration -> clear ValueError
+    with pytest.raises(ValueError, match="Conflicting configuration"):
+        extract_episode_metrics(
+            reward=1.0,
+            length=5,
+            terminated=True,
+            truncated=False,
+            outcome_policy=DefaultOutcomePolicy(),
+            is_traffic=True,
+        )
+
+    with pytest.raises(ValueError, match="Conflicting configuration"):
+        extract_episode_metrics(
+            reward=1.0,
+            length=5,
+            terminated=True,
+            truncated=False,
+            outcome_policy=TrafficOutcomePolicy(),
+            is_traffic=False,
+        )
+
+    # 9. Dynamic property setter rejects conflicting toggle when policy was explicitly specified
+    acc_locked_def = EpisodeMetricsAccumulator(outcome_policy=DefaultOutcomePolicy())
+    with pytest.raises(ValueError, match="Cannot set is_traffic=True"):
+        acc_locked_def.is_traffic = True
+
+    acc_locked_traf = EpisodeMetricsAccumulator(outcome_policy=TrafficOutcomePolicy())
+    with pytest.raises(ValueError, match="Cannot set is_traffic=False"):
+        acc_locked_traf.is_traffic = False
+
+
+def test_isolated_fallback_domain_detection() -> None:
+    """Verify isolated fallback domain detection behavior and that explicit policy always wins."""
+    from adaptive_rl.metrics import (
+        DefaultOutcomePolicy,
+        EpisodeMetricsAccumulator,
+        TrafficOutcomePolicy,
+    )
+
+    # 1. Unspecified configuration falls back to TrafficOutcomePolicy when traffic telemetry detected
+    acc_fallback = EpisodeMetricsAccumulator()
+    assert isinstance(acc_fallback.outcome_policy, DefaultOutcomePolicy)
+    acc_fallback.record_step(info={"queue_lengths": [3, 2], "step_overflow": False})
+    assert isinstance(acc_fallback.outcome_policy, TrafficOutcomePolicy)
+
+    # 2. Explicit DefaultOutcomePolicy is NEVER overridden by traffic telemetry (explicit policy wins)
+    acc_explicit = EpisodeMetricsAccumulator(outcome_policy=DefaultOutcomePolicy())
+    assert isinstance(acc_explicit.outcome_policy, DefaultOutcomePolicy)
+    acc_explicit.record_step(
+        info={"queue_lengths": [3, 2], "overflow": True, "success": True},
+        terminated=True,
+    )
+    # Still DefaultOutcomePolicy!
+    assert isinstance(acc_explicit.outcome_policy, DefaultOutcomePolicy)
+    m = acc_explicit.finish()
+    # In DefaultOutcomePolicy, overflow does not invalidate success
+    assert m.success is True
+
+
+def test_traffic_outcome_policy_explicit_semantics() -> None:
+    """Verify TrafficOutcomePolicy semantics using explicit policy instance."""
+    from adaptive_rl.metrics import EpisodeMetricsAccumulator, TrafficOutcomePolicy
+
+    # 1. Intermediate success=True with terminal success missing -> None (no latching)
+    acc1 = EpisodeMetricsAccumulator(outcome_policy=TrafficOutcomePolicy())
+    acc1.record_step(reward=1.0, info={"success": True})
+    acc1.record_step(reward=1.0, info={}, truncated=True)
+    m1 = acc1.finish()
+    assert m1.success is None
+
+    # 2. Intermediate success=True with terminal success=False -> False
+    acc2 = EpisodeMetricsAccumulator(outcome_policy=TrafficOutcomePolicy())
+    acc2.record_step(reward=1.0, info={"success": True})
+    acc2.record_step(reward=0.0, info={"success": False}, truncated=True)
+    m2 = acc2.finish()
+    assert m2.success is False
+
+    # 3. Terminal success=True -> True
+    acc3 = EpisodeMetricsAccumulator(outcome_policy=TrafficOutcomePolicy())
+    acc3.record_step(reward=1.0, info={"success": True}, truncated=True)
+    m3 = acc3.finish()
+    assert m3.success is True
+
+    # 4. Terminal success=False -> False
+    acc4 = EpisodeMetricsAccumulator(outcome_policy=TrafficOutcomePolicy())
+    acc4.record_step(reward=1.0, info={"success": False}, truncated=True)
+    m4 = acc4.finish()
+    assert m4.success is False
+
+    # 5. Terminal success missing -> None
+    acc5 = EpisodeMetricsAccumulator(outcome_policy=TrafficOutcomePolicy())
+    acc5.record_step(reward=1.0, info={}, truncated=True)
+    m5 = acc5.finish()
+    assert m5.success is None
+
+    # 6. Overflow anywhere forces success=False
+    acc6 = EpisodeMetricsAccumulator(outcome_policy=TrafficOutcomePolicy())
+    acc6.record_step(reward=-5.0, info={"overflow": True})
+    acc6.record_step(reward=1.0, info={"success": True}, truncated=True)
+    m6 = acc6.finish()
+    assert m6.success is False
+    assert m6.additional_metrics.get("had_overflow") is True
+
+    # 7. Premature termination forces success=False
+    acc7 = EpisodeMetricsAccumulator(outcome_policy=TrafficOutcomePolicy())
+    acc7.record_step(reward=0.0, info={"success": True}, terminated=True, truncated=False)
+    m7 = acc7.finish()
+    assert m7.success is False
+    assert m7.terminated is True
+
+    # 8. Controlled horizon completion (truncation) with terminal success -> True
+    acc8 = EpisodeMetricsAccumulator(outcome_policy=TrafficOutcomePolicy())
+    acc8.record_step(reward=1.0, info={"success": True}, terminated=False, truncated=True)
+    m8 = acc8.finish()
+    assert m8.success is True
+    assert m8.truncated is True
+    assert m8.terminated is False
+
+    # 9. Collision anywhere overrides positive terminal success to False
+    acc9 = EpisodeMetricsAccumulator(outcome_policy=TrafficOutcomePolicy())
+    acc9.record_step(reward=-10.0, info={"collision": True})
+    acc9.record_step(reward=1.0, info={"success": True}, truncated=True)
+    m9 = acc9.finish()
+    assert m9.collision is True
+    assert m9.success is False
+
+
+def test_evaluator_and_generalization_explicit_policy() -> None:
+    """Verify Evaluator and GeneralizationEvaluator with explicit OutcomePolicy."""
+    from adaptive_rl.evaluation.evaluator import Evaluator
+    from adaptive_rl.evaluation.generalization import (
+        GeneralizationDistribution,
+        GeneralizationEvaluator,
+    )
+    from adaptive_rl.metrics import TrafficOutcomePolicy
+
+    env_eval = MockStepEnv(
+        [
+            (1.0, False, True, {"success": True, "collision": False}),
+            (0.0, True, False, {"success": False, "collision": True}),
+        ]
+    )
+
+    evaluator = Evaluator(
+        algorithm=MockPolicyAlgo(),
+        env=env_eval,
+        outcome_policy=TrafficOutcomePolicy(),
+    )
+    assert isinstance(evaluator.outcome_policy, TrafficOutcomePolicy)
+    metrics = evaluator.evaluate(num_episodes=2)
+    assert metrics.episodes == 2
+    assert len(evaluator.last_episode_metrics) == 2
+
+    # In traffic, ep 2 with terminated=True has success=False and collision=True
+    assert evaluator.last_episode_metrics[0].success is True
+    assert evaluator.last_episode_metrics[1].success is False
+    assert evaluator.last_episode_metrics[1].collision is True
+
+    # GeneralizationEvaluator
+    env_gen = MockStepEnv(
+        [
+            (1.0, False, True, {"success": True, "collision": False}),
+            (0.0, True, False, {"success": False, "collision": True}),
+            (1.0, False, True, {"success": True, "collision": False}),
+            (0.0, True, False, {"success": False, "collision": True}),
+        ]
+    )
+    gen_eval = GeneralizationEvaluator(
+        algorithm=MockPolicyAlgo(),
+        env=env_gen,
+        outcome_policy=TrafficOutcomePolicy(),
+    )
+    assert isinstance(gen_eval.outcome_policy, TrafficOutcomePolicy)
+    dist = GeneralizationDistribution(train_seeds=[1, 2], test_seeds=[3, 4])
+    report = gen_eval.evaluate_generalization(dist)
+    assert report.train_metrics.episodes == 2
+    assert report.test_metrics.episodes == 2

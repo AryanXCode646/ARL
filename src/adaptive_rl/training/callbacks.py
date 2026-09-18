@@ -11,6 +11,7 @@ from stable_baselines3.common.callbacks import BaseCallback as SB3BaseCallback
 from adaptive_rl.metrics import (
     EpisodeMetrics,
     EpisodeMetricsAccumulator,
+    OutcomePolicy,
     compute_rate,
     extract_episode_metrics,
 )
@@ -199,11 +200,13 @@ class SB3CallbackAdapter(SB3BaseCallback):
         callbacks: List[BaseCallback],
         algorithm: Optional[BaseAlgorithm] = None,
         verbose: int = 0,
+        outcome_policy: Optional[OutcomePolicy] = None,
     ) -> None:
         """Initialize adapter with list of AdaptiveRL callbacks."""
         super().__init__(verbose)
         self.callbacks = callbacks
         self.algorithm = algorithm
+        self.outcome_policy = outcome_policy
         self._current_rewards: Dict[int, float] = {}
         self._current_lengths: Dict[int, int] = {}
         self._accumulators: Dict[int, EpisodeMetricsAccumulator] = {}
@@ -233,7 +236,9 @@ class SB3CallbackAdapter(SB3BaseCallback):
             self._current_lengths[i] = self._current_lengths.get(i, 0) + 1
 
             if i not in self._accumulators:
-                self._accumulators[i] = EpisodeMetricsAccumulator()
+                self._accumulators[i] = EpisodeMetricsAccumulator(
+                    outcome_policy=self.outcome_policy
+                )
 
             is_truncated = bool(
                 info.get("TimeLimit.truncated", False) or info.get("truncated", False)

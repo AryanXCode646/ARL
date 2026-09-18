@@ -15,8 +15,11 @@ from adaptive_rl.environments.registry import make_env
 from adaptive_rl.evaluation.metrics import EvaluationMetrics
 from adaptive_rl.evaluation.scenarios import EvaluationScenario
 from adaptive_rl.metrics import (
+    DefaultOutcomePolicy,
     EpisodeMetrics,
     EpisodeMetricsAccumulator,
+    OutcomePolicy,
+    TrafficOutcomePolicy,
     compute_rate,
 )
 
@@ -44,6 +47,7 @@ class Evaluator(BaseEvaluator):
         env: Optional[gym.Env] = None,
         env_name: Optional[str] = None,
         env_kwargs: Optional[Dict[str, Any]] = None,
+        outcome_policy: Optional[OutcomePolicy] = None,
     ) -> None:
         """Initialize evaluator with algorithm and evaluation environment.
 
@@ -52,6 +56,7 @@ class Evaluator(BaseEvaluator):
             env: Pre-instantiated Gymnasium environment (optional).
             env_name: Registered environment name to instantiate via factory (optional).
             env_kwargs: Additional parameters forwarded to make_env when env_name is used.
+            outcome_policy: Optional explicit domain OutcomePolicy instance.
         """
         self.algorithm = algorithm
         self.env_kwargs = dict(env_kwargs or {})
@@ -79,6 +84,16 @@ class Evaluator(BaseEvaluator):
         else:
             raise ValueError("Evaluator requires either 'env' or 'env_name'.")
 
+        if outcome_policy is not None:
+            self.outcome_policy: OutcomePolicy = outcome_policy
+            self._explicit_policy = True
+        elif "traffic" in self.env_name.lower():
+            self.outcome_policy = TrafficOutcomePolicy()
+            self._explicit_policy = False
+        else:
+            self.outcome_policy = DefaultOutcomePolicy()
+            self._explicit_policy = False
+
         self.last_episode_metrics: List[EpisodeMetrics] = []
 
     def evaluate(
@@ -105,7 +120,7 @@ class Evaluator(BaseEvaluator):
 
         episode_metrics: List[EpisodeMetrics] = []
 
-        is_traffic_env = False
+        is_traffic_env = isinstance(self.outcome_policy, TrafficOutcomePolicy)
 
         # Traffic telemetry accumulators
         all_step_queues: List[int] = []
@@ -119,7 +134,7 @@ class Evaluator(BaseEvaluator):
         for ep in range(num_episodes):
             seed = derive_evaluation_seed(base_seed, ep) if base_seed is not None else None
             obs, info = self.env.reset(seed=seed)
-            acc = EpisodeMetricsAccumulator(is_traffic=is_traffic_env if is_traffic_env else None)
+            acc = EpisodeMetricsAccumulator(outcome_policy=self.outcome_policy)
             done = False
 
             ep_step_max_waits: List[int] = []
@@ -140,10 +155,14 @@ class Evaluator(BaseEvaluator):
                 )
                 last_step_info = step_info
 
-                # Track traffic telemetry
+                # Track domain-specific traffic telemetry
                 if "total_queue" in step_info or "queue_lengths" in step_info:
                     is_traffic_env = True
-                    acc.is_traffic = True
+                    if not self._explicit_policy and not isinstance(
+                        self.outcome_policy, TrafficOutcomePolicy
+                    ):
+                        self.outcome_policy = TrafficOutcomePolicy()
+                        acc.outcome_policy = self.outcome_policy
                     if "total_queue" in step_info:
                         all_step_queues.append(int(step_info["total_queue"]))
                     if "max_wait" in step_info:
