@@ -7,10 +7,8 @@ from adaptive_rl.evaluation.generalization import (
     GeneralizationReport,
 )
 from adaptive_rl.evaluation.metrics import (
-    EpisodeMetrics,
     EvaluationMetrics,
     StandardizedExperimentMetrics,
-    extract_episode_metrics,
 )
 from adaptive_rl.evaluation.scenarios import EvaluationScenario
 from adaptive_rl.evaluation.seeding import (
@@ -21,7 +19,6 @@ from adaptive_rl.evaluation.seeding import (
 
 __all__ = [
     "BaseEvaluator",
-    "EpisodeMetrics",
     "Evaluator",
     "EvaluationMetrics",
     "EvaluationScenario",
@@ -31,6 +28,5 @@ __all__ = [
     "StandardizedExperimentMetrics",
     "derive_evaluation_seed",
     "derive_planner_seed",
-    "extract_episode_metrics",
     "generate_evaluation_seeds",
 ]

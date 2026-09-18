@@ -14,7 +14,10 @@ from adaptive_rl.algorithms.base import BaseAlgorithm
 from adaptive_rl.environments.registry import make_env
 from adaptive_rl.evaluation.metrics import EvaluationMetrics
 from adaptive_rl.evaluation.scenarios import EvaluationScenario
-from adaptive_rl.metrics import EpisodeMetrics, extract_episode_metrics
+from adaptive_rl.metrics import (
+    EpisodeMetrics,
+    EpisodeMetricsAccumulator,
+)
 
 
 class BaseEvaluator(ABC):
@@ -83,15 +86,19 @@ class Evaluator(BaseEvaluator):
         deterministic: bool = True,
         base_seed: Optional[int] = None,
     ) -> EvaluationMetrics:
-        """Execute deterministic or stochastic multi-episode evaluation benchmark.
+        """Execute evaluation rollouts and compute aggregated metrics.
 
         Args:
-            num_episodes: Total evaluation episodes to run.
+            num_episodes: Number of evaluation episodes to execute.
             deterministic: Whether to use deterministic action selection.
             base_seed: Base seed for reproducible evaluation episode initializations.
 
         Returns:
             EvaluationMetrics: Standardized aggregated performance metrics.
+                Rate denominator semantics: success_rate, collision_rate, and overflow_rate
+                use total evaluation episodes (num_episodes) as canonical denominator when
+                telemetry is available. If a metric is unavailable across all episodes (all None),
+                the rate evaluates to None. Episodes with False or None do not contribute to the numerator.
         """
         if num_episodes <= 0:
             raise ValueError(f"num_episodes must be positive, got {num_episodes}")
@@ -116,15 +123,12 @@ class Evaluator(BaseEvaluator):
         for ep in range(num_episodes):
             seed = derive_evaluation_seed(base_seed, ep) if base_seed is not None else None
             obs, info = self.env.reset(seed=seed)
-            ep_reward = 0.0
-            ep_length = 0
+            acc = EpisodeMetricsAccumulator(is_traffic=is_traffic_env if is_traffic_env else None)
             done = False
 
             ep_had_overflow = False
             ep_step_max_waits: List[int] = []
             last_step_info: Dict[str, Any] = dict(info or {})
-            last_terminated = False
-            last_truncated = False
 
             # Reset policy if policy provides episode-level reset (e.g. PlannerPolicy)
             if hasattr(self.algorithm, "reset_policy"):
@@ -133,11 +137,13 @@ class Evaluator(BaseEvaluator):
             while not done:
                 action, _ = self.algorithm.predict(obs, deterministic=deterministic)
                 obs, reward, terminated, truncated, step_info = self.env.step(action)
-                ep_reward += float(reward)
-                ep_length += 1
+                acc.record_step(
+                    reward=float(reward),
+                    terminated=terminated,
+                    truncated=truncated,
+                    info=step_info,
+                )
                 last_step_info = step_info
-                last_terminated = terminated
-                last_truncated = truncated
 
                 # Track overflow
                 if (
@@ -154,9 +160,11 @@ class Evaluator(BaseEvaluator):
                         ep_had_overflow = True
 
                 # Track traffic telemetry
-                if "total_queue" in step_info:
+                if "total_queue" in step_info or "queue_lengths" in step_info:
                     is_traffic_env = True
-                    all_step_queues.append(int(step_info["total_queue"]))
+                    acc.is_traffic = True
+                    if "total_queue" in step_info:
+                        all_step_queues.append(int(step_info["total_queue"]))
                     if "max_wait" in step_info:
                         ep_step_max_waits.append(int(step_info["max_wait"]))
                     if "mean_wait" in step_info:
@@ -164,13 +172,7 @@ class Evaluator(BaseEvaluator):
 
                 done = terminated or truncated
 
-            m = extract_episode_metrics(
-                reward=ep_reward,
-                length=ep_length,
-                terminated=last_terminated,
-                truncated=last_truncated,
-                info=last_step_info,
-            )
+            m = acc.finish()
             episode_metrics.append(m)
 
             if has_overflow_info:
@@ -196,7 +198,10 @@ class Evaluator(BaseEvaluator):
         has_success_info = any(m.success is not None for m in episode_metrics)
         has_collision_info = any(m.collision is not None for m in episode_metrics)
 
-        # Episode-level outcomes aggregated directly from canonical EpisodeMetrics
+        # Rate aggregation denominator semantics:
+        # Rates (success_rate, collision_rate, overflow_rate) use total evaluation episodes (num_episodes)
+        # as the canonical denominator. If a metric was unavailable across all episodes (all None),
+        # the rate evaluates to None. Episodes with False or None do not contribute to the numerator.
         success_rate: Optional[float] = (
             float(sum(1 for m in episode_metrics if m.success is True) / num_episodes)
             if has_success_info

@@ -92,12 +92,17 @@ class CurriculumCallback(BaseCallback):
         self.recent_rewards.append(episode_reward)
 
         if metrics is None:
+            info_dict = dict(info or {})
+            is_truncated = bool(
+                info_dict.get("TimeLimit.truncated", False) or info_dict.get("truncated", False)
+            )
+            is_terminated = bool(info_dict.get("terminated", not is_truncated))
             metrics = extract_episode_metrics(
                 reward=episode_reward,
                 length=episode_length,
-                terminated=True,
-                truncated=False,
-                info=info,
+                terminated=is_terminated,
+                truncated=is_truncated,
+                info=info_dict,
             )
 
         is_success = 1.0 if metrics.success is True else 0.0

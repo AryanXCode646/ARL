@@ -18,6 +18,7 @@ from adaptive_rl.evaluation.generalization import (
 )
 from adaptive_rl.metrics import (
     EpisodeMetrics,
+    EpisodeMetricsAccumulator,
     extract_episode_metrics,
 )
 from adaptive_rl.training.callbacks import (
@@ -84,7 +85,6 @@ class MockStepEnv(gym.Env):
 
 def test_episode_metrics_is_immutable_dataclass() -> None:
     """EpisodeMetrics must be an immutable frozen dataclass."""
-    assert is_dataclass(EpisodeMetrics)
     m = EpisodeMetrics(
         reward=10.0,
         length=5,
@@ -94,11 +94,12 @@ def test_episode_metrics_is_immutable_dataclass() -> None:
         truncated=False,
         additional_metrics={"step": 5},
     )
+    assert is_dataclass(m)
     with pytest.raises(FrozenInstanceError):
-        m.reward = 20.0  # type: ignore[misc]
+        m.reward = 20.0  # type: ignore[misc,union-attr]
 
     with pytest.raises(FrozenInstanceError):
-        m.success = False  # type: ignore[misc]
+        m.success = False  # type: ignore[misc,union-attr]
 
 
 def test_episode_metrics_mutation_isolation() -> None:
@@ -711,3 +712,385 @@ def test_all_consumers_consistent_on_conflicting_info() -> None:
         metrics=ep_metrics,
     )
     assert curr_cb.recent_successes[-1] == 0.0
+
+
+def test_intermediate_collision_not_repeated_on_terminal_step() -> None:
+    """Verify that collision on intermediate step is retained even if terminal step reports collision=False.
+
+    Step 1: collision=False
+    Step 2: collision=True
+    Step 3: collision=False
+    Step 4: terminated=True, collision=False, success=True
+    Canonical outcome: collision=True, success=False (collision overrides success).
+    """
+    step_infos = [
+        {"collision": False},
+        {"collision": True},
+        {"collision": False},
+        {"collision": False, "success": True},
+    ]
+
+    # 1. EpisodeMetricsAccumulator
+    acc = EpisodeMetricsAccumulator()
+    acc.record_step(reward=1.0, terminated=False, truncated=False, info=step_infos[0])
+    acc.record_step(reward=-5.0, terminated=False, truncated=False, info=step_infos[1])
+    acc.record_step(reward=0.0, terminated=False, truncated=False, info=step_infos[2])
+    acc.record_step(reward=10.0, terminated=True, truncated=False, info=step_infos[3])
+    m_acc = acc.finish()
+
+    assert m_acc.collision is True
+    assert m_acc.success is False
+    assert m_acc.reward == 6.0
+    assert m_acc.length == 4
+    assert m_acc.terminated is True
+    assert m_acc.truncated is False
+
+    # 2. extract_episode_metrics with step_infos
+    m_extract = extract_episode_metrics(
+        reward=6.0,
+        length=4,
+        terminated=True,
+        truncated=False,
+        info=step_infos[-1],
+        step_infos=step_infos[:-1],
+    )
+    assert m_extract.collision is True
+    assert m_extract.success is False
+
+    # 3. Evaluator
+    step_trace = [
+        (1.0, False, False, step_infos[0]),
+        (-5.0, False, False, step_infos[1]),
+        (0.0, False, False, step_infos[2]),
+        (10.0, True, False, step_infos[3]),
+    ]
+    env = MockStepEnv(step_trace)
+    evaluator = Evaluator(algorithm=MockPolicyAlgo(), env=env)
+    eval_metrics = evaluator.evaluate(num_episodes=1, deterministic=True)
+
+    assert evaluator.last_episode_metrics[0].collision is True
+    assert evaluator.last_episode_metrics[0].success is False
+    assert eval_metrics.collision_rate == 1.0
+    assert eval_metrics.success_rate == 0.0
+    env.close()
+
+    # 4. GeneralizationEvaluator
+    env_gen = MockStepEnv(
+        [
+            (1.0, False, False, step_infos[0]),
+            (-5.0, False, False, step_infos[1]),
+            (0.0, False, False, step_infos[2]),
+            (10.0, True, False, step_infos[3]),
+            (1.0, False, False, step_infos[0]),
+            (-5.0, False, False, step_infos[1]),
+            (0.0, False, False, step_infos[2]),
+            (10.0, True, False, step_infos[3]),
+        ]
+    )
+    gen_eval = GeneralizationEvaluator(algorithm=MockPolicyAlgo(), env=env_gen)
+    gen_dist = GeneralizationDistribution(train_seeds=[42], test_seeds=[43])
+    gen_report = gen_eval.evaluate_generalization(distribution=gen_dist, experiment_name="test_col")
+    assert gen_report.train_metrics.collision_rate == 1.0
+    assert gen_report.train_metrics.success_rate == 0.0
+    assert gen_report.test_metrics.collision_rate == 1.0
+    assert gen_report.test_metrics.success_rate == 0.0
+    env_gen.close()
+
+
+def test_intermediate_success_occurring_before_terminal_step() -> None:
+    """Verify that success reached on an intermediate step is recorded as success if collision-free.
+
+    Step 1: success=False, collision=False
+    Step 2: success=True, collision=False (reached target)
+    Step 3: success=False, collision=False
+    Step 4: terminated=True, success=False, collision=False
+    Canonical outcome: success=True, collision=False.
+    """
+    step_infos = [
+        {"collision": False},
+        {"success": True, "collision": False},
+        {"collision": False},
+        {"collision": False},
+    ]
+
+    # 1. EpisodeMetricsAccumulator
+    acc = EpisodeMetricsAccumulator()
+    acc.record_step(reward=0.0, terminated=False, truncated=False, info=step_infos[0])
+    acc.record_step(reward=10.0, terminated=False, truncated=False, info=step_infos[1])
+    acc.record_step(reward=0.0, terminated=False, truncated=False, info=step_infos[2])
+    acc.record_step(reward=0.0, terminated=True, truncated=False, info=step_infos[3])
+    m = acc.finish()
+
+    assert m.success is True
+    assert m.collision is False
+    assert m.reward == 10.0
+    assert m.length == 4
+
+    # 2. extract_episode_metrics with step_infos
+    m_ext = extract_episode_metrics(
+        reward=10.0,
+        length=4,
+        terminated=True,
+        truncated=False,
+        info=step_infos[-1],
+        step_infos=step_infos[:-1],
+    )
+    assert m_ext.success is True
+    assert m_ext.collision is False
+
+    # 3. Evaluator
+    step_trace = [
+        (0.0, False, False, step_infos[0]),
+        (10.0, False, False, step_infos[1]),
+        (0.0, False, False, step_infos[2]),
+        (0.0, True, False, step_infos[3]),
+    ]
+    env = MockStepEnv(step_trace)
+    evaluator = Evaluator(algorithm=MockPolicyAlgo(), env=env)
+    eval_metrics = evaluator.evaluate(num_episodes=1, deterministic=True)
+    assert evaluator.last_episode_metrics[0].success is True
+    assert evaluator.last_episode_metrics[0].collision is False
+    assert eval_metrics.success_rate == 1.0
+    assert eval_metrics.collision_rate == 0.0
+    env.close()
+
+    # Contrast: intermediate success followed by intermediate collision must fail
+    step_trace_col = [
+        (0.0, False, False, {"collision": False}),
+        (10.0, False, False, {"success": True, "collision": False}),
+        (-5.0, False, False, {"collision": True}),
+        (0.0, True, False, {"collision": False}),
+    ]
+    env_col = MockStepEnv(step_trace_col)
+    evaluator_col = Evaluator(algorithm=MockPolicyAlgo(), env=env_col)
+    eval_col_metrics = evaluator_col.evaluate(num_episodes=1, deterministic=True)
+    assert evaluator_col.last_episode_metrics[0].success is False
+    assert evaluator_col.last_episode_metrics[0].collision is True
+    assert eval_col_metrics.success_rate == 0.0
+    assert eval_col_metrics.collision_rate == 1.0
+    env_col.close()
+
+
+def test_traffic_overflow_followed_by_success_flag() -> None:
+    """Verify traffic success contract: queue overflow or premature termination strictly forbids success.
+
+    Case 1: Traffic overflow on step 2, but terminal step reports success=True -> success=False.
+    Case 2: Early termination (terminated=True) in traffic -> success=False.
+    Case 3: Clean completion to horizon (truncated=True, terminated=False, no overflow, controlled queue) -> success=True.
+    """
+    # Case 1: Overflow followed by success=True
+    traffic_steps_overflow = [
+        (1.0, False, False, {"total_queue": 5, "step_overflow": False}),
+        (-10.0, False, False, {"total_queue": 30, "step_overflow": True}),
+        (0.0, False, False, {"total_queue": 15, "step_overflow": False}),
+        (5.0, False, True, {"total_queue": 2, "step_overflow": False, "success": True}),
+    ]
+    acc1 = EpisodeMetricsAccumulator(is_traffic=True)
+    for r, term, trunc, inf in traffic_steps_overflow:
+        acc1.record_step(reward=r, terminated=term, truncated=trunc, info=inf)
+    m1 = acc1.finish()
+    assert m1.success is False
+
+    env1 = MockStepEnv(traffic_steps_overflow)
+    evaluator1 = Evaluator(algorithm=MockPolicyAlgo(), env=env1)
+    eval_metrics1 = evaluator1.evaluate(num_episodes=1, deterministic=True)
+    assert evaluator1.last_episode_metrics[0].success is False
+    assert eval_metrics1.success_rate == 0.0
+    assert eval_metrics1.overflow_rate == 1.0
+    env1.close()
+
+    # Case 2: Early termination (terminated=True) in traffic
+    traffic_steps_early_term = [
+        (1.0, False, False, {"total_queue": 5, "step_overflow": False}),
+        (-10.0, True, False, {"total_queue": 30, "step_overflow": False, "success": True}),
+    ]
+    acc2 = EpisodeMetricsAccumulator(is_traffic=True)
+    for r, term, trunc, inf in traffic_steps_early_term:
+        acc2.record_step(reward=r, terminated=term, truncated=trunc, info=inf)
+    m2 = acc2.finish()
+    assert m2.success is False
+
+    # Case 3: Clean completion to horizon without overflow -> success=True
+    traffic_steps_clean = [
+        (1.0, False, False, {"total_queue": 5, "step_overflow": False}),
+        (2.0, False, False, {"total_queue": 4, "step_overflow": False}),
+        (5.0, False, True, {"total_queue": 2, "step_overflow": False, "success": True}),
+    ]
+    acc3 = EpisodeMetricsAccumulator(is_traffic=True)
+    for r, term, trunc, inf in traffic_steps_clean:
+        acc3.record_step(reward=r, terminated=term, truncated=trunc, info=inf)
+    m3 = acc3.finish()
+    assert m3.success is True
+
+    env3 = MockStepEnv(traffic_steps_clean)
+    evaluator3 = Evaluator(algorithm=MockPolicyAlgo(), env=env3)
+    eval_metrics3 = evaluator3.evaluate(num_episodes=1, deterministic=True)
+    assert evaluator3.last_episode_metrics[0].success is True
+    assert eval_metrics3.success_rate == 1.0
+    assert eval_metrics3.overflow_rate == 0.0
+    env3.close()
+
+
+def test_mixed_outcomes_across_episodes_and_documented_denominator_semantics() -> None:
+    """Verify aggregated rate semantics across mixed True, False, and None episode outcomes.
+
+    Denominator semantics:
+    - Rate calculations use total evaluation episodes (num_episodes) as canonical denominator.
+    - If an outcome metric is unavailable across all episodes (all None), rate is None.
+    - Episodes where metric is False or None do not contribute to the numerator.
+    """
+    step_trace: list[tuple[float, bool, bool, dict[str, Any]]] = [
+        # Episode 1: Success=True, Collision=False
+        (10.0, True, False, {"success": True, "collision": False}),
+        # Episode 2: Success=False, Collision=True
+        (-5.0, True, False, {"success": False, "collision": True}),
+        # Episode 3: Outcome keys unavailable (e.g. non-spatial continuous control)
+        (3.0, True, False, {"sensor_data": 42}),
+    ]
+    env = MockStepEnv(step_trace)
+    evaluator = Evaluator(algorithm=MockPolicyAlgo(), env=env)
+    metrics = evaluator.evaluate(num_episodes=3, deterministic=True)
+
+    recorded = evaluator.last_episode_metrics
+    assert len(recorded) == 3
+
+    assert recorded[0].success is True
+    assert recorded[0].collision is False
+
+    assert recorded[1].success is False
+    assert recorded[1].collision is True
+
+    assert recorded[2].success is None
+    assert recorded[2].collision is None
+
+    # Total episodes is 3:
+    # 1 success / 3 total episodes = ~0.333333
+    # 1 collision / 3 total episodes = ~0.333333
+    assert metrics.episodes == 3
+    assert metrics.success_rate == pytest.approx(1 / 3)
+    assert metrics.collision_rate == pytest.approx(1 / 3)
+    env.close()
+
+    # If all episodes have metric unavailable, rate must be None (not 0.0)
+    all_none_trace: list[tuple[float, bool, bool, dict[str, Any]]] = [
+        (1.0, True, False, {}),
+        (2.0, True, False, {}),
+    ]
+    env_none = MockStepEnv(all_none_trace)
+    evaluator_none = Evaluator(algorithm=MockPolicyAlgo(), env=env_none)
+    metrics_none = evaluator_none.evaluate(num_episodes=2, deterministic=True)
+    assert metrics_none.success_rate is None
+    assert metrics_none.collision_rate is None
+    env_none.close()
+
+
+def test_callback_fallback_extraction_preserves_truncation_and_termination() -> None:
+    """Verify callback fallback extraction properly inspects info flags instead of hardcoding terminated=True."""
+    # 1. MetricLoggerCallback
+    logger = MetricLoggerCallback()
+
+    # Episode with TimeLimit.truncated: True
+    logger.on_episode_end(
+        episode=1,
+        episode_reward=5.0,
+        episode_length=100,
+        info={"TimeLimit.truncated": True},
+        metrics=None,
+    )
+    m1 = logger.episode_metrics[0]
+    assert m1.truncated is True
+    assert m1.terminated is False
+
+    # Episode with gymnasium truncated: True
+    logger.on_episode_end(
+        episode=2,
+        episode_reward=3.0,
+        episode_length=50,
+        info={"truncated": True},
+        metrics=None,
+    )
+    m2 = logger.episode_metrics[1]
+    assert m2.truncated is True
+    assert m2.terminated is False
+
+    # Episode with natural termination (terminated: True)
+    logger.on_episode_end(
+        episode=3,
+        episode_reward=10.0,
+        episode_length=20,
+        info={"terminated": True},
+        metrics=None,
+    )
+    m3 = logger.episode_metrics[2]
+    assert m3.terminated is True
+    assert m3.truncated is False
+
+    # Episode with empty info defaults to natural termination
+    logger.on_episode_end(
+        episode=4,
+        episode_reward=0.0,
+        episode_length=10,
+        info={},
+        metrics=None,
+    )
+    m4 = logger.episode_metrics[3]
+    assert m4.terminated is True
+    assert m4.truncated is False
+
+    # 2. CurriculumCallback
+    from adaptive_rl.curriculum.callbacks import CurriculumCallback
+    from adaptive_rl.curriculum.curriculum import Curriculum
+    from adaptive_rl.curriculum.stage import CurriculumStage
+
+    stage = CurriculumStage(stage_id=0, name="stage0", environment_parameters={})
+    curriculum = Curriculum(name="test_curr", stages=[stage], eval_window=5)
+    curr_cb = CurriculumCallback(curriculum=curriculum, verbose=0)
+
+    # Call on_episode_end with truncated info
+    curr_cb.on_episode_end(
+        episode=1,
+        episode_reward=5.0,
+        episode_length=100,
+        info={"TimeLimit.truncated": True, "success": False},
+        metrics=None,
+    )
+    assert len(curr_cb.recent_rewards) == 1
+    assert curr_cb.recent_rewards[0] == 5.0
+
+
+def test_api_cleanup_single_public_owner() -> None:
+    """Verify EpisodeMetrics, EpisodeMetricsAccumulator, and extract_episode_metrics have one clear public owner.
+
+    The canonical owner is adaptive_rl.metrics (and top-level adaptive_rl).
+    adaptive_rl.evaluation and adaptive_rl.evaluation.metrics must not re-export them.
+    """
+    import adaptive_rl
+    import adaptive_rl.evaluation
+    import adaptive_rl.evaluation.metrics as eval_metrics_mod
+    import adaptive_rl.metrics as canonical_metrics_mod
+
+    # Authoritative exports from adaptive_rl.metrics
+    assert hasattr(canonical_metrics_mod, "EpisodeMetrics")
+    assert hasattr(canonical_metrics_mod, "EpisodeMetricsAccumulator")
+    assert hasattr(canonical_metrics_mod, "extract_episode_metrics")
+    assert "EpisodeMetrics" in canonical_metrics_mod.__all__
+    assert "EpisodeMetricsAccumulator" in canonical_metrics_mod.__all__
+    assert "extract_episode_metrics" in canonical_metrics_mod.__all__
+
+    # Convenience exports from top-level adaptive_rl
+    assert hasattr(adaptive_rl, "EpisodeMetrics")
+    assert hasattr(adaptive_rl, "EpisodeMetricsAccumulator")
+    assert hasattr(adaptive_rl, "extract_episode_metrics")
+    assert "EpisodeMetrics" in adaptive_rl.__all__
+    assert "EpisodeMetricsAccumulator" in adaptive_rl.__all__
+    assert "extract_episode_metrics" in adaptive_rl.__all__
+
+    # adaptive_rl.evaluation does NOT re-export them
+    assert "EpisodeMetrics" not in adaptive_rl.evaluation.__all__
+    assert "EpisodeMetricsAccumulator" not in adaptive_rl.evaluation.__all__
+    assert "extract_episode_metrics" not in adaptive_rl.evaluation.__all__
+
+    # adaptive_rl.evaluation.metrics does NOT re-export them
+    assert "EpisodeMetrics" not in eval_metrics_mod.__all__
+    assert "EpisodeMetricsAccumulator" not in eval_metrics_mod.__all__
+    assert "extract_episode_metrics" not in eval_metrics_mod.__all__

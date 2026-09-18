@@ -8,7 +8,11 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback as SB3BaseCallback
 
-from adaptive_rl.metrics import EpisodeMetrics, extract_episode_metrics
+from adaptive_rl.metrics import (
+    EpisodeMetrics,
+    EpisodeMetricsAccumulator,
+    extract_episode_metrics,
+)
 
 if TYPE_CHECKING:
     from adaptive_rl.algorithms.base import BaseAlgorithm
@@ -81,12 +85,17 @@ class MetricLoggerCallback(BaseCallback):
         self.episode_lengths.append(episode_length)
 
         if metrics is None:
+            info_dict = dict(info or {})
+            is_truncated = bool(
+                info_dict.get("TimeLimit.truncated", False) or info_dict.get("truncated", False)
+            )
+            is_terminated = bool(info_dict.get("terminated", not is_truncated))
             metrics = extract_episode_metrics(
                 reward=episode_reward,
                 length=episode_length,
-                terminated=True,
-                truncated=False,
-                info=info,
+                terminated=is_terminated,
+                truncated=is_truncated,
+                info=info_dict,
             )
         self.episode_metrics.append(metrics)
 
@@ -182,6 +191,7 @@ class SB3CallbackAdapter(SB3BaseCallback):
         self.algorithm = algorithm
         self._current_rewards: Dict[int, float] = {}
         self._current_lengths: Dict[int, int] = {}
+        self._accumulators: Dict[int, EpisodeMetricsAccumulator] = {}
         self._episode_count: int = 0
 
     def _on_training_start(self) -> None:
@@ -207,20 +217,29 @@ class SB3CallbackAdapter(SB3BaseCallback):
             self._current_rewards[i] = self._current_rewards.get(i, 0.0) + reward
             self._current_lengths[i] = self._current_lengths.get(i, 0) + 1
 
+            if i not in self._accumulators:
+                self._accumulators[i] = EpisodeMetricsAccumulator()
+
+            is_truncated = bool(
+                info.get("TimeLimit.truncated", False) or info.get("truncated", False)
+            )
+            is_terminated = bool(info.get("terminated", done and not is_truncated))
+
+            self._accumulators[i].record_step(
+                reward=reward,
+                terminated=is_terminated,
+                truncated=is_truncated,
+                info=info,
+            )
+
             if done:
                 self._episode_count += 1
-                ep_reward = self._current_rewards.pop(i, 0.0)
-                ep_length = self._current_lengths.pop(i, 0)
-
-                is_truncated = bool(info.get("TimeLimit.truncated", False))
-                is_terminated = bool(done and not is_truncated)
-                ep_metrics = extract_episode_metrics(
-                    reward=ep_reward,
-                    length=ep_length,
-                    terminated=is_terminated,
-                    truncated=is_truncated,
-                    info=info,
-                )
+                self._current_rewards.pop(i, 0.0)
+                self._current_lengths.pop(i, 0)
+                acc = self._accumulators.pop(i)
+                ep_metrics = acc.finish()
+                ep_reward = ep_metrics.reward
+                ep_length = ep_metrics.length
 
                 for cb in self.callbacks:
                     try:

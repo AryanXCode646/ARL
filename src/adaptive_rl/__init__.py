@@ -14,7 +14,11 @@ from adaptive_rl.config import (
     load_config,
     save_config,
 )
-from adaptive_rl.metrics import EpisodeMetrics, extract_episode_metrics
+from adaptive_rl.metrics import (
+    EpisodeMetrics,
+    EpisodeMetricsAccumulator,
+    extract_episode_metrics,
+)
 
 __version__ = "0.1.0"
 
@@ -24,6 +28,7 @@ __all__ = [
     "ConfigError",
     "EnvironmentConfig",
     "EpisodeMetrics",
+    "EpisodeMetricsAccumulator",
     "EvaluationConfig",
     "ExperimentConfig",
     "TrainingConfig",

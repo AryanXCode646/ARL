@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from adaptive_rl.environments.registry import make_env
-from adaptive_rl.metrics import extract_episode_metrics
+from adaptive_rl.metrics import EpisodeMetricsAccumulator
 from adaptive_rl.planning.astar import AStarPlannerPolicy
 from adaptive_rl.planning.base import PlannerPolicy
 from adaptive_rl.planning.rrt import RRTPlannerPolicy
@@ -168,17 +168,10 @@ class ClassicalBenchmarkRunner:
         plan_duration_ms = (time.perf_counter() - plan_start) * 1000.0
 
         done = False
-        total_reward = 0.0
-        steps = 0
-        success = False
-        collision = False
-
         prev_pos = self._extract_agent_position(env, obs)
         total_path_dist = 0.0
         inference_times_ms: List[float] = []
-        last_info: Dict[str, Any] = {}
-        last_terminated = False
-        last_truncated = False
+        acc = EpisodeMetricsAccumulator()
 
         while not done:
             t0 = time.perf_counter()
@@ -186,11 +179,7 @@ class ClassicalBenchmarkRunner:
             inference_times_ms.append((time.perf_counter() - t0) * 1000.0)
 
             obs, reward, terminated, truncated, info = env.step(action)
-            total_reward += float(reward)
-            steps += 1
-            last_info = info
-            last_terminated = terminated
-            last_truncated = truncated
+            acc.record_step(reward=reward, terminated=terminated, truncated=truncated, info=info)
 
             curr_pos = self._extract_agent_position(env, obs)
             dist_step = math.sqrt(sum((c2 - c1) ** 2 for c1, c2 in zip(prev_pos, curr_pos)))
@@ -199,15 +188,11 @@ class ClassicalBenchmarkRunner:
 
             done = terminated or truncated
 
-        ep_metrics = extract_episode_metrics(
-            reward=total_reward,
-            length=steps,
-            terminated=last_terminated,
-            truncated=last_truncated,
-            info=last_info,
-        )
+        ep_metrics = acc.finish()
         success = bool(ep_metrics.success) if ep_metrics.success is not None else False
         collision = bool(ep_metrics.collision) if ep_metrics.collision is not None else False
+        total_reward = ep_metrics.reward
+        steps = ep_metrics.length
 
         timing_metric = (
             float(np.mean(inference_times_ms)) if is_rl and inference_times_ms else plan_duration_ms

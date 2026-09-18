@@ -6,8 +6,6 @@ from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from adaptive_rl.metrics import EpisodeMetrics, extract_episode_metrics
-
 
 class EvaluationMetrics(BaseModel):
     """Container for reinforcement learning evaluation results.
@@ -16,6 +14,12 @@ class EvaluationMetrics(BaseModel):
     and optional domain-specific telemetry. Metrics unavailable for a given
     environment (e.g. collision_rate in non-spatial environments) are explicitly
     set to None, never silently collapsed into 0.0.
+
+    Rate Denominator Semantics:
+        Outcome rates (success_rate, collision_rate, overflow_rate) use total evaluation
+        episodes as the canonical denominator when telemetry is available. Episodes where
+        the metric was False or unavailable (None) do not contribute to the numerator.
+        If unavailable across all episodes, the rate evaluates to None.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -29,13 +33,13 @@ class EvaluationMetrics(BaseModel):
         None,
         ge=0.0,
         le=1.0,
-        description="Fraction of episodes reaching target / satisfying objective (None if unavailable)",
+        description="Fraction of episodes reaching target among episodes where success is defined (None if unavailable)",
     )
     collision_rate: Optional[float] = Field(
         None,
         ge=0.0,
         le=1.0,
-        description="Fraction of episodes ending in collision (None if unavailable)",
+        description="Fraction of episodes ending in collision among episodes where collision is defined (None if unavailable)",
     )
     overflow_rate: Optional[float] = Field(
         None,
@@ -277,8 +281,6 @@ class StandardizedExperimentMetrics(BaseModel):
 
 
 __all__ = [
-    "EpisodeMetrics",
     "EvaluationMetrics",
     "StandardizedExperimentMetrics",
-    "extract_episode_metrics",
 ]

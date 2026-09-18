@@ -14,7 +14,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from adaptive_rl.algorithms.base import BaseAlgorithm
 from adaptive_rl.environments.registry import make_env
 from adaptive_rl.evaluation.metrics import EvaluationMetrics
-from adaptive_rl.metrics import EpisodeMetrics, extract_episode_metrics
+from adaptive_rl.metrics import (
+    EpisodeMetrics,
+    EpisodeMetricsAccumulator,
+)
 
 
 class GeneralizationDistribution(BaseModel):
@@ -155,30 +158,21 @@ class GeneralizationEvaluator:
 
         for seed in seeds:
             obs, info = self.env.reset(seed=int(seed))
+            acc = EpisodeMetricsAccumulator()
             done = False
-            ep_reward = 0.0
-            ep_len = 0
-            last_step_info: Dict[str, Any] = dict(info or {})
-            last_terminated = False
-            last_truncated = False
 
             while not done:
                 action, _ = self.algorithm.predict(obs, deterministic=deterministic)
                 obs, reward, terminated, truncated, step_info = self.env.step(action)
-                ep_reward += float(reward)
-                ep_len += 1
-                last_step_info = step_info
-                last_terminated = terminated
-                last_truncated = truncated
+                acc.record_step(
+                    reward=float(reward),
+                    terminated=terminated,
+                    truncated=truncated,
+                    info=step_info,
+                )
                 done = terminated or truncated
 
-            m = extract_episode_metrics(
-                reward=ep_reward,
-                length=ep_len,
-                terminated=last_terminated,
-                truncated=last_truncated,
-                info=last_step_info,
-            )
+            m = acc.finish()
             episode_metrics.append(m)
 
         self.last_episode_metrics = episode_metrics
@@ -190,7 +184,10 @@ class GeneralizationEvaluator:
         has_success_info = any(m.success is not None for m in episode_metrics)
         has_collision_info = any(m.collision is not None for m in episode_metrics)
 
-        # Episode-level outcomes aggregated directly from canonical EpisodeMetrics
+        # Rate aggregation denominator semantics:
+        # Rates (success_rate, collision_rate) use total evaluation episodes (total) as canonical
+        # denominator when telemetry is available. If unavailable across all episodes (all None),
+        # the rate evaluates to None. Episodes with False or None do not contribute to the numerator.
         success_rate: Optional[float] = (
             float(sum(1 for m in episode_metrics if m.success is True) / total)
             if has_success_info and total > 0
