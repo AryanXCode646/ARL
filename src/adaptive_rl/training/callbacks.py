@@ -262,21 +262,13 @@ class SB3CallbackAdapter(SB3BaseCallback):
                 ep_length = ep_metrics.length
 
                 for cb in self.callbacks:
-                    try:
-                        cb.on_episode_end(
-                            episode=self._episode_count,
-                            episode_reward=ep_reward,
-                            episode_length=ep_length,
-                            info=info,
-                            metrics=ep_metrics,
-                        )
-                    except TypeError:
-                        cb.on_episode_end(
-                            episode=self._episode_count,
-                            episode_reward=ep_reward,
-                            episode_length=ep_length,
-                            info=info,
-                        )
+                    cb.on_episode_end(
+                        episode=self._episode_count,
+                        episode_reward=ep_reward,
+                        episode_length=ep_length,
+                        info=info,
+                        metrics=ep_metrics,
+                    )
 
         continue_training = True
         for cb in self.callbacks:
