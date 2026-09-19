@@ -1869,3 +1869,135 @@ def test_shared_traffic_outcome_policy_cross_episode_isolation() -> None:
         "Env B had no overflow and must succeed; must not be contaminated by concurrent Env A sharing same policy"
     )
     assert m_env_b.additional_metrics.get("had_overflow") is False
+
+
+def test_callback_adapter_requires_metrics_parameter() -> None:
+    """SB3CallbackAdapter always passes metrics; legacy signatures fail loudly."""
+    import pytest
+
+    from adaptive_rl.training.callbacks import BaseCallback, SB3CallbackAdapter
+
+    class LegacyCallback(BaseCallback):
+        def on_episode_end(
+            self,
+            episode: int,
+            episode_reward: float,
+            episode_length: int,
+            info: Optional[Dict[str, Any]] = None,
+        ) -> None:
+            return None
+
+    adapter = SB3CallbackAdapter(callbacks=[LegacyCallback()])
+    adapter.locals = {
+        "dones": [True],
+        "rewards": [1.0],
+        "infos": [{"success": True}],
+    }
+    adapter.num_timesteps = 1
+    with pytest.raises(TypeError, match="metrics"):
+        adapter._on_step()
+
+
+def test_outcome_policy_selection_is_immutable_after_first_step() -> None:
+    """Policy cannot be swapped after the first record_step of an episode."""
+    import pytest
+
+    from adaptive_rl.metrics import (
+        DefaultOutcomePolicy,
+        EpisodeMetricsAccumulator,
+        TrafficOutcomePolicy,
+    )
+
+    acc = EpisodeMetricsAccumulator()
+    acc.record_step(reward=1.0, info={"success": True})
+    assert isinstance(acc.outcome_policy, DefaultOutcomePolicy)
+
+    with pytest.raises(RuntimeError, match="immutable"):
+        acc.outcome_policy = TrafficOutcomePolicy()
+
+    with pytest.raises(RuntimeError, match="immutable"):
+        acc.is_traffic = True
+
+    # Late traffic telemetry must not switch a locked default policy
+    acc.record_step(
+        reward=1.0,
+        info={"queue_lengths": [3, 1], "overflow": True, "success": True},
+        truncated=True,
+    )
+    assert isinstance(acc.outcome_policy, DefaultOutcomePolicy)
+    m = acc.finish()
+    assert m.success is True
+
+
+def test_extract_episode_metrics_info_and_step_infos_not_double_counted() -> None:
+    """Terminal info is recorded once when it is already the last step_infos entry."""
+    from adaptive_rl.metrics import extract_episode_metrics
+
+    terminal = {"success": True, "collision": False}
+    prefix = [{"collision": True}, {"collision": False}]
+    full = prefix + [terminal]
+
+    # Historical call style: prefix + terminal info
+    m_split = extract_episode_metrics(
+        reward=3.0,
+        length=3,
+        terminated=True,
+        truncated=False,
+        info=terminal,
+        step_infos=prefix,
+    )
+    assert m_split.collision is True
+    assert m_split.success is False
+    assert m_split.length == 3
+    assert m_split.additional_metrics.get("collision") is None
+
+    # Complete trace plus terminal info must not wipe last_info with a duplicate
+    m_full = extract_episode_metrics(
+        reward=3.0,
+        length=3,
+        terminated=True,
+        truncated=False,
+        info=terminal,
+        step_infos=full,
+    )
+    assert m_full.collision is True
+    assert m_full.success is False
+    assert m_full.length == 3
+
+    # Complete trace only (info omitted)
+    m_trace = extract_episode_metrics(
+        reward=3.0,
+        length=3,
+        terminated=True,
+        truncated=False,
+        step_infos=full,
+    )
+    assert m_trace.collision is True
+    assert m_trace.success is False
+
+    # Full-trace extract sees later traffic keys and selects TrafficOutcomePolicy up front
+    traffic_steps = [
+        {"success": True},
+        {"queue_lengths": [2, 0], "overflow": True, "success": True},
+    ]
+    m_traffic = extract_episode_metrics(
+        reward=1.0,
+        length=2,
+        terminated=False,
+        truncated=True,
+        info=traffic_steps[-1],
+        step_infos=traffic_steps,
+    )
+    assert m_traffic.success is False
+    assert m_traffic.additional_metrics.get("had_overflow") is True
+
+
+def test_builtin_outcome_policies_reject_episode_state() -> None:
+    """Built-in policies have empty slots so they cannot accumulate episode facts."""
+    import pytest
+
+    from adaptive_rl.metrics import DefaultOutcomePolicy, TrafficOutcomePolicy
+
+    for policy in (DefaultOutcomePolicy(), TrafficOutcomePolicy()):
+        with pytest.raises(AttributeError):
+            policy.had_overflow = True  # type: ignore[attr-defined]

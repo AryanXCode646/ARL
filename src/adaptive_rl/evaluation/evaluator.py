@@ -96,6 +96,20 @@ class Evaluator(BaseEvaluator):
 
         self.last_episode_metrics: List[EpisodeMetrics] = []
 
+    def _make_episode_accumulator(self) -> EpisodeMetricsAccumulator:
+        """Bind a policy for one episode without treating inferred defaults as explicit.
+
+        Explicit caller-supplied policies are locked on the accumulator. Inferred
+        TrafficOutcomePolicy (from env name) is selected via is_traffic so it is
+        immutable for the episode. Inferred DefaultOutcomePolicy leaves fallback
+        enabled for the first record_step only.
+        """
+        if self._explicit_policy:
+            return EpisodeMetricsAccumulator(outcome_policy=self.outcome_policy)
+        if isinstance(self.outcome_policy, TrafficOutcomePolicy):
+            return EpisodeMetricsAccumulator(is_traffic=True)
+        return EpisodeMetricsAccumulator()
+
     def evaluate(
         self,
         num_episodes: int = 10,
@@ -134,7 +148,7 @@ class Evaluator(BaseEvaluator):
         for ep in range(num_episodes):
             seed = derive_evaluation_seed(base_seed, ep) if base_seed is not None else None
             obs, info = self.env.reset(seed=seed)
-            acc = EpisodeMetricsAccumulator(outcome_policy=self.outcome_policy)
+            acc = self._make_episode_accumulator()
             done = False
 
             ep_step_max_waits: List[int] = []
@@ -161,8 +175,8 @@ class Evaluator(BaseEvaluator):
                     if not self._explicit_policy and not isinstance(
                         self.outcome_policy, TrafficOutcomePolicy
                     ):
+                        # Bind subsequent episodes only; this episode's policy is already locked.
                         self.outcome_policy = TrafficOutcomePolicy()
-                        acc.outcome_policy = self.outcome_policy
                     if "total_queue" in step_info:
                         all_step_queues.append(int(step_info["total_queue"]))
                     if "max_wait" in step_info:

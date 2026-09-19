@@ -164,6 +164,14 @@ class GeneralizationEvaluator:
         self.last_train_metrics: List[EpisodeMetrics] = []
         self.last_test_metrics: List[EpisodeMetrics] = []
 
+    def _make_episode_accumulator(self) -> EpisodeMetricsAccumulator:
+        """Bind a policy for one episode without treating inferred defaults as explicit."""
+        if self._explicit_policy:
+            return EpisodeMetricsAccumulator(outcome_policy=self.outcome_policy)
+        if isinstance(self.outcome_policy, TrafficOutcomePolicy):
+            return EpisodeMetricsAccumulator(is_traffic=True)
+        return EpisodeMetricsAccumulator()
+
     def _evaluate_seed_list(
         self,
         seeds: Sequence[int],
@@ -174,7 +182,7 @@ class GeneralizationEvaluator:
 
         for seed in seeds:
             obs, info = self.env.reset(seed=int(seed))
-            acc = EpisodeMetricsAccumulator(outcome_policy=self.outcome_policy)
+            acc = self._make_episode_accumulator()
             done = False
 
             while not done:
