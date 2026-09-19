@@ -10,7 +10,6 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, SupportsFloat
 
-
 # Canonical precedence order for episode outcome fields.
 SUCCESS_KEYS: Sequence[str] = ("episode_success", "success", "is_success")
 COLLISION_KEYS: Sequence[str] = ("collision", "is_collision", "had_collision")
@@ -303,11 +302,7 @@ class EpisodeMetricsAccumulator:
             self._outcome_policy: OutcomePolicy = outcome_policy
             self._explicit_policy = True
         elif is_traffic is not None:
-            self._outcome_policy = (
-                TrafficOutcomePolicy()
-                if is_traffic
-                else DefaultOutcomePolicy()
-            )
+            self._outcome_policy = TrafficOutcomePolicy() if is_traffic else DefaultOutcomePolicy()
             self._explicit_policy = True
         else:
             self._outcome_policy = DefaultOutcomePolicy()
@@ -352,8 +347,7 @@ class EpisodeMetricsAccumulator:
         """Set the policy before episode processing begins."""
         if not isinstance(policy, OutcomePolicy):
             raise TypeError(
-                "outcome_policy must be an OutcomePolicy instance, "
-                f"got {type(policy).__name__}"
+                f"outcome_policy must be an OutcomePolicy instance, got {type(policy).__name__}"
             )
 
         if policy is self._outcome_policy:
@@ -388,15 +382,13 @@ class EpisodeMetricsAccumulator:
         # Explicit policy selection cannot be overridden by legacy config.
         if self._explicit_policy:
             raise ValueError(
-                "Cannot change is_traffic because an explicit "
+                f"Cannot set is_traffic={requested_is_traffic} because an explicit "
                 f"outcome_policy={type(self._outcome_policy).__name__} "
                 "was provided."
             )
 
         self._outcome_policy = (
-            TrafficOutcomePolicy()
-            if requested_is_traffic
-            else DefaultOutcomePolicy()
+            TrafficOutcomePolicy() if requested_is_traffic else DefaultOutcomePolicy()
         )
 
     def record_step(
@@ -475,7 +467,7 @@ class EpisodeMetricsAccumulator:
 
         # Universal invariant:
         # A collision always overrides a positive success result.
-        if collision is True:
+        if collision is True and success is True:
             success = False
 
         if additional_metrics is not None:
@@ -528,9 +520,7 @@ def compute_rate(
     if not defined:
         return None
 
-    return float(
-        sum(value is True for value in defined) / len(defined)
-    )
+    return float(sum(value is True for value in defined) / len(defined))
 
 
 def _has_traffic_telemetry(info: Mapping[str, Any]) -> bool:
@@ -604,10 +594,7 @@ def extract_episode_metrics(
     resolved_is_traffic = is_traffic
 
     if outcome_policy is None and resolved_is_traffic is None:
-        if any(
-            _has_traffic_telemetry(step_info)
-            for step_info in resolved_infos
-        ):
+        if any(_has_traffic_telemetry(step_info) for step_info in resolved_infos):
             resolved_is_traffic = True
 
     accumulator = EpisodeMetricsAccumulator(
@@ -662,4 +649,3 @@ __all__ = [
     "compute_rate",
     "extract_episode_metrics",
 ]
-
