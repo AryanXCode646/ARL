@@ -535,18 +535,21 @@ def _resolve_episode_step_infos(
     """Resolve a single, ordered episode info sequence.
 
     Contract:
-    - step_infos is an ordered episode trace.
+    - step_infos is an ordered sequence of per-step Gymnasium info dicts.
     - If only info is provided, info is treated as the terminal step.
-    - If only step_infos is provided, it is treated as the complete trace.
+    - If only step_infos is provided, it is treated as the complete episode trace.
     - If both are provided, info is appended only when it is not already
-      represented by the final step in step_infos.
+      represented by object identity at the end of step_infos (i.e.
+      `step_infos[-1] is info`). Object identity avoids unsafe equality
+      comparisons over arbitrary telemetry payloads (e.g. NumPy arrays
+      or non-boolean equality predicates).
     """
     resolved: List[Mapping[str, Any]] = list(step_infos or [])
 
     if info is None:
         return resolved
 
-    if resolved and dict(resolved[-1]) == dict(info):
+    if resolved and resolved[-1] is info:
         return resolved
 
     resolved.append(info)
