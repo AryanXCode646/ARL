@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC
+from inspect import Parameter, signature
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import numpy as np
@@ -28,7 +29,11 @@ class BaseCallback(ABC):
         """Called before the first training step."""
         pass
 
-    def on_step(self, step: int, locals_dict: Optional[Dict[str, Any]] = None) -> bool:
+    def on_step(
+        self,
+        step: int,
+        locals_dict: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         """Called after every environment step.
 
         Args:
@@ -36,7 +41,7 @@ class BaseCallback(ABC):
             locals_dict: Dictionary of local variables from the training loop.
 
         Returns:
-            bool: True to continue training, False to abort early.
+            True to continue training, False to abort early.
         """
         return True
 
@@ -48,7 +53,15 @@ class BaseCallback(ABC):
         info: Optional[Dict[str, Any]] = None,
         metrics: Optional[EpisodeMetrics] = None,
     ) -> None:
-        """Called upon completion of an environment episode."""
+        """Called upon completion of an environment episode.
+
+        Args:
+            episode: Cumulative episode number.
+            episode_reward: Total reward accumulated during the episode.
+            episode_length: Number of steps in the episode.
+            info: Terminal environment information.
+            metrics: Canonical episode metrics produced by the metrics pipeline.
+        """
         pass
 
     def on_training_end(self) -> None:
@@ -86,12 +99,19 @@ class MetricLoggerCallback(BaseCallback):
         self.episode_rewards.append(episode_reward)
         self.episode_lengths.append(episode_length)
 
+        # Compatibility path for callers that have not yet migrated to the
+        # canonical EpisodeMetrics contract.
         if metrics is None:
             info_dict = dict(info or {})
+
             is_truncated = bool(
-                info_dict.get("TimeLimit.truncated", False) or info_dict.get("truncated", False)
+                info_dict.get("TimeLimit.truncated", False)
+                or info_dict.get("truncated", False)
             )
-            is_terminated = bool(info_dict.get("terminated", not is_truncated))
+            is_terminated = bool(
+                info_dict.get("terminated", not is_truncated)
+            )
+
             metrics = extract_episode_metrics(
                 reward=episode_reward,
                 length=episode_length,
@@ -99,10 +119,14 @@ class MetricLoggerCallback(BaseCallback):
                 truncated=is_truncated,
                 info=info_dict,
             )
+
         self.episode_metrics.append(metrics)
 
+        # Preserve nullable semantics:
+        # None = undefined, False = explicit negative, True = explicit positive.
         if metrics.success is True:
             self.successes += 1
+
         if metrics.collision is True:
             self.collisions += 1
 
@@ -111,6 +135,7 @@ class MetricLoggerCallback(BaseCallback):
         """Rolling mean episodic reward."""
         if not self.episode_rewards:
             return 0.0
+
         window = self.episode_rewards[-self.window_size :]
         return float(np.mean(window))
 
@@ -119,22 +144,29 @@ class MetricLoggerCallback(BaseCallback):
         """Rolling mean episode length."""
         if not self.episode_lengths:
             return 0.0
+
         window = self.episode_lengths[-self.window_size :]
         return float(np.mean(window))
 
     @property
     def success_rate(self) -> Optional[float]:
-        """Proportion of completed episodes that achieved the goal among defined episodes."""
+        """Success rate among episodes where success is defined."""
         if not self.episode_metrics:
             return None
-        return compute_rate([m.success for m in self.episode_metrics])
+
+        return compute_rate(
+            [metrics.success for metrics in self.episode_metrics]
+        )
 
     @property
     def collision_rate(self) -> Optional[float]:
-        """Proportion of completed episodes that ended in collision among defined episodes."""
+        """Collision rate among episodes where collision is defined."""
         if not self.episode_metrics:
             return None
-        return compute_rate([m.collision for m in self.episode_metrics])
+
+        return compute_rate(
+            [metrics.collision for metrics in self.episode_metrics]
+        )
 
 
 class CheckpointCallback(BaseCallback):
@@ -165,31 +197,64 @@ class CheckpointCallback(BaseCallback):
         """Assign model reference to save."""
         self.model = model
 
-    def on_step(self, step: int, locals_dict: Optional[Dict[str, Any]] = None) -> bool:
+    def on_step(
+        self,
+        step: int,
+        locals_dict: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         """Check save frequency and persist checkpoint."""
-        if self.save_freq > 0 and (step - self.last_save_step) >= self.save_freq:
+        if self.save_freq > 0 and (
+            step - self.last_save_step
+        ) >= self.save_freq:
             self.last_save_step = step
+
             if self.model is not None:
                 self.manager.save_checkpoint(
                     model=self.model,
                     step=step,
                     metric_value=0.0,
                 )
+
         return True
 
 
+def _callback_supports_metrics(callback: BaseCallback) -> bool:
+    """Return whether a callback accepts the canonical ``metrics`` argument.
+
+    Signature inspection is used instead of catching TypeError from callback
+    execution. This ensures real TypeError bugs raised inside callbacks are
+    never swallowed or cause the callback to be invoked twice.
+    """
+    try:
+        parameters = signature(callback.on_episode_end).parameters
+    except (TypeError, ValueError):
+        # If a callable cannot be inspected reliably, prefer the canonical
+        # interface rather than silently hiding an implementation failure.
+        return True
+
+    if "metrics" in parameters:
+        return True
+
+    return any(
+        parameter.kind is Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+
+
 class SB3CallbackAdapter(SB3BaseCallback):
-    """Adapter bridging AdaptiveRL BaseCallbacks to Stable-Baselines3 callbacks.
+    """Adapter bridging AdaptiveRL callbacks to Stable-Baselines3 callbacks.
 
     Metrics Data Flow:
         PPO / SAC training step
-            ↓ (emits locals: dones, infos, rewards)
+            ↓
         SB3CallbackAdapter._on_step()
-            ↓ (accumulates transition stream)
+            ↓
         EpisodeMetricsAccumulator.record_step()
-            ↓ (when done=True)
-        EpisodeMetricsAccumulator.finish() -> EpisodeMetrics (canonical immutable contract)
-            ↓ (invokes on_episode_end with metrics=ep_metrics)
+            ↓
+        EpisodeMetricsAccumulator.finish() -> EpisodeMetrics
+            ↓
+        callback.on_episode_end(..., metrics=ep_metrics)
+            ↓
         MetricLoggerCallback / CurriculumCallback
             ↓
         EpisodeRecord / TrainingResult / serialization
@@ -204,6 +269,7 @@ class SB3CallbackAdapter(SB3BaseCallback):
     ) -> None:
         """Initialize adapter with list of AdaptiveRL callbacks."""
         super().__init__(verbose)
+
         self.callbacks = callbacks
         self.algorithm = algorithm
         self.outcome_policy = outcome_policy
@@ -214,16 +280,22 @@ class SB3CallbackAdapter(SB3BaseCallback):
 
     def _on_training_start(self) -> None:
         """Propagate training start event."""
-        for cb in self.callbacks:
-            if isinstance(cb, CheckpointCallback) and self.algorithm is not None:
-                cb.set_model(self.algorithm)
-            cb.on_training_start(locals_dict=self.locals)
+        for callback in self.callbacks:
+            if (
+                isinstance(callback, CheckpointCallback)
+                and self.algorithm is not None
+            ):
+                callback.set_model(self.algorithm)
+
+            callback.on_training_start(
+                locals_dict=self.locals,
+            )
 
     def _on_step(self) -> bool:
         """Track steps and episode outcomes from SB3 training step."""
         step = int(self.num_timesteps)
 
-        # Check for episode endings across vectorized / single environments
+        # Check for episode endings across vectorized / single environments.
         dones = self.locals.get("dones", [False])
         infos = self.locals.get("infos", [{}])
         rewards = self.locals.get("rewards", [0.0])
@@ -232,20 +304,30 @@ class SB3CallbackAdapter(SB3BaseCallback):
             reward = float(rewards[i]) if i < len(rewards) else 0.0
             info = infos[i] if i < len(infos) else {}
 
-            self._current_rewards[i] = self._current_rewards.get(i, 0.0) + reward
-            self._current_lengths[i] = self._current_lengths.get(i, 0) + 1
+            self._current_rewards[i] = (
+                self._current_rewards.get(i, 0.0) + reward
+            )
+            self._current_lengths[i] = (
+                self._current_lengths.get(i, 0) + 1
+            )
 
             if i not in self._accumulators:
                 self._accumulators[i] = EpisodeMetricsAccumulator(
-                    outcome_policy=self.outcome_policy
+                    outcome_policy=self.outcome_policy,
                 )
 
             is_truncated = bool(
-                info.get("TimeLimit.truncated", False) or info.get("truncated", False)
+                info.get("TimeLimit.truncated", False)
+                or info.get("truncated", False)
             )
-            is_terminated = bool(info.get("terminated", done and not is_truncated))
 
-            self._accumulators[i].record_step(
+            is_terminated = bool(
+                info.get("terminated", done and not is_truncated)
+            )
+
+            accumulator = self._accumulators[i]
+
+            accumulator.record_step(
                 reward=reward,
                 terminated=is_terminated,
                 truncated=is_truncated,
@@ -254,30 +336,44 @@ class SB3CallbackAdapter(SB3BaseCallback):
 
             if done:
                 self._episode_count += 1
-                self._current_rewards.pop(i, 0.0)
-                self._current_lengths.pop(i, 0)
-                acc = self._accumulators.pop(i)
-                ep_metrics = acc.finish()
+
+                self._current_rewards.pop(i, None)
+                self._current_lengths.pop(i, None)
+
+                accumulator = self._accumulators.pop(i)
+                ep_metrics = accumulator.finish()
+
                 ep_reward = ep_metrics.reward
                 ep_length = ep_metrics.length
 
-                for cb in self.callbacks:
-                    cb.on_episode_end(
-                        episode=self._episode_count,
-                        episode_reward=ep_reward,
-                        episode_length=ep_length,
-                        info=info,
-                        metrics=ep_metrics,
-                    )
+                for callback in self.callbacks:
+                    callback_kwargs: Dict[str, Any] = {
+                        "episode": self._episode_count,
+                        "episode_reward": ep_reward,
+                        "episode_length": ep_length,
+                        "info": info,
+                    }
+
+                    # Use explicit signature inspection for legacy callbacks.
+                    # Never catch TypeError raised from inside callback code.
+                    if _callback_supports_metrics(callback):
+                        callback_kwargs["metrics"] = ep_metrics
+
+                    callback.on_episode_end(**callback_kwargs)
 
         continue_training = True
-        for cb in self.callbacks:
-            if not cb.on_step(step=step, locals_dict=self.locals):
+
+        for callback in self.callbacks:
+            if not callback.on_step(
+                step=step,
+                locals_dict=self.locals,
+            ):
                 continue_training = False
 
         return continue_training
 
     def _on_training_end(self) -> None:
         """Propagate training end event."""
-        for cb in self.callbacks:
-            cb.on_training_end()
+        for callback in self.callbacks:
+            callback.on_training_end()
+
