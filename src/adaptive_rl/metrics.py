@@ -10,7 +10,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, SupportsFloat
 
-# Canonical precedence order for episode outcome fields
+# Canonical precedence order for episode outcome fields.
 SUCCESS_KEYS: Sequence[str] = ("episode_success", "success", "is_success")
 COLLISION_KEYS: Sequence[str] = ("collision", "is_collision", "had_collision")
 OVERFLOW_KEYS: Sequence[str] = ("overflow", "step_overflow", "had_overflow")
@@ -36,31 +36,35 @@ def _extract_flag(
     """Extract a boolean outcome flag following strict precedence.
 
     Rules:
-    - Checks candidate keys in strict sequence order.
-    - If a key is present and its value is not None, returns bool(value).
+    - Candidate keys are checked in strict sequence order.
+    - If a key is present and its value is not None, bool(value) is returned.
     - Explicit False remains False.
-    - If no candidate key is present (or all are None), returns None.
+    - If no candidate key is present, or all candidates are None, None is returned.
     """
     if not info:
         return None
+
     for key in keys:
         if key in info and info[key] is not None:
             return bool(info[key])
+
     return None
 
 
 @dataclass(frozen=True)
 class EpisodeMetrics:
-    """Immutable, typed container representing the canonical outcome of a single episode.
+    """Immutable, typed container representing one canonical episode outcome.
 
     Attributes:
-        reward: Total cumulative episodic reward (return).
+        reward: Total cumulative episodic reward.
         length: Total timesteps elapsed in the episode.
-        success: True if episode objective reached, False if failed, or None if not applicable.
-        collision: True if collision occurred during the episode, False if collision-free, or None if not applicable.
-        terminated: True if episode ended via natural task termination (Gymnasium return flag).
-        truncated: True if episode ended via artificial truncation/timeout (Gymnasium return flag).
-        additional_metrics: Environment-specific terminal metrics (e.g. queue length, energy consumed).
+        success: True if successful, False if explicitly unsuccessful,
+            or None if the metric is undefined/unavailable.
+        collision: True if a collision occurred, False if explicitly
+            collision-free, or None if the metric is undefined/unavailable.
+        terminated: True if the episode ended via natural termination.
+        truncated: True if the episode ended via truncation/timeout.
+        additional_metrics: Environment-specific metrics.
     """
 
     reward: float
@@ -72,25 +76,36 @@ class EpisodeMetrics:
     additional_metrics: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """Validate and normalize field types for strict immutability and schema conformity."""
+        """Validate and normalize values while preserving nullable semantics."""
         if not isinstance(self.reward, float):
             object.__setattr__(self, "reward", float(self.reward))
+
         if not isinstance(self.length, int):
             object.__setattr__(self, "length", int(self.length))
+
         if self.success is not None and not isinstance(self.success, bool):
             object.__setattr__(self, "success", bool(self.success))
+
         if self.collision is not None and not isinstance(self.collision, bool):
             object.__setattr__(self, "collision", bool(self.collision))
+
         if not isinstance(self.terminated, bool):
             object.__setattr__(self, "terminated", bool(self.terminated))
+
         if not isinstance(self.truncated, bool):
             object.__setattr__(self, "truncated", bool(self.truncated))
+
         if not isinstance(self.additional_metrics, Mapping):
             raise TypeError(
-                f"additional_metrics must be a Mapping, got {type(self.additional_metrics).__name__}"
+                "additional_metrics must be a Mapping, "
+                f"got {type(self.additional_metrics).__name__}"
             )
-        # Store a shallow dictionary copy to prevent external mutation of caller dictionaries
-        object.__setattr__(self, "additional_metrics", dict(self.additional_metrics))
+
+        object.__setattr__(
+            self,
+            "additional_metrics",
+            dict(self.additional_metrics),
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize episode metrics to a dictionary."""
@@ -106,137 +121,153 @@ class EpisodeMetrics:
 
 
 class OutcomePolicy:
-    """Base outcome policy governing domain-specific episode outcome interpretation.
+    """Stateless strategy for interpreting episode-local facts.
 
-    Separates episodic fact collection (handled by EpisodeMetricsAccumulator) from
-    outcome interpretation (handled by this policy).
+    EpisodeMetricsAccumulator owns all episode-local state.
+
+    OutcomePolicy instances MUST NOT store per-episode facts. They may be
+    safely shared across sequential episodes, vectorized environments, and
+    concurrent accumulators. Constructor attributes, if any, should contain
+    immutable configuration only.
+
+    Policy selection belongs to the accumulator and is immutable once the
+    first transition has been recorded.
     """
 
-    def record_step(
-        self,
-        info: Mapping[str, Any],
-        terminated: bool,
-        truncated: bool,
-    ) -> None:
-        """Process a step transition for domain-specific outcome tracking."""
-        pass
+    __slots__ = ()
 
     def resolve_collision(
         self,
         accumulator: EpisodeMetricsAccumulator,
     ) -> Optional[bool]:
-        """Resolve final episode collision outcome from accumulated facts."""
+        """Resolve the final collision outcome."""
         if not accumulator.has_collision_info:
             return None
+
         return accumulator.had_collision
 
     def resolve_success(
         self,
         accumulator: EpisodeMetricsAccumulator,
     ) -> Optional[bool]:
-        """Resolve final episode success outcome from accumulated facts."""
+        """Resolve the final success outcome."""
         if accumulator.explicit_success is not None:
             return accumulator.explicit_success
+
         if not accumulator.has_success_info:
             return None
-        term_succ = _extract_flag(accumulator.last_info, SUCCESS_KEYS)
-        if term_succ is not None:
-            return term_succ
+
+        terminal_success = _extract_flag(
+            accumulator.last_info,
+            SUCCESS_KEYS,
+        )
+
+        if terminal_success is not None:
+            return terminal_success
+
         return accumulator.had_success
 
     def get_additional_metrics(
         self,
-        accumulator: Optional[EpisodeMetricsAccumulator] = None,
+        accumulator: EpisodeMetricsAccumulator,
     ) -> Dict[str, Any]:
-        """Return domain-specific metrics to merge into EpisodeMetrics.additional_metrics."""
+        """Return policy-specific additional metrics."""
         return {}
 
 
 class DefaultOutcomePolicy(OutcomePolicy):
-    """Standard goal-directed outcome policy (navigation, continuous control, gridworld).
+    """Standard goal-directed outcome policy.
+
+    Intended for navigation, continuous-control, and gridworld-style
+    environments.
 
     Rules:
-    - If no success telemetry was monitored on any step, success is None.
-    - If the terminal step explicitly reports success, that terminal outcome is authoritative.
-    - If an intermediate step reported success and terminal step did not repeat/contradict it,
-      had_success is preserved.
-    - Universal Invariant: An episode with collision is overridden to False in the accumulator finish step.
+    - No success telemetry anywhere -> success=None.
+    - Explicit terminal success takes precedence.
+    - Otherwise an observed intermediate success is preserved.
+    - Collision is handled by the accumulator's universal invariant and
+      overrides positive success at finish time.
     """
 
-    pass
+    __slots__ = ()
 
 
 class TrafficOutcomePolicy(OutcomePolicy):
-    """Traffic domain outcome policy governing queue overflow and traffic success semantics.
+    """Traffic-domain outcome policy.
 
-    Traffic Success Contract:
-    An episode succeeded iff:
-    - No queue overflow occurred across the entire episode (not accumulator.had_overflow)
-    - Episode did not terminate early due to failure/overflow (not accumulator.terminated; horizon completion is truncated)
-    - Final queue was controlled (terminal step success is True)
-    Any episode with queue overflow or premature termination is strictly marked success=False.
-    Intermediate success signals are transient and NEVER latch to establish final episode success.
-    If terminal success information is missing (None) and no failure/overflow occurred, success is None.
+    Traffic success is established from episode-local facts according to:
 
-    Policy instances are completely stateless and safe to share across multiple accumulators,
-    sequential episodes, and concurrent environments. All episodic facts are tracked in the
-    episode-local EpisodeMetricsAccumulator.
+    1. Any queue overflow -> success=False.
+    2. Natural termination -> success=False.
+    3. The terminal success flag is authoritative.
+    4. If terminal success is unavailable and no failure occurred -> None.
+    5. Intermediate success never latches into the final traffic outcome.
+
+    The policy is stateless and safe to share between accumulators.
     """
+
+    __slots__ = ()
 
     def resolve_success(
         self,
         accumulator: EpisodeMetricsAccumulator,
     ) -> Optional[bool]:
-        # 1. Catastrophic overflow on ANY step of this episode forces success=False
+        """Resolve traffic success strictly from episode-local facts."""
+        # 1. Overflow anywhere in the episode is a hard failure.
         if accumulator.had_overflow:
             return False
 
-        # 2. Premature failure termination in traffic forces success=False
-        if accumulator.terminated:
+        # 2. Natural termination represents premature traffic failure.
+        # Horizon completion should normally be represented by truncation.
+        if accumulator.terminated and not accumulator.truncated:
             return False
 
-        # 3. In traffic, episode outcome is strictly established at the terminal step
-        term_succ = _extract_flag(accumulator.last_info, SUCCESS_KEYS)
-        if term_succ is not None:
-            return bool(term_succ)
+        # 3. Terminal success is authoritative for traffic environments.
+        terminal_success = _extract_flag(
+            accumulator.last_info,
+            SUCCESS_KEYS,
+        )
+        if terminal_success is not None:
+            return terminal_success
 
-        # 4. Check if an explicit episode-level override was provided
+        # 4. Explicit episode-level success override remains supported.
         if accumulator.explicit_success is not None:
             return accumulator.explicit_success
 
-        # 5. Otherwise, if terminal step provides no success info, success is undefined (None)
+        # 5. No terminal success information means undefined.
         return None
 
     def get_additional_metrics(
         self,
-        accumulator: Optional[EpisodeMetricsAccumulator] = None,
+        accumulator: EpisodeMetricsAccumulator,
     ) -> Dict[str, Any]:
-        extra: Dict[str, Any] = {}
-        if accumulator is not None and accumulator.has_overflow_info:
-            extra["had_overflow"] = accumulator.had_overflow
-        return extra
+        """Expose traffic-specific overflow information."""
+        if not accumulator.has_overflow_info:
+            return {}
+
+        return {
+            "had_overflow": accumulator.had_overflow,
+        }
 
 
 class EpisodeMetricsAccumulator:
-    """Accumulates step-level transitions across an entire episode to construct canonical EpisodeMetrics.
+    """Collect episode facts and produce the canonical EpisodeMetrics object.
 
     Architecture:
-    - Accumulator: Collects raw episodic facts across steps (rewards, length, termination, truncation,
-      observed telemetry for success, collision, overflow, and environment info mappings).
-    - OutcomePolicy: Authoritative domain strategy that interprets the accumulated facts to determine
-      success, collision, and domain-specific summary metrics.
-    - EpisodeMetrics: Immutable canonical outcome container produced upon calling finish().
 
-    Preserves episode-level semantics across multi-step episodes:
-    - Multi-step collision tracking: If a collision occurred on ANY step (intermediate or terminal),
-      the episode is marked collision=True. If collision keys are monitored and no collision occurred,
-      collision=False. If no collision info was present on any step, collision=None.
-    - Multi-step success tracking:
-      * Standard / navigation environments: Uses DefaultOutcomePolicy where success is preserved from
-        intermediate or terminal steps.
-      * Traffic environments: Uses TrafficOutcomePolicy enforcing the traffic queue overflow contract.
-    - Universal Invariant: collision=True overrides any conflicting positive success flag to False.
-    - Preserves terminal environment telemetry in additional_metrics.
+        raw environment steps
+            ↓
+        EpisodeMetricsAccumulator
+            ↓
+        OutcomePolicy
+            ↓
+        EpisodeMetrics
+
+    The accumulator owns episode-local facts.
+    The policy interprets those facts.
+    EpisodeMetrics is the immutable canonical result.
+
+    A policy cannot be replaced after the first record_step() call.
     """
 
     def __init__(
@@ -245,34 +276,39 @@ class EpisodeMetricsAccumulator:
         *,
         is_traffic: Optional[bool] = None,
     ) -> None:
-        """Initialize episode metrics accumulator.
+        """Initialize an episode accumulator.
 
         Args:
-            outcome_policy: Authoritative domain outcome policy governing outcome interpretation.
-            is_traffic: Legacy compatibility parameter. If specified with outcome_policy,
-                must match the outcome_policy type, or ValueError is raised.
+            outcome_policy:
+                Explicit domain outcome policy.
+            is_traffic:
+                Legacy compatibility selector. When supplied together with
+                outcome_policy, it must agree with the policy type.
         """
         if outcome_policy is not None and is_traffic is not None:
-            if is_traffic is True and not isinstance(outcome_policy, TrafficOutcomePolicy):
+            policy_is_traffic = isinstance(
+                outcome_policy,
+                TrafficOutcomePolicy,
+            )
+
+            if bool(is_traffic) != policy_is_traffic:
                 raise ValueError(
-                    f"Conflicting configuration: outcome_policy={type(outcome_policy).__name__} "
-                    "is incompatible with is_traffic=True."
-                )
-            if is_traffic is False and isinstance(outcome_policy, TrafficOutcomePolicy):
-                raise ValueError(
-                    f"Conflicting configuration: outcome_policy={type(outcome_policy).__name__} "
-                    "is incompatible with is_traffic=False."
+                    "Conflicting configuration: "
+                    f"outcome_policy={type(outcome_policy).__name__} "
+                    f"is incompatible with is_traffic={is_traffic!r}."
                 )
 
         if outcome_policy is not None:
-            self.outcome_policy: OutcomePolicy = outcome_policy
-            self._explicit_policy: bool = True
+            self._outcome_policy: OutcomePolicy = outcome_policy
+            self._explicit_policy = True
         elif is_traffic is not None:
-            self.outcome_policy = TrafficOutcomePolicy() if is_traffic else DefaultOutcomePolicy()
+            self._outcome_policy = TrafficOutcomePolicy() if is_traffic else DefaultOutcomePolicy()
             self._explicit_policy = True
         else:
-            self.outcome_policy = DefaultOutcomePolicy()
+            self._outcome_policy = DefaultOutcomePolicy()
             self._explicit_policy = False
+
+        self._policy_locked = False
 
         self.reward: float = 0.0
         self.length: int = 0
@@ -292,36 +328,68 @@ class EpisodeMetricsAccumulator:
         self.last_info: Dict[str, Any] = {}
         self.step_infos: List[Mapping[str, Any]] = []
 
+    def _ensure_policy_mutable(self) -> None:
+        """Reject policy replacement after episode processing begins."""
+        if self._policy_locked:
+            raise RuntimeError(
+                "Cannot change OutcomePolicy after the first record_step() "
+                "of an episode. Policy selection is immutable for the "
+                "lifetime of an accumulator."
+            )
+
+    @property
+    def outcome_policy(self) -> OutcomePolicy:
+        """Return the policy bound to this episode."""
+        return self._outcome_policy
+
+    @outcome_policy.setter
+    def outcome_policy(self, policy: OutcomePolicy) -> None:
+        """Set the policy before episode processing begins."""
+        if not isinstance(policy, OutcomePolicy):
+            raise TypeError(
+                f"outcome_policy must be an OutcomePolicy instance, got {type(policy).__name__}"
+            )
+
+        if policy is self._outcome_policy:
+            return
+
+        self._ensure_policy_mutable()
+        self._outcome_policy = policy
+
     @property
     def is_traffic(self) -> bool:
-        """Compatibility property indicating whether accumulator is using TrafficOutcomePolicy."""
-        return isinstance(self.outcome_policy, TrafficOutcomePolicy)
+        """Compatibility property indicating traffic policy selection."""
+        return isinstance(
+            self._outcome_policy,
+            TrafficOutcomePolicy,
+        )
 
     @is_traffic.setter
-    def is_traffic(self, val: Optional[bool]) -> None:
-        """Compatibility setter to toggle traffic policy. Rejects contradictory explicit configuration."""
+    def is_traffic(self, value: Optional[bool]) -> None:
+        """Set legacy traffic policy selection before episode processing."""
+        if value is None:
+            return
+
+        requested_is_traffic = bool(value)
+        current_is_traffic = self.is_traffic
+
+        # No semantic change requested.
+        if requested_is_traffic == current_is_traffic:
+            return
+
+        self._ensure_policy_mutable()
+
+        # Explicit policy selection cannot be overridden by legacy config.
         if self._explicit_policy:
-            if val is True and not isinstance(self.outcome_policy, TrafficOutcomePolicy):
-                raise ValueError(
-                    "Cannot set is_traffic=True on an accumulator initialized with an explicit non-traffic OutcomePolicy."
-                )
-            if val is False and isinstance(self.outcome_policy, TrafficOutcomePolicy):
-                raise ValueError(
-                    "Cannot set is_traffic=False on an accumulator initialized with an explicit TrafficOutcomePolicy."
-                )
-        if val and not isinstance(self.outcome_policy, TrafficOutcomePolicy):
-            self.outcome_policy = TrafficOutcomePolicy()
-        elif val is False and isinstance(self.outcome_policy, TrafficOutcomePolicy):
-            self.outcome_policy = DefaultOutcomePolicy()
+            raise ValueError(
+                f"Cannot set is_traffic={requested_is_traffic} because an explicit "
+                f"outcome_policy={type(self._outcome_policy).__name__} "
+                "was provided."
+            )
 
-    def _detect_domain_fallback(self, info_dict: Mapping[str, Any]) -> None:
-        """Isolated deterministic fallback domain detection for legacy callers.
-
-        Only active when neither outcome_policy nor is_traffic was explicitly provided at initialization.
-        Explicit policy selection always takes precedence.
-        """
-        if any(k in info_dict for k in TRAFFIC_KEYS):
-            self.outcome_policy = TrafficOutcomePolicy()
+        self._outcome_policy = (
+            TrafficOutcomePolicy() if requested_is_traffic else DefaultOutcomePolicy()
+        )
 
     def record_step(
         self,
@@ -330,74 +398,91 @@ class EpisodeMetricsAccumulator:
         truncated: bool = False,
         info: Optional[Mapping[str, Any]] = None,
     ) -> None:
-        """Record a single step transition in the episode (collect raw facts)."""
+        """Record one environment transition.
+
+        Policy selection may be automatically upgraded to TrafficOutcomePolicy
+        only on the first step when no explicit policy was configured.
+        """
+        info_dict = dict(info) if info is not None else {}
+
+        # Legacy domain detection is allowed exactly once, before the
+        # accumulator becomes policy-locked.
+        if (
+            not self._policy_locked
+            and not self._explicit_policy
+            and isinstance(self._outcome_policy, DefaultOutcomePolicy)
+            and any(key in info_dict for key in TRAFFIC_KEYS)
+        ):
+            self._outcome_policy = TrafficOutcomePolicy()
+
+        # Once the first transition is processed, policy selection is frozen.
+        self._policy_locked = True
+
         self.reward += float(reward)
         self.length += 1
         self.terminated = bool(terminated)
         self.truncated = bool(truncated)
 
-        info_dict = dict(info) if info is not None else {}
         self.last_info = info_dict
         self.step_infos.append(info_dict)
 
-        if info_dict:
-            # Isolated fallback domain detection (only if no explicit policy was configured)
-            if not self._explicit_policy and isinstance(self.outcome_policy, DefaultOutcomePolicy):
-                self._detect_domain_fallback(info_dict)
+        # Collision facts are episode-local and monotonic.
+        collision_flag = _extract_flag(
+            info_dict,
+            COLLISION_KEYS,
+        )
+        if collision_flag is not None:
+            self.has_collision_info = True
+            if collision_flag:
+                self.had_collision = True
 
-            # Track collision facts across steps
-            col_flag = _extract_flag(info_dict, COLLISION_KEYS)
-            if col_flag is not None:
-                self.has_collision_info = True
-                if col_flag:
-                    self.had_collision = True
+        # Success facts are episode-local and monotonic.
+        success_flag = _extract_flag(
+            info_dict,
+            SUCCESS_KEYS,
+        )
+        if success_flag is not None:
+            self.has_success_info = True
+            if success_flag:
+                self.had_success = True
 
-            # Track success facts across steps
-            succ_flag = _extract_flag(info_dict, SUCCESS_KEYS)
-            if succ_flag is not None:
-                self.has_success_info = True
-                if succ_flag:
-                    self.had_success = True
-
-            # Track overflow facts across steps
-            ovf_flag = _extract_flag(info_dict, OVERFLOW_KEYS)
-            if ovf_flag is not None:
-                self.has_overflow_info = True
-                if ovf_flag:
-                    self.had_overflow = True
-
-            # Allow domain policy to process transition
-            self.outcome_policy.record_step(info_dict, self.terminated, self.truncated)
+        # Overflow facts are episode-local and monotonic.
+        overflow_flag = _extract_flag(
+            info_dict,
+            OVERFLOW_KEYS,
+        )
+        if overflow_flag is not None:
+            self.has_overflow_info = True
+            if overflow_flag:
+                self.had_overflow = True
 
     def finish(
         self,
         *,
         additional_metrics: Optional[Mapping[str, Any]] = None,
     ) -> EpisodeMetrics:
-        """Finalize accumulated transitions into an immutable EpisodeMetrics instance."""
-        # 1. Resolve collision state via outcome policy
-        collision: Optional[bool] = self.outcome_policy.resolve_collision(self)
+        """Finalize the episode into immutable canonical metrics."""
+        collision = self.outcome_policy.resolve_collision(self)
+        success = self.outcome_policy.resolve_success(self)
 
-        # 2. Resolve success state via outcome policy
-        success: Optional[bool] = self.outcome_policy.resolve_success(self)
-
-        # 3. Universal invariant: collision overrides success
+        # Universal invariant:
+        # A collision always overrides a positive success result.
         if collision is True and success is True:
             success = False
 
         if additional_metrics is not None:
             extra: Dict[str, Any] = dict(additional_metrics)
         else:
-            extra = {k: v for k, v in self.last_info.items() if k not in _EXCLUDED_OUTCOME_KEYS}
+            extra = {
+                key: value
+                for key, value in self.last_info.items()
+                if key not in _EXCLUDED_OUTCOME_KEYS
+            }
 
-        # Merge domain policy additional metrics
-        try:
-            policy_extra = self.outcome_policy.get_additional_metrics(self)
-        except TypeError:
-            policy_extra = self.outcome_policy.get_additional_metrics()
-        for k, v in policy_extra.items():
-            if k not in extra:
-                extra[k] = v
+        policy_extra = self.outcome_policy.get_additional_metrics(self)
+
+        for key, value in policy_extra.items():
+            extra.setdefault(key, value)
 
         return EpisodeMetrics(
             reward=self.reward,
@@ -410,30 +495,62 @@ class EpisodeMetricsAccumulator:
         )
 
 
-def compute_rate(values: Sequence[Optional[bool]]) -> Optional[float]:
-    """Compute the rate of True outcomes among defined (non-None) episode outcomes.
+def compute_rate(
+    values: Sequence[Optional[bool]],
+) -> Optional[float]:
+    """Compute True rate among defined boolean outcomes.
 
     Canonical denominator semantics:
-    - Only episodes where the metric is defined (value is not None) contribute to the denominator.
-    - True contributes 1 to the numerator.
-    - False contributes 0 to the numerator.
-    - None is excluded from both numerator and denominator.
-    - If no episodes have a defined outcome (empty or all None), returns None.
+    - True contributes 1.
+    - False contributes 0.
+    - None is excluded.
+    - If no defined values exist, return None.
 
     Examples:
         >>> compute_rate([True, False, None])
         0.5
         >>> compute_rate([None, None])
-        None
         >>> compute_rate([True, True])
         1.0
         >>> compute_rate([False, False])
         0.0
     """
-    valid = [v for v in values if v is not None]
-    if not valid:
+    defined = [value for value in values if value is not None]
+
+    if not defined:
         return None
-    return float(sum(1 for v in valid if v is True) / len(valid))
+
+    return float(sum(value is True for value in defined) / len(defined))
+
+
+def _has_traffic_telemetry(info: Mapping[str, Any]) -> bool:
+    """Return whether an info mapping contains traffic telemetry."""
+    return any(key in info for key in TRAFFIC_KEYS)
+
+
+def _resolve_episode_step_infos(
+    info: Optional[Mapping[str, Any]],
+    step_infos: Optional[Sequence[Mapping[str, Any]]],
+) -> List[Mapping[str, Any]]:
+    """Resolve a single, ordered episode info sequence.
+
+    Contract:
+    - step_infos is an ordered episode trace.
+    - If only info is provided, info is treated as the terminal step.
+    - If only step_infos is provided, it is treated as the complete trace.
+    - If both are provided, info is appended only when it is not already
+      represented by the final step in step_infos.
+    """
+    resolved: List[Mapping[str, Any]] = list(step_infos or [])
+
+    if info is None:
+        return resolved
+
+    if resolved and dict(resolved[-1]) == dict(info):
+        return resolved
+
+    resolved.append(info)
+    return resolved
 
 
 def extract_episode_metrics(
@@ -451,56 +568,72 @@ def extract_episode_metrics(
     is_traffic: Optional[bool] = None,
     outcome_policy: Optional[OutcomePolicy] = None,
 ) -> EpisodeMetrics:
-    """Canonical convenience extractor producing an EpisodeMetrics instance.
+    """Create canonical EpisodeMetrics through the accumulator.
 
-    Thin convenience API wrapping EpisodeMetricsAccumulator. Preserves all
-    canonical semantics without duplicating outcome derivation logic.
+    This function is intentionally a thin compatibility/convenience layer.
+    All outcome derivation is delegated to EpisodeMetricsAccumulator and its
+    bound OutcomePolicy.
 
-    Args:
-        reward: Cumulative episodic reward.
-        length: Total episode length in timesteps.
-        terminated: Gymnasium step terminated flag.
-        truncated: Gymnasium step truncated flag.
-        info: Terminal step info dictionary from environment.
-        additional_metrics: Optional explicit environment-specific metrics mapping.
-        step_infos: Optional sequence of step info dictionaries accumulated across the episode.
-        had_collision: Optional override indicating whether collision occurred during the episode.
-        had_success: Optional override indicating whether success was achieved during the episode.
-        had_overflow: Optional override indicating whether queue overflow occurred during the episode.
-        is_traffic: Optional flag explicitly designating environment as a traffic environment.
-        outcome_policy: Optional explicit domain OutcomePolicy instance.
+    If both `outcome_policy` and `is_traffic` are provided, they must agree.
+    If neither is provided, traffic telemetry is detected from the resolved
+    episode trace before the accumulator is created, so policy selection is
+    fixed before replay begins.
 
-    Returns:
-        EpisodeMetrics: Immutable, canonical episode metrics instance.
+    Explicit overrides:
+    - had_collision=True marks collision as observed.
+    - had_collision=False only provides an explicit collision-free observation
+      when no actual collision has already been observed.
+    - had_success sets explicit episode success.
+    - had_overflow=True marks overflow as observed.
     """
-    acc = EpisodeMetricsAccumulator(outcome_policy=outcome_policy, is_traffic=is_traffic)
+    resolved_infos = _resolve_episode_step_infos(
+        info=info,
+        step_infos=step_infos,
+    )
 
-    if step_infos:
-        for s_info in step_infos:
-            acc.record_step(info=s_info)
+    resolved_is_traffic = is_traffic
 
-    if info is not None:
-        acc.record_step(info=info)
+    if outcome_policy is None and resolved_is_traffic is None:
+        if any(_has_traffic_telemetry(step_info) for step_info in resolved_infos):
+            resolved_is_traffic = True
 
-    acc.reward = float(reward)
-    acc.length = int(length)
-    acc.terminated = bool(terminated)
-    acc.truncated = bool(truncated)
+    accumulator = EpisodeMetricsAccumulator(
+        outcome_policy=outcome_policy,
+        is_traffic=resolved_is_traffic,
+    )
+
+    for step_info in resolved_infos:
+        accumulator.record_step(info=step_info)
+
+    # Explicit episode-level fields are applied after replaying raw facts.
+    accumulator.reward = float(reward)
+    accumulator.length = int(length)
+    accumulator.terminated = bool(terminated)
+    accumulator.truncated = bool(truncated)
 
     if had_collision is not None:
-        acc.has_collision_info = True
-        acc.had_collision = bool(had_collision)
+        accumulator.has_collision_info = True
+
+        # Never erase a collision observed on an actual step.
+        if had_collision:
+            accumulator.had_collision = True
 
     if had_success is not None:
-        acc.has_success_info = True
-        acc.had_success = bool(had_success)
-        acc.explicit_success = bool(had_success)
+        accumulator.has_success_info = True
+        accumulator.had_success = bool(had_success)
+        accumulator.explicit_success = bool(had_success)
 
     if had_overflow is not None:
-        acc.has_overflow_info = True
-        acc.had_overflow = bool(had_overflow)
+        accumulator.has_overflow_info = True
 
-    return acc.finish(additional_metrics=additional_metrics)
+        # Overflow is monotonic; an explicit False cannot erase an observed
+        # overflow from the episode trace.
+        if had_overflow:
+            accumulator.had_overflow = True
+
+    return accumulator.finish(
+        additional_metrics=additional_metrics,
+    )
 
 
 __all__ = [
