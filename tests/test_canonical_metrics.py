@@ -2001,3 +2001,273 @@ def test_builtin_outcome_policies_reject_episode_state() -> None:
     for policy in (DefaultOutcomePolicy(), TrafficOutcomePolicy()):
         with pytest.raises(AttributeError):
             policy.had_overflow = True  # type: ignore[attr-defined]
+
+
+def test_extract_episode_metrics_arbitrary_telemetry_payloads() -> None:
+    """Arbitrary telemetry payloads (e.g. NumPy arrays) do not raise equality errors."""
+    from adaptive_rl.metrics import extract_episode_metrics
+
+    # 1. Terminal mapping containing a multi-element NumPy array
+    terminal_with_array = {
+        "success": True,
+        "queue_lengths": np.array([2, 1, 0]),
+    }
+    m1 = extract_episode_metrics(
+        reward=5.0,
+        length=1,
+        terminated=False,
+        truncated=True,
+        info=terminal_with_array,
+    )
+    assert m1.success is True
+    assert np.array_equal(m1.additional_metrics["queue_lengths"], np.array([2, 1, 0]))
+
+    # 2. Nested non-scalar telemetry mapping containing NumPy arrays
+    terminal_nested = {
+        "success": True,
+        "nested": {
+            "values": np.array([1, 2, 3]),
+        },
+    }
+    m2 = extract_episode_metrics(
+        reward=2.5,
+        length=1,
+        terminated=True,
+        truncated=False,
+        info=terminal_nested,
+    )
+    assert m2.success is True
+    assert "nested" in m2.additional_metrics
+
+    # 3. Multi-step episode where step_infos and info contain distinct NumPy array objects
+    step1 = {"step": 1, "state": np.array([0.1, 0.2])}
+    step2 = {"step": 2, "success": True, "state": np.array([0.3, 0.4])}
+    m3 = extract_episode_metrics(
+        reward=10.0,
+        length=2,
+        terminated=True,
+        truncated=False,
+        info=step2,
+        step_infos=[step1, step2],
+    )
+    assert m3.success is True
+    assert m3.length == 2
+
+    # 4. Caller provides separate, non-identical dict with numpy array as info
+    step_prefix = [{"step": 1, "obs": np.array([1.0, 2.0])}]
+    step_terminal = {"step": 2, "success": True, "obs": np.array([3.0, 4.0])}
+    m4 = extract_episode_metrics(
+        reward=1.0,
+        length=2,
+        terminated=True,
+        truncated=False,
+        info=step_terminal,
+        step_infos=step_prefix,
+    )
+    assert m4.success is True
+    assert m4.length == 2
+
+
+def test_extract_episode_metrics_terminal_identity_deduplication() -> None:
+    """Terminal info identity deduplication preserves canonical semantics without mutation."""
+    from adaptive_rl.metrics import _resolve_episode_step_infos, extract_episode_metrics
+
+    terminal = {"success": True, "collision": False}
+    prefix = [{"collision": True}, {"collision": False}]
+
+    # Case A: step_infos=[terminal], info=terminal using SAME object -> recorded once
+    step_infos_single = [terminal]
+    resolved_single = _resolve_episode_step_infos(info=terminal, step_infos=step_infos_single)
+    assert len(resolved_single) == 1
+    assert resolved_single[0] is terminal
+
+    m_single = extract_episode_metrics(
+        reward=1.0,
+        length=1,
+        terminated=True,
+        truncated=False,
+        info=terminal,
+        step_infos=step_infos_single,
+    )
+    assert m_single.success is True
+    assert m_single.collision is False
+
+    # Case B: step_infos=[prefix], info=terminal -> terminal must be appended once
+    step_infos_prefix = list(prefix)
+    resolved_prefix = _resolve_episode_step_infos(info=terminal, step_infos=step_infos_prefix)
+    assert len(resolved_prefix) == 3
+    assert resolved_prefix[-1] is terminal
+
+    m_prefix = extract_episode_metrics(
+        reward=3.0,
+        length=3,
+        terminated=True,
+        truncated=False,
+        info=terminal,
+        step_infos=step_infos_prefix,
+    )
+    # Collision in prefix overrides success in terminal
+    assert m_prefix.collision is True
+    assert m_prefix.success is False
+    assert m_prefix.length == 3
+
+    # Case C: caller sequence is not mutated
+    original_trace = [prefix[0], prefix[1]]
+    _resolve_episode_step_infos(info=terminal, step_infos=original_trace)
+    assert len(original_trace) == 2
+
+
+def test_resolve_step_infos_numpy_equality_would_crash() -> None:
+    """Prove that dict-equality deduplication crashes on NumPy telemetry.
+
+    This test explicitly demonstrates the bug that existed when
+    _resolve_episode_step_infos used ``dict(resolved[-1]) == dict(info)``
+    instead of identity-based deduplication.  The ValueError is the
+    exact failure mode reported in PR #116.
+    """
+    from adaptive_rl.metrics import _resolve_episode_step_infos
+
+    # Two structurally identical but distinct dict objects containing
+    # multi-element NumPy arrays.  dict-equality comparison raises
+    # ValueError because NumPy element-wise == returns an array whose
+    # truth value is ambiguous.
+    step = {"success": True, "queue_lengths": np.array([2, 1, 0])}
+    terminal = {"success": True, "queue_lengths": np.array([2, 1, 0])}
+
+    # Prove the old comparison would raise.
+    with pytest.raises(ValueError, match="ambiguous"):
+        dict(step) == dict(terminal)  # noqa: B015
+
+    # The fixed implementation must NOT raise.
+    resolved = _resolve_episode_step_infos(info=terminal, step_infos=[step])
+    # step and terminal are distinct objects, so terminal is appended.
+    assert len(resolved) == 2
+    assert resolved[0] is step
+    assert resolved[1] is terminal
+
+    # Same object path: no duplication, no crash.
+    resolved_same = _resolve_episode_step_infos(info=step, step_infos=[step])
+    assert len(resolved_same) == 1
+    assert resolved_same[0] is step
+
+
+def test_extract_episode_metrics_numpy_terminal_separate_objects() -> None:
+    """End-to-end extraction with NumPy telemetry and separate info/step_infos objects.
+
+    This exercises the full canonical extraction path with the exact
+    scenario that triggered the ValueError before the identity fix.
+    """
+    # Use non-traffic keys to avoid automatic TrafficOutcomePolicy detection,
+    # which would override success semantics.
+    step_info = {
+        "success": False,
+        "sensor_readings": np.array([5, 3, 1]),
+    }
+    terminal_info = {
+        "success": True,
+        "sensor_readings": np.array([2, 1, 0]),
+    }
+
+    m = extract_episode_metrics(
+        reward=10.0,
+        length=2,
+        terminated=True,
+        truncated=False,
+        info=terminal_info,
+        step_infos=[step_info],
+    )
+    assert m.success is True
+    assert m.length == 2
+    assert m.reward == 10.0
+    assert np.array_equal(m.additional_metrics["sensor_readings"], np.array([2, 1, 0]))
+
+
+def test_extract_episode_metrics_complex_arbitrary_telemetry() -> None:
+    """Terminal-info resolution handles complex heterogeneous telemetry.
+
+    Covers: lists, tuples, nested dicts, NumPy arrays, NumPy scalar values.
+    None of these types should cause the resolution or extraction to crash.
+    """
+    complex_terminal = {
+        "success": True,
+        "list_data": [1, 2, 3],
+        "tuple_data": (4.0, 5.0),
+        "nested_dict": {
+            "inner_array": np.array([10, 20, 30]),
+            "inner_scalar": np.float64(3.14),
+        },
+        "array_2d": np.array([[1, 2], [3, 4]]),
+        "np_int": np.int32(42),
+        "np_bool": np.bool_(True),
+    }
+
+    # info-only extraction
+    m1 = extract_episode_metrics(
+        reward=7.0,
+        length=1,
+        terminated=True,
+        truncated=False,
+        info=complex_terminal,
+    )
+    assert m1.success is True
+    assert m1.additional_metrics["list_data"] == [1, 2, 3]
+    assert m1.additional_metrics["tuple_data"] == (4.0, 5.0)
+    assert np.array_equal(
+        m1.additional_metrics["nested_dict"]["inner_array"],
+        np.array([10, 20, 30]),
+    )
+    assert m1.additional_metrics["nested_dict"]["inner_scalar"] == pytest.approx(3.14)
+    assert np.array_equal(
+        m1.additional_metrics["array_2d"],
+        np.array([[1, 2], [3, 4]]),
+    )
+    assert m1.additional_metrics["np_int"] == 42
+    assert m1.additional_metrics["np_bool"] is True or m1.additional_metrics["np_bool"] == True  # noqa: E712
+
+    # step_infos + info with complex telemetry (distinct objects)
+    prefix = [{"step": 0, "readings": np.array([0.1, 0.2, 0.3])}]
+    m2 = extract_episode_metrics(
+        reward=5.0,
+        length=2,
+        terminated=True,
+        truncated=False,
+        info=complex_terminal,
+        step_infos=prefix,
+    )
+    assert m2.success is True
+    assert m2.length == 2
+
+    # step_infos + info with same complex object
+    full_trace = [prefix[0], complex_terminal]
+    m3 = extract_episode_metrics(
+        reward=5.0,
+        length=2,
+        terminated=True,
+        truncated=False,
+        info=complex_terminal,
+        step_infos=full_trace,
+    )
+    assert m3.success is True
+    assert m3.length == 2
+
+
+def test_resolve_step_infos_info_only() -> None:
+    """When only info is provided, it becomes the single episode step."""
+    from adaptive_rl.metrics import _resolve_episode_step_infos
+
+    terminal = {"success": True, "value": 42}
+    resolved = _resolve_episode_step_infos(info=terminal, step_infos=None)
+    assert len(resolved) == 1
+    assert resolved[0] is terminal
+
+
+def test_resolve_step_infos_step_infos_only() -> None:
+    """When only step_infos is provided, it is returned as the complete trace."""
+    from adaptive_rl.metrics import _resolve_episode_step_infos
+
+    steps = [{"a": 1}, {"b": 2}, {"success": True}]
+    resolved = _resolve_episode_step_infos(info=None, step_infos=steps)
+    assert len(resolved) == 3
+    # Ordering preserved.
+    assert resolved[0]["a"] == 1
+    assert resolved[2]["success"] is True
