@@ -42,8 +42,10 @@ class ExperimentMetadata:
         actual_timesteps: Timesteps actually executed.
         episodes_completed: Number of episodes that terminated during training.
         mean_reward: Rolling mean episodic reward at end of training.
-        success_rate: Fraction of defined episodes that ended in success (None if undefined).
-        collision_rate: Fraction of defined episodes that ended in collision (None if undefined).
+        success_rate: Fraction of defined episodes that ended in success. None means
+            no valid success observations; 0.0 is a measured zero rate.
+        collision_rate: Fraction of defined episodes that ended in collision. None means
+            no valid collision observations; 0.0 is a measured zero rate.
         final_model_path: Absolute path to saved final model weights.
         checkpoint_paths: List of intermediate checkpoint paths.
         config_snapshot: Full serialized ExperimentConfig.
@@ -64,7 +66,6 @@ class ExperimentMetadata:
     actual_timesteps: int
     episodes_completed: int
     mean_reward: float
-    # None means the metric was unavailable/undefined.
     success_rate: Optional[float] = None
     collision_rate: Optional[float] = None
     final_model_path: str = ""
@@ -114,7 +115,11 @@ class ExperimentMetadata:
 
 @dataclass
 class EpisodeRecord:
-    """Per-episode training outcome record."""
+    """Per-episode training outcome record.
+
+    ``None`` means the outcome was unavailable, while ``False`` and ``True``
+    represent explicitly observed negative and positive outcomes.
+    """
 
     episode: int
     reward: float
