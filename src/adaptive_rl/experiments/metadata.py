@@ -64,6 +64,7 @@ class ExperimentMetadata:
     actual_timesteps: int
     episodes_completed: int
     mean_reward: float
+    # None means the metric was unavailable/undefined.
     success_rate: Optional[float] = None
     collision_rate: Optional[float] = None
     final_model_path: str = ""
@@ -118,6 +119,11 @@ class EpisodeRecord:
     episode: int
     reward: float
     length: int
+
+    # Nullable tri-state outcome:
+    # None = unavailable
+    # False = explicitly negative
+    # True = explicitly positive
     success: Optional[bool] = None
     collision: Optional[bool] = None
     timestep: int = 0
