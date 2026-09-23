@@ -16,6 +16,17 @@ from adaptive_rl.evaluation.seeding import (
     derive_planner_seed,
     generate_evaluation_seeds,
 )
+from adaptive_rl.evaluation.shift_benchmark import (
+    RECOVERY_DEFINITION,
+    SHIFT_BENCHMARK_SCHEMA_VERSION,
+    DistributionShiftBenchmarkSpec,
+    ScenarioGaps,
+    ScenarioResult,
+    ShiftBenchmarkReport,
+    ShiftScenario,
+    compute_scenario_gaps,
+    load_shift_benchmark_config,
+)
 from adaptive_rl.metrics import (
     EpisodeMetrics as EpisodeMetrics,
 )
@@ -34,11 +45,20 @@ __all__ = [
     "Evaluator",
     "EvaluationMetrics",
     "EvaluationScenario",
+    "DistributionShiftBenchmarkSpec",
     "GeneralizationDistribution",
     "GeneralizationEvaluator",
     "GeneralizationReport",
+    "RECOVERY_DEFINITION",
+    "SHIFT_BENCHMARK_SCHEMA_VERSION",
+    "ScenarioGaps",
+    "ScenarioResult",
+    "ShiftBenchmarkReport",
+    "ShiftScenario",
     "StandardizedExperimentMetrics",
+    "compute_scenario_gaps",
     "derive_evaluation_seed",
     "derive_planner_seed",
     "generate_evaluation_seeds",
+    "load_shift_benchmark_config",
 ]
