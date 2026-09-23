@@ -118,6 +118,7 @@ For planner experiments (A*), `training_timesteps` is `null`.
 | `max_reward` | float | Maximum episodic reward |
 | `success_rate` | float | Fraction of successful episodes [0, 1] |
 | `collision_rate` | float | Fraction of collision episodes [0, 1] |
+| `recovery_time` | Optional[float] | Mean recovery time in environment steps over episodes with a measured recovery (null when unavailable/censored everywhere; never 0.0 as a placeholder) |
 | `mean_episode_length` | float | Mean steps per episode |
 | `std_episode_length` | float | Episode length standard deviation |
 
@@ -237,7 +238,83 @@ Reported statistics:
 
 ---
 
-## 8. Logged Experiments
+## 8. Controlled Distribution-Shift Benchmark (Issue #105)
+
+The distribution-shift benchmark measures policy robustness under explicit
+environment distribution shifts — not just unseen seeds with identical physics.
+**The policy is trained only on TRAIN conditions and evaluated without any
+adaptation on TEST conditions** (no per-test fine-tuning; a single frozen
+policy, verified by an identical policy fingerprint across all scenarios).
+
+### 8.1 Train/Test Protocol
+
+1. Build the TRAIN environment from shared base parameters + TRAIN overrides.
+2. Train the RL policy exclusively on TRAIN (training seeds drawn only from the
+   TRAIN seed set; a post-training audit raises on any test-seed observation).
+3. Freeze the policy (SHA-256 fingerprint of the policy weights is recorded).
+4. Evaluate the frozen policy on independent TRAIN/TEST environments with
+   disjoint, explicitly recorded seed sets.
+5. Record effective environment parameters per scenario and compute TEST-vs-TRAIN
+   generalization gaps.
+
+```bash
+adaptive-rl benchmark-shifts --config configs/drone_distribution_shift.yaml
+```
+
+### 8.2 Scenario Definitions (`configs/drone_distribution_shift.yaml`)
+
+| Scenario | Static obstacles | Dynamic obstacles | Wind (steady / gust σ) | Hidden disturbance |
+|:---------|:-----------------|:------------------|:-----------------------|:-------------------|
+| TRAIN | 8 | 0 | low: 0.5 m/s / 0.15 | 0.0 |
+| TEST-A | 10 | 0 | low: 0.5 m/s / 0.15 | 0.0 |
+| TEST-B | 12 | 0 | moderate: 4.0 m/s / 0.6 | 0.0 |
+| TEST-C | 8 | 4 | moderate: 4.0 m/s / 0.6 | 0.0 |
+| TEST-D | 8 | 0 | low: 0.5 m/s / 0.15 | high: 6.0 |
+
+Wind force scale: `F = linear_damping * wind` with `linear_damping = 0.05`
+(max acceleration 4.0 m/s²), so moderate wind is a 0.2 m/s² persistent bias.
+`disturbance_strength` is the per-axis stationary std (m/s of equivalent wind)
+of a hidden OU process excluded from wind observations. Train seeds are
+`[1000, 1015)`; every TEST scenario uses the shared paired block `[2000, 2015)`.
+
+### 8.3 Metric and Recovery-Time Definitions
+
+Per scenario: `success_rate`, `collision_rate`, `mean_reward`, `recovery_time`
+(environment steps), episode count, truncation rate. Recovery is defined by the
+environment-step telemetry contract (`disturbance_active`,
+`disturbance_onset_step`, `recovered`, `episode_recovery_time`, ...):
+
+- Event: transient magnitude `||gust + injected||` ≥ `disturbance_event_factor`
+  (1.5) × transient RMS scale. Onset: first step at/above threshold (no overlap).
+- Recovery: magnitude below threshold AND speed within `recovery_speed_tolerance`
+  (1.0 m/s) of the onset speed for `recovery_hold_steps` (5) consecutive steps.
+- `recovery_time = recovery_step − onset_step` (≥ 1; never wall-clock).
+- Still open at episode end → censored (counted, never averaged, never 0).
+- Zero events in an episode → unavailable (null, never 0.0).
+
+### 8.4 Generalization-Gap Formulas
+
+Positive gap always means TEST performed worse than TRAIN:
+
+- `success_gap = train_success_rate − test_success_rate`
+- `reward_gap = train_mean_reward − test_mean_reward`
+- `collision_gap = test_collision_rate − train_collision_rate`
+- `recovery_gap = test_recovery_time − train_recovery_time`
+
+Unavailable inputs propagate null. No composite score is produced.
+
+### 8.5 Output Artifact
+
+`experiments/results/distribution_shift/<name>_shift_report.json` (schema
+version `1.0`) contains: experiment/algorithm/training provenance (timesteps,
+seed sets, sampled training seeds, contamination audit, policy fingerprint),
+environment provenance, config SHA-256, scenario definitions with overrides,
+effective environment parameters, per-scenario metrics, per-scenario gaps, and
+the recovery definition. The report is sufficient to reproduce the evaluation.
+
+---
+
+## 9. Logged Experiments
 
 The following table records experiments that have been run during development.
 Only actual runs are listed here — no fabricated results.

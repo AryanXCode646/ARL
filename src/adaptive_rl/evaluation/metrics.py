@@ -35,6 +35,19 @@ class EvaluationMetrics(BaseModel):
         the metric was not tracked or unavailable (None) are excluded from both
         numerator and denominator. If a metric is unavailable across all episodes
         (all None), the rate evaluates to None.
+
+    Recovery-Time Aggregation Semantics:
+        `recovery_time` is the mean of per-episode recovery times over episodes
+        with a *measured* recovery only. Three episode classes are distinguished
+        (counts recorded under `additional_metrics`):
+        - measured (`recovery_episodes_measured`): at least one disturbance event
+          completed with a valid recovery; contributes its mean completed
+          recovery time (environment steps) to the aggregate;
+        - unavailable (`recovery_episodes_unavailable`): no disturbance event
+          occurred, so recovery is undefined (never 0.0);
+        - censored (`recovery_episodes_censored`): disturbance events occurred
+          but none recovered before episode end; excluded from the mean, never 0.0.
+        If no episode measured a recovery, `recovery_time` is None.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -64,6 +77,13 @@ class EvaluationMetrics(BaseModel):
     )
     truncation_rate: Optional[float] = Field(
         None, ge=0.0, le=1.0, description="Fraction of episodes reaching max step limit"
+    )
+    recovery_time: Optional[float] = Field(
+        None,
+        ge=0.0,
+        description="Mean recovery time in environment steps over episodes with a measured "
+        "recovery (None when recovery is unavailable or censored in every episode; never 0.0 "
+        "as a placeholder)",
     )
     mean_episode_length: float = Field(..., ge=0.0, description="Mean step count per episode")
     std_episode_length: float = Field(
