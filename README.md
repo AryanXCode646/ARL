@@ -567,13 +567,17 @@ adaptive-rl generalization --config configs/generalization_navigation.yaml --tra
 ### Controlled Distribution-Shift Benchmark (Issue #105)
 
 Seed generalization keeps physics fixed; the distribution-shift benchmark varies
-the physics. A PPO/SAC policy is **trained only on TRAIN conditions** (8 static
-obstacles, low wind) and evaluated **without adaptation** on four shifted TEST
-distributions (denser obstacles, moderate wind, dynamic obstacles, high hidden
-disturbance), measuring success, collision, reward, recovery time (environment
-steps via an explicit disturbance/recovery telemetry contract), and TEST-vs-TRAIN
-generalization gaps. Train/test seed sets are strictly disjoint and a single
-frozen policy (weight fingerprint) is evaluated across all scenarios.
+the physics. A PPO/SAC policy is **trained only on TRAIN conditions** (nominal
+static baseline: 8 obstacles, low wind) and evaluated **without adaptation** on
+four shifted TEST distributions (obstacle-density; density + moderate-wind
+compound; dynamic-obstacle + wind compound; high hidden disturbance), measuring
+success, collision, reward, event-weighted recovery time (environment steps via
+an explicit disturbance/recovery telemetry contract with completion/censoring
+rates), and TEST-vs-TRAIN generalization gaps (recovery time gaps are suppressed
+whenever either side has censored events). Train/test seed sets are strictly
+disjoint, one fixed event threshold (0.7 m/s) applies to every scenario, and a
+single frozen policy (weight fingerprint) is evaluated across all scenarios with
+raw per-seed records stored for independent recomputation.
 
 ```bash
 # Run the Issue #105 drone distribution-shift benchmark (TRAIN → TEST-A/B/C/D)
@@ -605,7 +609,7 @@ To maintain the highest standards of research integrity, every capability in Ada
 | Standardized Metrics | Metrics | **Implemented & Tested** | Null vs zero separation, JSON/CSV round-trip, traffic aggregation (`test_standardized_metrics.py`) |
 | Seeding Protocol | Reproducibility | **Implemented & Tested** | Deterministic seed derivation, seed=0 preservation, manifest audit (`test_evaluation_seeding.py`) |
 | Disjoint Generalization | Benchmark | **Implemented & Tested** | Zero train/test seed overlap assertion, generalization gap calculation (`test_generalization.py`) |
-| Controlled Distribution Shift (Issue #105) | Benchmark | **Implemented & Tested** | Train-once-on-TRAIN, frozen-policy eval on TEST-A/B/C/D with real wind/dynamic/disturbance shifts, step-based recovery time, directional gaps (`test_distribution_shift_benchmark.py`) |
+| Controlled Distribution Shift (Issue #105) | Benchmark | **Implemented & Tested** | Train-once-on-TRAIN, frozen-policy eval on TEST-A/B/C/D with real wind/dynamic/disturbance shifts, fixed event threshold, event-weighted censoring-aware recovery, directional gaps, per-episode records (`test_distribution_shift_benchmark.py`) |
 | Long-Horizon Convergence (>100k steps) | Research | **Not yet validated** | Training loops are functional; systematic scaling benchmarks require compute allocations |
 | Formal Asymptotic Optimality of RRT* | Algorithm | **Not yet validated** | Current implementation uses a fixed connection radius approximation; not shrinking radius |
 

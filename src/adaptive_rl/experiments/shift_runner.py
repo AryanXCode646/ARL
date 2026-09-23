@@ -10,8 +10,12 @@ Protocol enforced by `DistributionShiftBenchmarkRunner`:
 4. The frozen trained policy (never fine-tuned or adapted) is evaluated on
    independent TRAIN/TEST scenario environments with explicitly recorded,
    mutually disjoint train/test seed sets.
-5. Effective environment parameters and a policy fingerprint are recorded per
-   scenario, so a reader can verify exactly what was evaluated with what model.
+5. Effective environment parameters, a policy fingerprint, a censoring-aware
+   recovery summary, and raw per-seed episode records are stored per scenario,
+   so a reader can verify exactly what was evaluated and recompute every
+   aggregate from the artifact.
+6. Recovery time gaps are reported only when both sides fully recovered
+   (100% completion); otherwise the completion/censoring gaps carry the signal.
 """
 
 from __future__ import annotations
@@ -28,6 +32,8 @@ from adaptive_rl.evaluation.metrics import EvaluationMetrics
 from adaptive_rl.evaluation.shift_benchmark import (
     SHIFT_BENCHMARK_SCHEMA_VERSION,
     DistributionShiftBenchmarkSpec,
+    EpisodeBenchmarkRecord,
+    RecoverySummary,
     ScenarioResult,
     ShiftBenchmarkReport,
     ShiftScenario,
@@ -35,6 +41,7 @@ from adaptive_rl.evaluation.shift_benchmark import (
 )
 from adaptive_rl.experiments.provenance import collect_environment_provenance
 from adaptive_rl.experiments.runner import BaseExperimentRunner
+from adaptive_rl.metrics import EpisodeMetrics
 from adaptive_rl.training.trainer import PPOTrainer, SACTrainer
 
 
@@ -78,11 +85,36 @@ class DistributionShiftBenchmarkRunner(BaseExperimentRunner):
     def _scenario_env_params(
         self, config: ExperimentConfig, scenario: ShiftScenario
     ) -> Dict[str, Any]:
-        """Merge base parameters with scenario overrides and inject max_steps."""
-        params = self.spec.scenario_environment_parameters(scenario)
+        """Merge base parameters, the benchmark fixed threshold, overrides, max_steps."""
+        params = self.spec.effective_scenario_parameters(scenario)
         if "max_steps" not in params:
             params["max_steps"] = config.environment.max_steps
         return params
+
+    @staticmethod
+    def _episode_records(
+        scenario: ShiftScenario, episode_metrics: List[EpisodeMetrics]
+    ) -> List[EpisodeBenchmarkRecord]:
+        """Build raw per-seed records aligned with evaluation order (no re-evaluation)."""
+        records: List[EpisodeBenchmarkRecord] = []
+        for seed, m in zip([int(s) for s in scenario.seeds], episode_metrics):
+            extra = m.additional_metrics if isinstance(m.additional_metrics, dict) else {}
+            records.append(
+                EpisodeBenchmarkRecord(
+                    seed=seed,
+                    reward=float(m.reward),
+                    length=int(m.length),
+                    success=m.success,
+                    collision=m.collision,
+                    terminated=bool(m.terminated),
+                    truncated=bool(m.truncated),
+                    recovery_times=[int(t) for t in (extra.get("recovery_times") or [])],
+                    recovery_events=int(extra.get("recovery_events") or 0),
+                    recovery_completed=int(extra.get("recovery_completed") or 0),
+                    recovery_censored=int(extra.get("recovery_censored") or 0),
+                )
+            )
+        return records
 
     def run(self, config: ExperimentConfig) -> ShiftBenchmarkReport:
         """Execute the full benchmark: train on TRAIN, evaluate on all scenarios.
@@ -100,7 +132,8 @@ class DistributionShiftBenchmarkRunner(BaseExperimentRunner):
                 during evaluation.
         """
         # 0. Fail fast on invalid scenario environments before any training.
-        self.spec.validate_environments()
+        # Preflight constructs, resets, and steps every scenario environment.
+        self.spec.validate_environments(max_steps=config.environment.max_steps)
 
         train_scenario = self.spec.train_scenario
         train_params = self._scenario_env_params(config, train_scenario)
@@ -166,6 +199,7 @@ class DistributionShiftBenchmarkRunner(BaseExperimentRunner):
                     scenario.seeds,
                     deterministic=config.evaluation.deterministic,
                 )
+                records = self._episode_records(scenario, evaluator.last_episode_metrics)
 
                 current_fingerprint = policy_fingerprint(trainer.algorithm)
                 if current_fingerprint != frozen_fingerprint:
@@ -198,6 +232,8 @@ class DistributionShiftBenchmarkRunner(BaseExperimentRunner):
                         environment_overrides=dict(scenario.environment_overrides),
                         effective_environment_parameters={str(k): v for k, v in effective.items()},
                         metrics=metrics,
+                        recovery=RecoverySummary.from_metrics(metrics),
+                        episodes=records,
                         gaps=gaps,
                         policy_fingerprint=current_fingerprint,
                     )

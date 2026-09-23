@@ -821,6 +821,8 @@ def run_shift_benchmark_command(
             succ = f"{m.success_rate * 100:.1f}%" if m.success_rate is not None else "N/A"
             coll = f"{m.collision_rate * 100:.1f}%" if m.collision_rate is not None else "N/A"
             rec = f"{m.recovery_time:.1f}" if m.recovery_time is not None else "N/A"
+            if m.recovery_completion_rate is not None:
+                rec += f" [c={m.recovery_completion_rate:.2f}]"
             if res.gaps is None:
                 gap = "-"
             else:
@@ -830,8 +832,12 @@ def run_shift_benchmark_command(
                 parts.append(f"dR={res.gaps.reward_gap:+.1f}")
                 if res.gaps.collision_gap is not None:
                     parts.append(f"dC={res.gaps.collision_gap:+.2f}")
-                if res.gaps.recovery_gap is not None:
-                    parts.append(f"dRec={res.gaps.recovery_gap:+.1f}")
+                if res.gaps.recovery_time_gap is not None:
+                    parts.append(f"dRecT={res.gaps.recovery_time_gap:+.1f}")
+                else:
+                    parts.append("dRecT=n/a(cens)")
+                if res.gaps.recovery_completion_gap is not None:
+                    parts.append(f"dRecC={res.gaps.recovery_completion_gap:+.2f}")
                 gap = " ".join(parts)
             table.add_row(
                 res.scenario_name,

@@ -263,19 +263,30 @@ adaptive-rl benchmark-shifts --config configs/drone_distribution_shift.yaml
 
 ### 8.2 Scenario Definitions (`configs/drone_distribution_shift.yaml`)
 
-| Scenario | Static obstacles | Dynamic obstacles | Wind (steady / gust σ) | Hidden disturbance |
-|:---------|:-----------------|:------------------|:-----------------------|:-------------------|
-| TRAIN | 8 | 0 | low: 0.5 m/s / 0.15 | 0.0 |
-| TEST-A | 10 | 0 | low: 0.5 m/s / 0.15 | 0.0 |
-| TEST-B | 12 | 0 | moderate: 4.0 m/s / 0.6 | 0.0 |
-| TEST-C | 8 | 4 | moderate: 4.0 m/s / 0.6 | 0.0 |
-| TEST-D | 8 | 0 | low: 0.5 m/s / 0.15 | high: 6.0 |
+Scenarios are controlled combinations, not single-factor isolations (except TEST-A):
+
+| Scenario | Shift type | Static obstacles | Dynamic obstacles | Wind (steady / gust σ) | Hidden disturbance |
+|:---------|:-----------|:-----------------|:------------------|:-----------------------|:-------------------|
+| TRAIN | Nominal/static baseline | 8 | 0 | low: 0.5 m/s / 0.15 | 0.0 |
+| TEST-A | Obstacle-density shift | 10 | 0 | low: 0.5 m/s / 0.15 | 0.0 |
+| TEST-B | Obstacle-density + moderate-wind compound shift | 12 | 0 | moderate: 4.0 m/s / 0.6 | 0.0 |
+| TEST-C | Dynamic-obstacle + moderate-wind compound shift | 8 | 4 | moderate: 4.0 m/s / 0.6 | 0.0 |
+| TEST-D | High hidden-disturbance shift | 8 | 0 | low: 0.5 m/s / 0.15 | high: 6.0 |
 
 Wind force scale: `F = linear_damping * wind` with `linear_damping = 0.05`
 (max acceleration 4.0 m/s²), so moderate wind is a 0.2 m/s² persistent bias.
 `disturbance_strength` is the per-axis stationary std (m/s of equivalent wind)
 of a hidden OU process excluded from wind observations. Train seeds are
 `[1000, 1015)`; every TEST scenario uses the shared paired block `[2000, 2015)`.
+Do not claim TEST-B/C/D isolate individual causal factors: several environment
+parameters change simultaneously by design (Issue #105 prescribes these
+combinations).
+
+Event detection is comparable across scenarios: a single fixed
+`recovery_event_threshold` (0.7 m/s, TRAIN-calibrated) is passed to every
+scenario as `disturbance_event_threshold_override` and recorded per scenario
+with source `benchmark_override`. The event definition is fixed; only the
+disturbance distribution shifts.
 
 ### 8.3 Metric and Recovery-Time Definitions
 
@@ -284,33 +295,55 @@ Per scenario: `success_rate`, `collision_rate`, `mean_reward`, `recovery_time`
 environment-step telemetry contract (`disturbance_active`,
 `disturbance_onset_step`, `recovered`, `episode_recovery_time`, ...):
 
-- Event: transient magnitude `||gust + injected||` ≥ `disturbance_event_factor`
-  (1.5) × transient RMS scale. Onset: first step at/above threshold (no overlap).
+- Event: transient magnitude `||gust + injected||` ≥ the fixed
+  `recovery_event_threshold` shared by all scenarios. Onset: first step
+  at/above threshold (no overlap).
 - Recovery: magnitude below threshold AND speed within `recovery_speed_tolerance`
   (1.0 m/s) of the onset speed for `recovery_hold_steps` (5) consecutive steps.
 - `recovery_time = recovery_step − onset_step` (≥ 1; never wall-clock).
 - Still open at episode end → censored (counted, never averaged, never 0).
 - Zero events in an episode → unavailable (null, never 0.0).
+- Aggregation is **event-weighted**: `recovery_time` pools every completed event
+  time across episodes (episodes with many events weigh proportionally more).
+  Reported alongside: total/completed/censored event counts, completion rate,
+  and censoring rate.
+- **Conditionality warning**: `recovery_time` is conditional on recovery and must
+  never be read as an unconditional robustness score. A heavily censored scenario
+  can show a low conditional mean precisely because its hardest events never
+  recovered — always interpret it jointly with the completion/censoring rates.
 
 ### 8.4 Generalization-Gap Formulas
 
-Positive gap always means TEST performed worse than TRAIN:
+Success/reward/collision gaps keep the positive-means-TEST-worse convention:
 
 - `success_gap = train_success_rate − test_success_rate`
 - `reward_gap = train_mean_reward − test_mean_reward`
 - `collision_gap = test_collision_rate − train_collision_rate`
-- `recovery_gap = test_recovery_time − train_recovery_time`
+
+Recovery gaps are censoring-aware:
+
+- `recovery_time_gap = test_mean_completed − train_mean_completed`, defined
+  **only** when both sides recorded events and both completion rates are exactly
+  1.0; otherwise null, so a censored TEST can never look spuriously faster.
+- `recovery_completion_gap = train_completion_rate − test_completion_rate`
+  (positive = TEST recovers a smaller share of its events).
+- `recovery_censoring_gap = test_censoring_rate − train_censoring_rate`
+  (positive = TEST leaves a larger share unrecovered).
 
 Unavailable inputs propagate null. No composite score is produced.
 
 ### 8.5 Output Artifact
 
 `experiments/results/distribution_shift/<name>_shift_report.json` (schema
-version `1.0`) contains: experiment/algorithm/training provenance (timesteps,
+version `1.1`) contains: experiment/algorithm/training provenance (timesteps,
 seed sets, sampled training seeds, contamination audit, policy fingerprint),
 environment provenance, config SHA-256, scenario definitions with overrides,
-effective environment parameters, per-scenario metrics, per-scenario gaps, and
-the recovery definition. The report is sufficient to reproduce the evaluation.
+effective environment parameters (including the event threshold and its source),
+per-scenario metrics, per-scenario `recovery` summaries (total/completed/
+censored events, completion/censoring rates, event-weighted mean), raw
+per-seed `episodes` records (sufficient to recompute every aggregate),
+per-scenario gaps, and the recovery definition. The report is sufficient to
+reproduce and independently verify the evaluation.
 
 ---
 

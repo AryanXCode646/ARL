@@ -36,18 +36,26 @@ class EvaluationMetrics(BaseModel):
         numerator and denominator. If a metric is unavailable across all episodes
         (all None), the rate evaluates to None.
 
-    Recovery-Time Aggregation Semantics:
-        `recovery_time` is the mean of per-episode recovery times over episodes
-        with a *measured* recovery only. Three episode classes are distinguished
-        (counts recorded under `additional_metrics`):
+    Recovery-Time Aggregation Semantics (event-weighted, censoring-aware):
+        `recovery_time` is the mean over *completed recovery events* pooled across
+        all episodes (not a mean of per-episode means), so episodes with many
+        events contribute proportionally more. Three episode classes are
+        distinguished (counts recorded under `additional_metrics`):
         - measured (`recovery_episodes_measured`): at least one disturbance event
-          completed with a valid recovery; contributes its mean completed
-          recovery time (environment steps) to the aggregate;
+          completed with a valid recovery time in environment steps;
         - unavailable (`recovery_episodes_unavailable`): no disturbance event
           occurred, so recovery is undefined (never 0.0);
         - censored (`recovery_episodes_censored`): disturbance events occurred
           but none recovered before episode end; excluded from the mean, never 0.0.
-        If no episode measured a recovery, `recovery_time` is None.
+        Event-level accounting is first-class: `recovery_events` (total),
+        `recovery_completed_events`, `recovery_censored_events`,
+        `recovery_completion_rate` (completed/total, None when total is 0), and
+        `recovery_censoring_rate`. When the environment exposes no disturbance
+        telemetry at all, every recovery field stays None. If no event completed,
+        `recovery_time` is None. Because censored events are excluded from the
+        mean, `recovery_time` is explicitly conditional and must never be read
+        as an unconditional robustness score (see the shift-benchmark gap rule
+        that suppresses recovery time gaps under censoring).
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -81,9 +89,40 @@ class EvaluationMetrics(BaseModel):
     recovery_time: Optional[float] = Field(
         None,
         ge=0.0,
-        description="Mean recovery time in environment steps over episodes with a measured "
-        "recovery (None when recovery is unavailable or censored in every episode; never 0.0 "
-        "as a placeholder)",
+        description="Event-weighted mean completed recovery time in environment steps "
+        "(mean over completed recovery events pooled across episodes; None when no "
+        "event completed or recovery is unavailable; never 0.0 as a placeholder; "
+        "explicitly conditional on recovery, not an unconditional robustness score)",
+    )
+    recovery_events: Optional[int] = Field(
+        None,
+        ge=0,
+        description="Total disturbance events observed across episodes "
+        "(None when the environment exposes no disturbance telemetry)",
+    )
+    recovery_completed_events: Optional[int] = Field(
+        None,
+        ge=0,
+        description="Total disturbance events that completed with a valid recovery "
+        "(None when the environment exposes no disturbance telemetry)",
+    )
+    recovery_censored_events: Optional[int] = Field(
+        None,
+        ge=0,
+        description="Total disturbance events still open at episode end "
+        "(None when the environment exposes no disturbance telemetry)",
+    )
+    recovery_completion_rate: Optional[float] = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="Completed events / total events (None when total is 0 or telemetry absent)",
+    )
+    recovery_censoring_rate: Optional[float] = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="Censored events / total events (None when total is 0 or telemetry absent)",
     )
     mean_episode_length: float = Field(..., ge=0.0, description="Mean step count per episode")
     std_episode_length: float = Field(

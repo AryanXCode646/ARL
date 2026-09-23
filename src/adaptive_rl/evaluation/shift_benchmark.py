@@ -32,14 +32,16 @@ from adaptive_rl.evaluation.generalization import GeneralizationDistribution
 from adaptive_rl.evaluation.metrics import EvaluationMetrics
 
 #: Machine-readable version of the shift-benchmark schema and report format.
-SHIFT_BENCHMARK_SCHEMA_VERSION = "1.0"
+SHIFT_BENCHMARK_SCHEMA_VERSION = "1.1"
 
 #: Canonical statement of the recovery-time definition embedded in every report.
 RECOVERY_DEFINITION: Dict[str, Any] = {
     "metric": "recovery_time",
     "unit": "environment_steps",
     "disturbance_event": "transient wind magnitude ||gust + injected_disturbance|| "
-    "(m/s, steady wind excluded) reaching the per-scenario disturbance_event_threshold",
+    "(m/s, steady wind excluded) reaching the disturbance_event_threshold shared by "
+    "every benchmark scenario (fixed event definition; only the disturbance "
+    "distribution shifts)",
     "disturbance_onset": "first step at or above threshold while no event is active "
     "(events never overlap)",
     "recovery": "magnitude strictly below threshold AND drone speed within "
@@ -50,9 +52,18 @@ RECOVERY_DEFINITION: Dict[str, Any] = {
     "but never to a recovery-time mean and is never reported as 0",
     "unavailable": "episodes with zero disturbance events have undefined recovery "
     "(reported as null, never 0.0)",
-    "aggregation": "scenario recovery_time is the mean over measured episodes only; "
-    "per-episode class counts are stored as recovery_episodes_measured / "
-    "recovery_episodes_unavailable / recovery_episodes_censored",
+    "aggregation": "scenario recovery_time is the event-weighted mean over completed "
+    "recovery events pooled across episodes (episodes with many events weigh "
+    "proportionally more; per-episode means are NOT averaged). Event counts and "
+    "completion/censoring rates are reported alongside; per-episode class counts "
+    "are stored as recovery_episodes_measured / recovery_episodes_unavailable / "
+    "recovery_episodes_censored",
+    "conditionality_warning": "recovery_time is explicitly conditional on recovery. "
+    "It must never be read as an unconditional robustness score: a scenario with "
+    "heavy censoring can show a low conditional mean precisely because its hardest "
+    "events never recovered. Always interpret it jointly with completion_rate and "
+    "censoring_rate; recovery_time_gap is suppressed (null) whenever either side "
+    "has censored events",
     "telemetry_contract": [
         "disturbance_magnitude",
         "disturbance_threshold",
@@ -117,6 +128,11 @@ class DistributionShiftBenchmarkSpec(BaseModel):
     evaluation_deterministic: bool = Field(
         default=True, description="Whether scenario evaluation uses deterministic actions"
     )
+    recovery_event_threshold: Optional[float] = Field(
+        default=None,
+        description="Fixed disturbance-event threshold (m/s) shared by every scenario; "
+        "a scenario's explicit 'disturbance_event_threshold_override' wins if set",
+    )
 
     @model_validator(mode="after")
     def _validate_benchmark_structure(self) -> DistributionShiftBenchmarkSpec:
@@ -133,6 +149,16 @@ class DistributionShiftBenchmarkSpec(BaseModel):
         for s in self.scenarios:
             if not s.seeds:
                 raise ValueError(f"Scenario '{s.name}' must define a non-empty seed list")
+            if len(set(s.seeds)) != len(s.seeds):
+                duplicate_seeds = sorted({seed for seed in s.seeds if s.seeds.count(seed) > 1})
+                raise ValueError(
+                    f"Scenario '{s.name}' seeds must be unique, found duplicates: {duplicate_seeds}"
+                )
+        if self.recovery_event_threshold is not None and self.recovery_event_threshold <= 0.0:
+            raise ValueError(
+                "Benchmark recovery_event_threshold must be positive, "
+                f"got {self.recovery_event_threshold}"
+            )
         # Reuse the canonical disjoint-seed validation (raises on any overlap).
         GeneralizationDistribution(
             train_seeds=list(train[0].seeds),
@@ -175,19 +201,44 @@ class DistributionShiftBenchmarkSpec(BaseModel):
         params.update(dict(scenario.environment_overrides))
         return params
 
-    def validate_environments(self) -> Dict[str, Dict[str, Any]]:
-        """Trial-construct every scenario environment to fail fast on bad overrides.
+    def effective_scenario_parameters(self, scenario: ShiftScenario) -> Dict[str, Any]:
+        """Merge base parameters, the benchmark fixed event threshold, and overrides.
+
+        The benchmark-level ``recovery_event_threshold`` is injected as
+        ``disturbance_event_threshold_override`` so every scenario shares one event
+        definition; a scenario's own explicit
+        ``disturbance_event_threshold_override`` wins if set (documented override
+        precedence: scenario-specific beats benchmark-wide).
+        """
+        params = self.scenario_environment_parameters(scenario)
+        if (
+            self.recovery_event_threshold is not None
+            and "disturbance_event_threshold_override" not in scenario.environment_overrides
+        ):
+            params["disturbance_event_threshold_override"] = float(self.recovery_event_threshold)
+        return params
+
+    def validate_environments(self, max_steps: Optional[int] = None) -> Dict[str, Dict[str, Any]]:
+        """Preflight every scenario environment, including one real dynamics step.
 
         Instantiates each scenario with its effective parameters, performs one
-        reset, and closes it. Unsupported parameters raise a clear error naming
-        the offending scenario instead of failing mid-benchmark.
+        reset, executes one action-space-compatible step, validates the 5-element
+        Gymnasium result (observation inside the observation space, scalar reward,
+        boolean flags, dict info), and closes it. Any failure raises a clear error
+        naming the offending scenario instead of failing after PPO training starts.
+
+        Args:
+            max_steps: Optional episode step limit injected when the scenario
+                parameters do not define it (mirrors the benchmark runner).
 
         Returns:
             Mapping of scenario name to the effective parameter dict used.
         """
         effective: Dict[str, Dict[str, Any]] = {}
         for scenario in self.scenarios:
-            params = self.scenario_environment_parameters(scenario)
+            params = self.effective_scenario_parameters(scenario)
+            if max_steps is not None and "max_steps" not in params:
+                params["max_steps"] = max_steps
             try:
                 env = make_env(self.environment_name, **params)
             except RegistryError as err:
@@ -196,14 +247,48 @@ class DistributionShiftBenchmarkSpec(BaseModel):
                     f"'{self.environment_name}' with parameters {params}: {err}"
                 ) from err
             try:
-                env.reset(seed=int(scenario.seeds[0]))
-            except Exception as err:
+                try:
+                    obs, _ = env.reset(seed=int(scenario.seeds[0]))
+                    action = env.action_space.sample()
+                    step_result = env.step(action)
+                except Exception as err:
+                    raise ValueError(
+                        f"Scenario '{scenario.name}': environment reset/step failed with "
+                        f"parameters {params}: {err}"
+                    ) from err
+                if not isinstance(step_result, tuple) or len(step_result) != 5:
+                    raise ValueError(
+                        f"Scenario '{scenario.name}': step() must return a 5-element "
+                        f"Gymnasium tuple, got {type(step_result).__name__}"
+                    )
+                step_obs, reward, terminated, truncated, info = step_result
+                try:
+                    float(reward)
+                    bool(terminated)
+                    bool(truncated)
+                except (TypeError, ValueError) as err:
+                    raise ValueError(
+                        f"Scenario '{scenario.name}': invalid reward/flag types "
+                        f"(reward={reward!r}, terminated={terminated!r}, "
+                        f"truncated={truncated!r}): {err}"
+                    ) from err
+                if not isinstance(info, dict):
+                    raise ValueError(
+                        f"Scenario '{scenario.name}': step info must be a dict, "
+                        f"got {type(info).__name__}"
+                    )
+                try:
+                    obs_inside = bool(env.observation_space.contains(step_obs))
+                except Exception as err:
+                    raise ValueError(
+                        f"Scenario '{scenario.name}': observation-space check failed: {err}"
+                    ) from err
+                if not obs_inside:
+                    raise ValueError(
+                        f"Scenario '{scenario.name}': step observation outside observation_space"
+                    )
+            finally:
                 env.close()
-                raise ValueError(
-                    f"Scenario '{scenario.name}': environment reset failed with "
-                    f"parameters {params}: {err}"
-                ) from err
-            env.close()
             effective[scenario.name] = params
         return effective
 
@@ -211,13 +296,21 @@ class DistributionShiftBenchmarkSpec(BaseModel):
 class ScenarioGaps(BaseModel):
     """Generalization gaps of one TEST scenario relative to TRAIN.
 
-    Directionality convention (documented, uniform): a *positive* gap always means
-    the TEST scenario performed *worse* than TRAIN.
+    Directionality convention: a *positive* gap means the TEST scenario performed
+    *worse* than TRAIN — except recovery time, where censoring makes a bare mean
+    comparison unsafe (see below).
 
     - success_gap = train_success_rate - test_success_rate (higher success better)
     - reward_gap = train_mean_reward - test_mean_reward (higher reward better)
     - collision_gap = test_collision_rate - train_collision_rate (lower collision better)
-    - recovery_gap = test_recovery_time - train_recovery_time (lower recovery better)
+    - recovery_time_gap = test_mean_completed_recovery_time - train_... (lower better),
+      defined ONLY when both sides recorded at least one event and both recovery
+      completion rates are exactly 1.0 (no censoring anywhere); otherwise None, so
+      a heavily censored TEST can never look spuriously faster.
+    - recovery_completion_gap = train_completion_rate - test_completion_rate
+      (positive = TEST recovers a smaller share of its events).
+    - recovery_censoring_gap = test_censoring_rate - train_censoring_rate
+      (positive = TEST leaves a larger share of events unrecovered).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -229,8 +322,20 @@ class ScenarioGaps(BaseModel):
     collision_gap: Optional[float] = Field(
         default=None, description="test_collision_rate - train_collision_rate (None if undefined)"
     )
-    recovery_gap: Optional[float] = Field(
-        default=None, description="test_recovery_time - train_recovery_time (None if undefined)"
+    recovery_time_gap: Optional[float] = Field(
+        default=None,
+        description="test_mean_completed_recovery_time - train_mean_completed_recovery_time; "
+        "None unless both sides have events and 100% completion (censoring-safe)",
+    )
+    recovery_completion_gap: Optional[float] = Field(
+        default=None,
+        description="train_completion_rate - test_completion_rate; positive = TEST worse "
+        "(None if either rate undefined)",
+    )
+    recovery_censoring_gap: Optional[float] = Field(
+        default=None,
+        description="test_censoring_rate - train_censoring_rate; positive = TEST worse "
+        "(None if either rate undefined)",
     )
 
 
@@ -240,8 +345,11 @@ def compute_scenario_gaps(
 ) -> ScenarioGaps:
     """Compute TEST-vs-TRAIN generalization gaps with explicit directionality.
 
-    Positive gap = degradation on TEST for every metric. Optional metrics
-    propagate None (unavailable) instead of collapsing into 0.0.
+    Success/reward/collision gaps keep the positive-means-TEST-worse convention.
+    The recovery time gap is deliberately suppressed (None) whenever either side
+    has censored events or no events at all; the completion/censoring gaps carry
+    the robustness signal instead. Optional metrics propagate None (unavailable)
+    instead of collapsing into 0.0.
     """
     if train_metrics.success_rate is not None and test_metrics.success_rate is not None:
         success_gap: Optional[float] = float(train_metrics.success_rate - test_metrics.success_rate)
@@ -253,17 +361,131 @@ def compute_scenario_gaps(
         )
     else:
         collision_gap = None
-    if train_metrics.recovery_time is not None and test_metrics.recovery_time is not None:
-        recovery_gap: Optional[float] = float(
-            test_metrics.recovery_time - train_metrics.recovery_time
-        )
+
+    train_completion = train_metrics.recovery_completion_rate
+    test_completion = test_metrics.recovery_completion_rate
+    if train_completion is not None and test_completion is not None:
+        completion_gap: Optional[float] = float(train_completion - test_completion)
     else:
-        recovery_gap = None
+        completion_gap = None
+
+    train_censoring = train_metrics.recovery_censoring_rate
+    test_censoring = test_metrics.recovery_censoring_rate
+    if train_censoring is not None and test_censoring is not None:
+        censoring_gap: Optional[float] = float(test_censoring - train_censoring)
+    else:
+        censoring_gap = None
+
+    if (
+        train_metrics.recovery_time is not None
+        and test_metrics.recovery_time is not None
+        and train_completion == 1.0
+        and test_completion == 1.0
+    ):
+        time_gap: Optional[float] = float(test_metrics.recovery_time - train_metrics.recovery_time)
+    else:
+        time_gap = None
+
     return ScenarioGaps(
         success_gap=success_gap,
         reward_gap=float(train_metrics.mean_reward - test_metrics.mean_reward),
         collision_gap=collision_gap,
-        recovery_gap=recovery_gap,
+        recovery_time_gap=time_gap,
+        recovery_completion_gap=completion_gap,
+        recovery_censoring_gap=censoring_gap,
+    )
+
+
+class RecoverySummary(BaseModel):
+    """Censoring-aware recovery summary of one benchmark scenario.
+
+    `mean_completed_recovery_time` is event-weighted and explicitly conditional on
+    recovery: it must be interpreted jointly with `completion_rate` /
+    `censoring_rate`, never as an unconditional robustness score.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    total_events: int = Field(..., ge=0, description="Total disturbance events observed")
+    completed_events: int = Field(
+        ..., ge=0, description="Events that completed with a valid recovery"
+    )
+    censored_events: int = Field(
+        ..., ge=0, description="Events still open at episode end (never averaged, never 0-valued)"
+    )
+    completion_rate: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="completed_events / total_events (None when total is 0)",
+    )
+    censoring_rate: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="censored_events / total_events (None when total is 0)",
+    )
+    mean_completed_recovery_time: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        description="Event-weighted mean over completed recovery times in environment "
+        "steps (None when no event completed)",
+    )
+
+    @classmethod
+    def from_metrics(cls, metrics: EvaluationMetrics) -> RecoverySummary:
+        """Build a summary from aggregated scenario metrics.
+
+        Counts are exact when the environment exposes the disturbance telemetry
+        contract; environments without disturbance dynamics report zero events
+        with undefined rates. Rates recomputed here must match the metrics rates.
+        """
+        total = metrics.recovery_events or 0
+        completed = metrics.recovery_completed_events or 0
+        censored = metrics.recovery_censored_events or 0
+        return cls(
+            total_events=total,
+            completed_events=completed,
+            censored_events=censored,
+            completion_rate=metrics.recovery_completion_rate,
+            censoring_rate=metrics.recovery_censoring_rate,
+            mean_completed_recovery_time=metrics.recovery_time,
+        )
+
+
+class EpisodeBenchmarkRecord(BaseModel):
+    """Raw per-episode observation of one evaluated seed.
+
+    Stored for every scenario seed so the reported aggregates (success and
+    collision rates, mean reward, event-weighted recovery statistics) can be
+    independently recomputed from the artifact.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    seed: int = Field(..., description="Evaluation seed for this episode")
+    reward: float = Field(..., description="Total cumulative episodic reward")
+    length: int = Field(..., ge=0, description="Episode step count")
+    success: Optional[bool] = Field(
+        default=None, description="Episode success (None when undefined)"
+    )
+    collision: Optional[bool] = Field(
+        default=None, description="Episode collision (None when undefined)"
+    )
+    terminated: bool = Field(..., description="Natural termination flag")
+    truncated: bool = Field(..., description="Truncation/timeout flag")
+    recovery_times: List[int] = Field(
+        default_factory=list,
+        description="Completed recovery times in environment steps for this episode",
+    )
+    recovery_events: int = Field(
+        default=0, ge=0, description="Disturbance events observed in this episode"
+    )
+    recovery_completed: int = Field(
+        default=0, ge=0, description="Events in this episode that completed recovery"
+    )
+    recovery_censored: int = Field(
+        default=0, ge=0, description="Events in this episode still open at episode end"
     )
 
 
@@ -283,6 +505,13 @@ class ScenarioResult(BaseModel):
         ..., description="Concrete parameters the scenario environment was built with"
     )
     metrics: EvaluationMetrics = Field(..., description="Measured scenario metrics")
+    recovery: RecoverySummary = Field(
+        ..., description="Censoring-aware recovery summary for this scenario"
+    )
+    episodes: List[EpisodeBenchmarkRecord] = Field(
+        default_factory=list,
+        description="Raw per-seed episode records (one per evaluated seed, in seed order)",
+    )
     gaps: Optional[ScenarioGaps] = Field(
         default=None, description="TEST-vs-TRAIN gaps (None for the TRAIN scenario)"
     )
@@ -389,6 +618,8 @@ __all__ = [
     "RECOVERY_DEFINITION",
     "ShiftScenario",
     "DistributionShiftBenchmarkSpec",
+    "EpisodeBenchmarkRecord",
+    "RecoverySummary",
     "ScenarioGaps",
     "ScenarioResult",
     "ShiftBenchmarkReport",
