@@ -547,7 +547,7 @@ def _resolve_episode_step_infos(
     if info is None:
         return resolved
 
-    if resolved and dict(resolved[-1]) == dict(info):
+    if resolved and resolved[-1] is info:
         return resolved
 
     resolved.append(info)
