@@ -725,6 +725,138 @@ def run_generalization_command(
         raise typer.Exit(code=1)
 
 
+@app.command(name="benchmark-shifts")
+def run_shift_benchmark_command(
+    config: Optional[Path] = typer.Option(
+        None, "--config", "-c", help="Path to distribution-shift benchmark YAML"
+    ),
+    timesteps: Optional[int] = typer.Option(
+        None, "--timesteps", "-t", help="Override total training timesteps on TRAIN"
+    ),
+    seed: Optional[int] = typer.Option(
+        None, "--seed", "-s", help="Override experiment random seed"
+    ),
+    output_report: Optional[Path] = typer.Option(
+        None, "--output-report", "-o", help="Additional path to export JSON benchmark report"
+    ),
+) -> None:
+    """Run a controlled distribution-shift benchmark (Issue #105).
+
+    Trains a policy exclusively on TRAIN conditions, then evaluates the frozen
+    policy without adaptation on every TEST scenario.
+
+    Example:
+        adaptive-rl benchmark-shifts --config configs/drone_distribution_shift.yaml
+    """
+    from adaptive_rl.evaluation.shift_benchmark import (
+        ShiftBenchmarkReport,
+        load_shift_benchmark_config,
+    )
+    from adaptive_rl.experiments.shift_runner import DistributionShiftBenchmarkRunner
+
+    if config is None:
+        default_config = Path("configs/drone_distribution_shift.yaml")
+        if default_config.exists():
+            config = default_config
+        else:
+            console.print(
+                "[bold red]No configuration file provided.[/bold red] Specify --config <path>"
+            )
+            raise typer.Exit(code=1)
+
+    try:
+        exp_config, spec = load_shift_benchmark_config(config)
+    except ConfigError as err:
+        console.print(f"[bold red]Configuration error:[/bold red] {err}")
+        raise typer.Exit(code=1)
+
+    if exp_config.training is None:
+        console.print(
+            "[bold red]Configuration error:[/bold red] distribution-shift benchmarking "
+            "requires a 'training' configuration block (RL training on TRAIN conditions)."
+        )
+        raise typer.Exit(code=1)
+
+    if timesteps is not None:
+        exp_config.training.total_timesteps = timesteps
+    if seed is not None:
+        exp_config.seed = seed
+
+    scenario_lines = "\n".join(
+        f"• [bold]{s.name}[/bold] ({s.role}): {s.description} "
+        f"[{len(s.seeds)} seeds, overrides={s.environment_overrides}]"
+        for s in spec.scenarios
+    )
+    console.print(
+        Panel.fit(
+            f"[bold green]Starting Distribution-Shift Benchmark: {spec.name}[/bold green]\n\n"
+            f"• [bold]Environment:[/bold] {spec.environment_name}\n"
+            f"• [bold]Algorithm:[/bold] {exp_config.algorithm.name} "
+            f"(trained ONLY on TRAIN, {exp_config.training.total_timesteps:,} steps)\n"
+            f"• [bold]Train Seeds:[/bold] {spec.train_seeds}\n"
+            f"• [bold]Test Seeds:[/bold] {spec.all_test_seeds}\n"
+            f"{scenario_lines}",
+            title="Distribution-Shift Benchmark Runner",
+            border_style="cyan",
+        )
+    )
+
+    try:
+        runner = DistributionShiftBenchmarkRunner(spec=spec)
+        report: ShiftBenchmarkReport = runner.run(exp_config)
+
+        table = Table(
+            title=f"Distribution-Shift Results: {report.environment_name} "
+            f"({report.algorithm_name}, frozen policy)"
+        )
+        table.add_column("Scenario", style="cyan")
+        table.add_column("Success", style="green", justify="right")
+        table.add_column("Collision", style="magenta", justify="right")
+        table.add_column("Reward", style="green", justify="right")
+        table.add_column("Recovery (steps)", style="yellow", justify="right")
+        table.add_column("Gap vs TRAIN", style="yellow", justify="right")
+
+        for res in report.scenarios:
+            m = res.metrics
+            succ = f"{m.success_rate * 100:.1f}%" if m.success_rate is not None else "N/A"
+            coll = f"{m.collision_rate * 100:.1f}%" if m.collision_rate is not None else "N/A"
+            rec = f"{m.recovery_time:.1f}" if m.recovery_time is not None else "N/A"
+            if res.gaps is None:
+                gap = "-"
+            else:
+                parts = []
+                if res.gaps.success_gap is not None:
+                    parts.append(f"dS={res.gaps.success_gap:+.2f}")
+                parts.append(f"dR={res.gaps.reward_gap:+.1f}")
+                if res.gaps.collision_gap is not None:
+                    parts.append(f"dC={res.gaps.collision_gap:+.2f}")
+                if res.gaps.recovery_gap is not None:
+                    parts.append(f"dRec={res.gaps.recovery_gap:+.1f}")
+                gap = " ".join(parts)
+            table.add_row(
+                res.scenario_name,
+                succ,
+                coll,
+                f"{m.mean_reward:.2f} ± {m.std_reward:.2f}",
+                rec,
+                gap,
+            )
+
+        console.print(table)
+
+        default_path = (
+            exp_config.output_dir / "distribution_shift" / f"{exp_config.name}_shift_report.json"
+        )
+        console.print(f"\n[bold green]Report saved to:[/bold green] {default_path}")
+        if output_report is not None:
+            saved_path = report.save_json(output_report)
+            console.print(f"[bold green]Report also saved to:[/bold green] {saved_path}")
+
+    except Exception as err:
+        console.print(f"[bold red]Distribution-shift benchmark failed with error:[/bold red] {err}")
+        raise typer.Exit(code=1)
+
+
 # ---------------------------------------------------------------------------
 # Algorithm registry commands
 # ---------------------------------------------------------------------------

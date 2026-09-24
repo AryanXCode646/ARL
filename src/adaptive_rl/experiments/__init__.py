@@ -13,6 +13,7 @@ from adaptive_rl.experiments.runner import BaseExperimentRunner
 
 __all__ = [
     "BaseExperimentRunner",
+    "DistributionShiftBenchmarkRunner",
     "EpisodeRecord",
     "ExperimentMetadata",
     "ExperimentManager",
@@ -32,4 +33,10 @@ def __getattr__(name: str) -> object:
         )
 
         return GeneralizationExperimentRunner
+    if name == "DistributionShiftBenchmarkRunner":
+        from adaptive_rl.experiments.shift_runner import (
+            DistributionShiftBenchmarkRunner,
+        )
+
+        return DistributionShiftBenchmarkRunner
     raise AttributeError(f"module 'adaptive_rl.experiments' has no attribute {name!r}")

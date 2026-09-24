@@ -65,6 +65,79 @@ class GeneralizationDistribution(BaseModel):
         return cls(train_seeds=train_seeds, test_seeds=test_seeds, description=description)
 
 
+def aggregate_seed_evaluation(
+    episode_metrics: Sequence[EpisodeMetrics],
+    seeds: Sequence[int],
+) -> EvaluationMetrics:
+    """Aggregate canonical per-episode metrics into scenario-level EvaluationMetrics.
+
+    Shared aggregation used by seed-list evaluation (both the generalization
+    evaluator and the distribution-shift benchmark runner), so success,
+    collision, reward, truncation, and recovery semantics stay identical.
+
+    Recovery aggregation (never collapses unavailable into 0.0):
+    - measured: episode terminal info carries a non-None `episode_recovery_time`
+      (mean completed recovery time in environment steps for that episode);
+    - unavailable: `recovery_events == 0` (no disturbance occurred);
+    - censored: events occurred but none completed before episode end.
+    `recovery_time` is the mean over measured episodes only, or None when no
+    episode measured a recovery. Episode-class counts are recorded under
+    `additional_metrics` (`recovery_episodes_measured/unavailable/censored`).
+    """
+    episode_list = list(episode_metrics)
+    total = len(episode_list)
+    rewards = [m.reward for m in episode_list]
+    lengths = [m.length for m in episode_list]
+
+    # Rate aggregation denominator semantics:
+    # Rates (success_rate, collision_rate) are calculated among defined episodes (non-None).
+    # If unavailable across all episodes (all None), the rate evaluates to None.
+    success_rate = compute_rate([m.success for m in episode_list])
+    collision_rate = compute_rate([m.collision for m in episode_list])
+    truncation_rate: Optional[float] = (
+        float(sum(1 for m in episode_list if m.truncated) / total) if total > 0 else None
+    )
+
+    measured_recoveries: List[float] = []
+    unavailable_count = 0
+    censored_count = 0
+    for m in episode_list:
+        extra = m.additional_metrics if isinstance(m.additional_metrics, dict) else {}
+        episode_recovery = extra.get("episode_recovery_time")
+        if episode_recovery is not None:
+            measured_recoveries.append(float(episode_recovery))
+        elif int(extra.get("recovery_events", 0) or 0) > 0:
+            censored_count += 1
+        else:
+            unavailable_count += 1
+
+    recovery_time: Optional[float] = (
+        float(sum(measured_recoveries) / len(measured_recoveries)) if measured_recoveries else None
+    )
+
+    return EvaluationMetrics(
+        episodes=total,
+        mean_reward=float(np.mean(rewards)) if rewards else 0.0,
+        std_reward=float(np.std(rewards)) if rewards else 0.0,
+        min_reward=float(np.min(rewards)) if rewards else 0.0,
+        max_reward=float(np.max(rewards)) if rewards else 0.0,
+        success_rate=success_rate,
+        collision_rate=collision_rate,
+        truncation_rate=truncation_rate,
+        recovery_time=recovery_time,
+        mean_episode_length=float(np.mean(lengths)) if lengths else 0.0,
+        std_episode_length=float(np.std(lengths)) if lengths else 0.0,
+        additional_metrics={
+            "evaluated_seeds": [int(s) for s in seeds],
+            "all_rewards": rewards,
+            "all_lengths": lengths,
+            "recovery_episodes_measured": len(measured_recoveries),
+            "recovery_episodes_unavailable": unavailable_count,
+            "recovery_episodes_censored": censored_count,
+        },
+    )
+
+
 class GeneralizationReport(BaseModel):
     """Standardized report quantifying an agent's generalization capability on unseen layouts."""
 
@@ -201,36 +274,21 @@ class GeneralizationEvaluator:
 
         self.last_episode_metrics = episode_metrics
 
-        total = len(seeds)
-        rewards = [m.reward for m in episode_metrics]
-        lengths = [m.length for m in episode_metrics]
+        return aggregate_seed_evaluation(episode_metrics, seeds)
 
-        # Rate aggregation denominator semantics:
-        # Rates (success_rate, collision_rate) are calculated among defined episodes (non-None).
-        # If unavailable across all episodes (all None), the rate evaluates to None.
-        success_rate = compute_rate([m.success for m in episode_metrics])
-        collision_rate = compute_rate([m.collision for m in episode_metrics])
-        truncation_rate: Optional[float] = (
-            float(sum(1 for m in episode_metrics if m.truncated) / total) if total > 0 else None
-        )
+    def evaluate_seeds(
+        self,
+        seeds: Sequence[int],
+        deterministic: bool = True,
+    ) -> EvaluationMetrics:
+        """Evaluate the bound algorithm over an explicit seed list, one episode per seed.
 
-        return EvaluationMetrics(
-            episodes=total,
-            mean_reward=float(np.mean(rewards)) if rewards else 0.0,
-            std_reward=float(np.std(rewards)) if rewards else 0.0,
-            min_reward=float(np.min(rewards)) if rewards else 0.0,
-            max_reward=float(np.max(rewards)) if rewards else 0.0,
-            success_rate=success_rate,
-            collision_rate=collision_rate,
-            truncation_rate=truncation_rate,
-            mean_episode_length=float(np.mean(lengths)) if lengths else 0.0,
-            std_episode_length=float(np.std(lengths)) if lengths else 0.0,
-            additional_metrics={
-                "evaluated_seeds": [int(s) for s in seeds],
-                "all_rewards": rewards,
-                "all_lengths": lengths,
-            },
-        )
+        Public entry point used by single-scenario benchmark evaluation (e.g. the
+        distribution-shift benchmark runner evaluates each scenario independently
+        with its own environment instance).
+        """
+        metrics = self._evaluate_seed_list(seeds, deterministic=deterministic)
+        return metrics
 
     def evaluate_generalization(
         self,
