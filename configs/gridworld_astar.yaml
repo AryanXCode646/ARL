@@ -1,0 +1,22 @@
+name: "gridworld_astar_baseline"
+seed: 42
+
+algorithm:
+  name: "astar"
+  parameters:
+    heuristic: "manhattan"
+
+environment:
+  name: "gridworld"
+  max_steps: 100
+  parameters:
+    width: 6
+    height: 5
+    num_obstacles: 3
+
+evaluation:
+  eval_episodes: 20
+  deterministic: true
+
+output_dir: "experiments/results"
+log_dir: "experiments/logs"

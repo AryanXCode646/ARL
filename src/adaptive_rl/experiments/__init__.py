@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
-# Import lightweight metadata module eagerly (no circular deps)
+from adaptive_rl.experiments.manager import ExperimentManager, ExperimentManifest, ExperimentResult
 from adaptive_rl.experiments.metadata import (
     EpisodeRecord,
     ExperimentMetadata,
+    load_episodes_csv,
     save_episodes_csv,
 )
 from adaptive_rl.experiments.runner import BaseExperimentRunner
 
 __all__ = [
     "BaseExperimentRunner",
+    "DistributionShiftBenchmarkRunner",
     "EpisodeRecord",
     "ExperimentMetadata",
+    "ExperimentManager",
+    "ExperimentManifest",
+    "ExperimentResult",
     "GeneralizationExperimentRunner",
+    "load_episodes_csv",
     "save_episodes_csv",
 ]
 
@@ -25,5 +31,12 @@ def __getattr__(name: str) -> object:
         from adaptive_rl.experiments.generalization_runner import (
             GeneralizationExperimentRunner,
         )
+
         return GeneralizationExperimentRunner
+    if name == "DistributionShiftBenchmarkRunner":
+        from adaptive_rl.experiments.shift_runner import (
+            DistributionShiftBenchmarkRunner,
+        )
+
+        return DistributionShiftBenchmarkRunner
     raise AttributeError(f"module 'adaptive_rl.experiments' has no attribute {name!r}")

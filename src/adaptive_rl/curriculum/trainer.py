@@ -20,6 +20,13 @@ from adaptive_rl.curriculum.presets import get_curriculum_preset
 from adaptive_rl.curriculum.stage import CurriculumStage
 from adaptive_rl.curriculum.wrapper import CurriculumEnvWrapper
 from adaptive_rl.environments.registry import make_env
+from adaptive_rl.metrics import (
+    DefaultOutcomePolicy,
+    EpisodeMetrics,
+    EpisodeMetricsAccumulator,
+    OutcomePolicy,
+    TrafficOutcomePolicy,
+)
 from adaptive_rl.training.callbacks import (
     BaseCallback,
     CheckpointCallback,
@@ -122,12 +129,23 @@ class CurriculumTrainer(BaseTrainer):
             env_wrapper=self.env_wrapper,
             verbose=1,
         )
+        if self.config.training is None:
+            raise ValueError(
+                "Training configuration ('training') is required for curriculum training."
+            )
+        training_cfg = self.config.training
+
+        if "traffic" in self.config.environment.name.lower():
+            self.outcome_policy: OutcomePolicy = TrafficOutcomePolicy()
+        else:
+            self.outcome_policy = DefaultOutcomePolicy()
+
         self._callbacks: List[BaseCallback] = [self.metric_logger, self.curriculum_callback]
 
-        if self.config.training.checkpoint_freq > 0:
+        if training_cfg.checkpoint_freq > 0:
             checkpoint_cb = CheckpointCallback(
                 checkpoint_manager=self.checkpoint_manager,
-                save_freq=self.config.training.checkpoint_freq,
+                save_freq=training_cfg.checkpoint_freq,
             )
             self._callbacks.append(checkpoint_cb)
 
@@ -137,23 +155,32 @@ class CurriculumTrainer(BaseTrainer):
         # 5. Algorithm initialization
         algo_name = self.config.algorithm.name.lower()
         algo_params = dict(self.config.algorithm.parameters)
+        lr = (
+            self.config.algorithm.learning_rate
+            if self.config.algorithm.learning_rate is not None
+            else 3e-4
+        )
+        gamma = self.config.algorithm.gamma if self.config.algorithm.gamma is not None else 0.99
+        batch_size = (
+            self.config.algorithm.batch_size if self.config.algorithm.batch_size is not None else 64
+        )
 
         self.algorithm: BaseAlgorithm
         if algo_name == "ppo":
             self.algorithm = PPOAlgorithm(
                 env=self.env,
-                learning_rate=self.config.algorithm.learning_rate,
-                gamma=self.config.algorithm.gamma,
-                batch_size=self.config.algorithm.batch_size,
+                learning_rate=lr,
+                gamma=gamma,
+                batch_size=batch_size,
                 seed=self.config.seed,
                 **algo_params,
             )
         elif algo_name == "sac":
             self.algorithm = SACAlgorithm(
                 env=self.env,
-                learning_rate=self.config.algorithm.learning_rate,
-                gamma=self.config.algorithm.gamma,
-                batch_size=self.config.algorithm.batch_size,
+                learning_rate=lr,
+                gamma=gamma,
+                batch_size=batch_size,
                 seed=self.config.seed,
                 **algo_params,
             )
@@ -180,8 +207,10 @@ class CurriculumTrainer(BaseTrainer):
         adapter = SB3CallbackAdapter(
             callbacks=self._callbacks,
             algorithm=self.algorithm,
+            outcome_policy=self.outcome_policy,
         )
 
+        assert self.config.training is not None
         # Train algorithm with automated stage progression
         self.algorithm.train(
             total_timesteps=self.config.training.total_timesteps,
@@ -222,17 +251,25 @@ class CurriculumTrainer(BaseTrainer):
         episodes: int = 10,
         deterministic: bool = True,
     ) -> tuple[float, float]:
-        """Evaluate policy on current curriculum stage."""
-        rewards: List[float] = []
+        """Evaluate policy on current curriculum stage using canonical EpisodeMetrics."""
+        metrics_list: List[EpisodeMetrics] = []
         for ep in range(episodes):
-            obs, _ = self.env.reset(seed=self.config.seed + ep if self.config.seed else None)
-            ep_reward = 0.0
+            obs, info = self.env.reset(seed=self.config.seed + ep if self.config.seed else None)
+            acc = EpisodeMetricsAccumulator(outcome_policy=self.outcome_policy)
             done = False
             while not done:
                 action, _ = self.algorithm.predict(obs, deterministic=deterministic)
-                obs, reward, terminated, truncated, _ = self.env.step(action)
-                ep_reward += float(reward)
+                obs, reward, terminated, truncated, step_info = self.env.step(action)
+                acc.record_step(
+                    reward=float(reward),
+                    terminated=terminated,
+                    truncated=truncated,
+                    info=step_info,
+                )
                 done = terminated or truncated
-            rewards.append(ep_reward)
 
+            m = acc.finish()
+            metrics_list.append(m)
+
+        rewards = [m.reward for m in metrics_list]
         return float(np.mean(rewards)), float(np.std(rewards))

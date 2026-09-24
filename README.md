@@ -1,7 +1,7 @@
 # AdaptiveRL — Multi-Environment Reinforcement Learning Platform
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue)](pyproject.toml)
+[![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](pyproject.toml)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 
 **AdaptiveRL** is a modular, multi-environment reinforcement learning framework designed to train, evaluate, and benchmark adaptive agents across diverse problem domains—eventually scaling to autonomous 3D drone navigation in complex, dynamic obstacle fields.
@@ -18,24 +18,17 @@
 
 ---
 
-## 2. Current Development Status
+## 2. Current Platform
 
-AdaptiveRL is developed incrementally across verifiable phases.
+AdaptiveRL is a reusable Gymnasium-based RL platform with a drone-navigation
+flagship and reproducible scientific evaluation. It currently provides:
 
-| Phase | Milestone | Status | Description |
-| :--- | :--- | :--- | :--- |
-| **Phase 1** | **Repository Foundation & Skeleton** | **Completed** | Project structure, packaging, YAML configuration schemas, honest interfaces, and CLI. |
-| **Phase 2** | **Environment Abstraction & Registry** | **Completed** | Gymnasium environment wrapper contract, registry, and factory. |
-| **Phase 3** | **Procedural GridWorld** | **Completed** | Procedurally generated 2D grid navigation with BFS path verification and ASCII rendering. |
-| **Phase 4** | **PPO Training Engine** | **Completed** | Stable-Baselines3 PPO adapter, metric callbacks, checkpointing, and end-to-end trainer. |
-| **Phase 5** | **Evaluation Engine & Standard Metrics** | **Completed** | Multi-episode benchmarking, success/collision tracking, scenario testing, and JSON reports. |
-| **Phase 6** | **Continuous 2D Navigation** | **Completed** | Continuous velocity control, 8-ray LiDAR rangefinders, circular obstacles, and SAC continuous actor-critic. |
-| **Phase 7** | **Curriculum Learning** | **Completed** | Staged obstacle density and disturbance curriculum, automated graduation criteria, and CurriculumTrainer. |
-| **Phase 8** | **Traffic Signal Optimization** | **Completed** | Non-spatial 4-way intersection queue & delay optimization, signal transitions, and multi-objective rewards. |
-| **Phase 9** | **Autonomous 3D Drone Navigation** | **Completed** | 3D quadrotor translation kinematics, aerodynamic drag, 16-ray 3D spherical LiDAR, and SAC/PPO continuous control. |
-| **Phase 10** | **Drone Disturbances & Constraints** | **Completed** | Atmospheric wind fields, Ornstein-Uhlenbeck turbulence, battery depletion, dynamic 3D obstacles. |
-| **Phase 11** | **Generalization to Unseen Environments** | **Completed** | Strictly partitioned train/test seed distributions, zero-overlap validation, generalization gap tracking. |
-| Phase 12-17| Research Baselines & Hardening | *Planned* | Classical baselines (A*, RRT*), SAC algorithm registry, experiment manager, and dashboard. |
+* GridWorld, continuous 2D navigation, traffic control, Drone3D, and disturbed Drone3D environments.
+* PPO and SAC adapters backed by Stable-Baselines3.
+* A* and RRT* classical baselines for planner comparisons.
+* Curriculum learning, multi-seed benchmarking, and disjoint-distribution generalization tests.
+* Experiment manifests containing configuration, environment, seed, package, and Git provenance.
+* CLI workflows for inspection, training, evaluation, experiments, benchmarking, and reporting.
 
 ---
 
@@ -61,13 +54,15 @@ adaptive-rl/
 │   └── adaptive_rl/           # Core platform package
 │       ├── algorithms/        # Base algorithm interfaces and SB3 adapters (PPO, SAC)
 │       ├── environments/      # Gymnasium contracts, registry, and environments
+│       ├── planners/          # Classical baselines (A*, RRT*, make_planner, PlannerAdapter)
+│       ├── benchmarking/      # Multi-seed benchmarking and ablation runner
 │       ├── curriculum/        # Staged curriculum managers, wrappers, and callbacks
 │       ├── rewards/           # Modular reward function base interfaces
 │       ├── training/          # Trainers, callbacks, and checkpoint managers
 │       ├── evaluation/        # Benchmark evaluators, metrics, and scenarios
 │       ├── models/            # Model artifact storage and metadata management
-│       ├── visualization/     # Renderers and plot generation
-│       ├── experiments/       # Experiment orchestration runners
+│       ├── visualization/     # Renderers, plot generation, and terminal dashboard
+│       ├── experiments/       # Experiment orchestration manager and manifests
 │       ├── config.py          # Pydantic schema validation & YAML parser
 │       └── cli.py             # Typer command-line interface
 └── tests/                     # Automated pytest suite
@@ -80,7 +75,7 @@ For in-depth architectural principles, see [docs/ARCHITECTURE.md](docs/ARCHITECT
 ## 4. Installation & Setup
 
 ### Prerequisites
-* Python 3.10+ (tested through Python 3.14)
+* Python 3.10, 3.11, or 3.12 (tested and validated in CI)
 * `git`
 
 ### Quick Start
@@ -93,11 +88,14 @@ cd ARL
 python3 -m venv .venv
 source .venv/bin/activate
 
-# 3. Install AdaptiveRL in editable mode
+# 3. Install AdaptiveRL (minimal: planners, config, CLI)
+
+# Or install the optional desktop research interface
+pip install -e ".[studio]"
 pip install -e .
 
-# Or install with development dependencies (pytest, ruff, mypy)
-pip install -e ".[dev]"
+# Or install for full development (RL engines, SB3, PyTorch, dev tools)
+pip install -e ".[all]"
 ```
 
 ---
@@ -113,6 +111,23 @@ adaptive-rl --help
 # Show installed version and current milestone
 adaptive-rl version
 
+
+# Launch AdaptiveRL Studio desktop interface
+adaptive-rl studio
+```
+
+### AdaptiveRL Studio
+
+AdaptiveRL Studio is an optional PySide6 desktop control center for the existing
+framework. It provides an experiment overview, environment episode visualization,
+background training through the existing trainer API, and experiment artifact
+inspection. It does not implement a second RL engine.
+
+Use `--output-dir` to point Studio at another experiment artifact directory:
+
+```bash
+adaptive-rl studio --output-dir experiments/results
+```
 # Inspect development roadmap and completed phases
 adaptive-rl info
 
@@ -193,7 +208,7 @@ print(f"Saved {len(result.checkpoints)} periodic checkpoints.")
 AdaptiveRL provides a standardized evaluation benchmark engine to measure policy performance across fixed episode sets and configurable scenarios, with automatic export to JSON reports.
 
 * **Standard Metrics Tracked:** Mean episodic return ± standard deviation, min/max returns, success rate, collision rate, and mean episode length ± standard deviation.
-* **Deterministic Seeding:** Guarantees bitwise-reproducible evaluation trajectories across experiment runs.
+* **Deterministic Seeding:** Enforces deterministic seeding across evaluation episodes and environments.
 * **Scenario Testing:** Benchmarks agents across curated challenge scenarios (e.g. varying obstacle densities).
 
 ### Evaluation via CLI
@@ -215,7 +230,9 @@ from adaptive_rl.evaluation import Evaluator, EvaluationScenario
 
 # 1. Instantiate environment and loaded agent
 env = make_env("gridworld", width=6, height=5, num_obstacles=3)
-algo = PPOAlgorithm.from_pretrained("experiments/results/models/gridworld_ppo_baseline_final.zip", env=env)
+algo = PPOAlgorithm.from_pretrained(
+    "experiments/results/models/gridworld_ppo_baseline_final.zip", env=env
+)
 
 # 2. Run multi-episode evaluation
 evaluator = Evaluator(algorithm=algo, env=env)
@@ -233,7 +250,7 @@ evaluator.save_report(metrics, "experiments/results/eval_report.json")
 
 ## 9. Continuous 2D Navigation & SAC Algorithm
 
-Phase 6 introduces continuous action space control and distance-based rangefinder (LiDAR) sensing.
+Continuous navigation introduces continuous action space control and distance-based rangefinder (LiDAR) sensing.
 
 * **Continuous Action Space:** `Box(-1.0, 1.0, shape=(2,))` governing continuous 2D planar velocity $[v_x, v_y]$.
 * **14-Dimensional Observation Space:**
@@ -324,7 +341,7 @@ print(f"Final model saved to: {result.final_model_path}")
 
 ## 11. Traffic Signal Optimization Environment
 
-Phase 8 demonstrates the domain-agnostic capability of AdaptiveRL by implementing a discrete, non-spatial queuing optimization benchmark: a **4-way signalized intersection** (`TrafficSignalEnv`, registered as `traffic` and `traffic_signal`).
+Traffic demonstrates the domain-agnostic capability of AdaptiveRL through a discrete, non-spatial queuing optimization benchmark: a **4-way signalized intersection** (`TrafficSignalEnv`, registered as `traffic` and `traffic_signal`).
 
 * **Intersection Queuing Dynamics:**
   * 4 directional approach lanes: **North (N)**, **South (S)**, **East (E)**, and **West (W)**.
@@ -396,7 +413,9 @@ agent.train(total_timesteps=10000)
 # 3. Step environment with optimized signal controls
 action, _ = agent.predict(obs, deterministic=True)
 obs, reward, terminated, truncated, step_info = env.step(action)
-print(f"Phase: {step_info['phase_name']}, Total Queue: {step_info['total_queue']}, Reward: {reward:.2f}")
+print(
+    f"Phase: {step_info['phase_name']}, Total Queue: {step_info['total_queue']}, Reward: {reward:.2f}"
+)
 env.close()
 ```
 
@@ -404,7 +423,7 @@ env.close()
 
 ## 12. Autonomous 3D Drone Navigation Environment
 
-Phase 9 implements a continuous 3D quadrotor flight environment (`DroneNavigation3DEnv`, registered as `drone`, `drone_3d`, and `drone_navigation`), combining second-order translation kinematics, aerodynamic drag damping, procedural 3D spherical obstacle fields, and multi-directional 3D spherical LiDAR rangefinders.
+The flagship environment is a continuous 3D quadrotor flight environment (`DroneNavigation3DEnv`, registered as `drone`, `drone_3d`, and `drone_navigation`), combining second-order translation kinematics, aerodynamic drag damping, procedural 3D spherical obstacle fields, and multi-directional 3D spherical LiDAR rangefinders.
 
 * **3D Kinematic Physics Model:**
   * Translational state: position $\mathbf{p} = [x, y, z]^T \in [0, X_{\max}] \times [0, Y_{\max}] \times [0, Z_{\max}]$, velocity $\mathbf{v} = [v_x, v_y, v_z]^T$, and acceleration $\mathbf{a} = [a_x, a_y, a_z]^T$.
@@ -478,7 +497,9 @@ agent.train(total_timesteps=100000)
 # 3. Predict continuous 3D acceleration command
 action, _ = agent.predict(obs, deterministic=True)
 obs, reward, terminated, truncated, step_info = env.step(action)
-print(f"Altitude: {step_info['altitude']:.1f}m, Distance: {step_info['distance_to_goal']:.1f}m, Reward: {reward:.2f}")
+print(
+    f"Altitude: {step_info['altitude']:.1f}m, Distance: {step_info['distance_to_goal']:.1f}m, Reward: {reward:.2f}"
+)
 env.close()
 ```
 
@@ -486,7 +507,7 @@ env.close()
 
 ## 13. Drone Disturbances and Constraints
 
-Phase 10 extends 3D quadrotor flight navigation with realistic atmospheric disturbances, electro-mechanical energy constraints, and moving obstacle hazards.
+The disturbed drone environment extends 3D quadrotor flight navigation with realistic atmospheric disturbances, electro-mechanical energy constraints, and moving obstacle hazards.
 
 ### Environmental Features:
 1. **3D Atmospheric Wind Field**:
@@ -522,7 +543,7 @@ adaptive-rl train --config configs/drone_disturbed_ppo.yaml
 
 ## 14. Generalization to Unseen Environments Benchmark
 
-Phase 11 introduces rigorous empirical evaluation protocols to test whether trained reinforcement learning policies generalize to novel, unseen environment topologies or merely overfit to training layouts.
+AdaptiveRL includes structured evaluation protocols to test whether trained reinforcement learning policies generalize to novel, unseen environment topologies or merely overfit to training layouts.
 
 ### Key Capabilities:
 1. **Strict Train/Test Partitioning**:
@@ -543,9 +564,74 @@ adaptive-rl generalization --config configs/generalization_gridworld.yaml
 adaptive-rl generalization --config configs/generalization_navigation.yaml --train-count 20 --test-count 20
 ```
 
+### Controlled Distribution-Shift Benchmark (Issue #105)
+
+Seed generalization keeps physics fixed; the distribution-shift benchmark varies
+the physics. A PPO/SAC policy is **trained only on TRAIN conditions** (8 static
+obstacles, low wind) and evaluated **without adaptation** on four shifted TEST
+distributions (denser obstacles, moderate wind, dynamic obstacles, high hidden
+disturbance), measuring success, collision, reward, recovery time (environment
+steps via an explicit disturbance/recovery telemetry contract), and TEST-vs-TRAIN
+generalization gaps. Train/test seed sets are strictly disjoint and a single
+frozen policy (weight fingerprint) is evaluated across all scenarios.
+
+```bash
+# Run the Issue #105 drone distribution-shift benchmark (TRAIN → TEST-A/B/C/D)
+adaptive-rl benchmark-shifts --config configs/drone_distribution_shift.yaml
+```
+
+See `docs/EXPERIMENTS.md` §8 for the full protocol, scenario parameter values,
+recovery-time definition, gap formulas, and the JSON artifact schema.
+
 ---
 
-## 15. Running Tests
+## 15. Implementation Status & Scientific Claim Classification
+
+To maintain the highest standards of research integrity, every capability in AdaptiveRL is explicitly classified into one of four empirical verification tiers:
+
+| Component / Capability | Category | Status | Verification Details |
+|:-----------------------|:---------|:-------|:---------------------|
+| `GridWorldEnv` (discrete 2D) | Environment | **Implemented & Tested** | Comprehensive Gym checkers, collision & goal contracts (`test_gridworld.py`) |
+| `ContinuousNavigation2DEnv` | Environment | **Implemented & Tested** | Continuous dynamics, ray-casting LiDAR, obstacle boundary tests (`test_navigation.py`) |
+| `TrafficSignalEnv` | Environment | **Implemented & Tested** | Poisson arrivals, queue overflow prevention, multi-objective rewards (`test_traffic.py`) |
+| `Drone3DEnv` | Environment | **Implemented & Tested** | 3D quadrotor acceleration model, spherical LiDAR, goal distance rewards (`test_drone.py`) |
+| `DisturbedDrone3DEnv` | Environment | **Implemented & Tested** | Ornstein-Uhlenbeck gusts, altitude shear, battery SoC depletion (`test_drone_disturbances.py`) |
+| PPO Policy Adapter | Algorithm | **Implemented & Tested** | Integration with SB3 PPO, discrete/continuous spaces, checkpointing (`test_ppo.py`) |
+| SAC Policy Adapter | Algorithm | **Implemented & Tested** | Continuous control on navigation and drone environments (`test_planners.py`) |
+| A* Search Planner | Algorithm | **Implemented & Tested** | Admissible Manhattan/Euclidean heuristics, deterministic path finding (`test_planners.py`) |
+| RRT* Motion Planner | Algorithm | **Implemented & Tested** | Continuous 2D sampling, steer function, local tree rewiring (`test_planners.py`) |
+| `AlgorithmRegistry` | Architecture | **Implemented & Tested** | Authoritative algorithm registration, type metadata, introspection (`test_algorithm_registry.py`) |
+| `ExperimentManager` | Orchestration | **Implemented & Tested** | Execution orchestration, effective config persistence, artifact emission (`test_experiment_manager.py`) |
+| Standardized Metrics | Metrics | **Implemented & Tested** | Null vs zero separation, JSON/CSV round-trip, traffic aggregation (`test_standardized_metrics.py`) |
+| Seeding Protocol | Reproducibility | **Implemented & Tested** | Deterministic seed derivation, seed=0 preservation, manifest audit (`test_evaluation_seeding.py`) |
+| Disjoint Generalization | Benchmark | **Implemented & Tested** | Zero train/test seed overlap assertion, generalization gap calculation (`test_generalization.py`) |
+| Controlled Distribution Shift (Issue #105) | Benchmark | **Implemented & Tested** | Train-once-on-TRAIN, frozen-policy eval on TEST-A/B/C/D with real wind/dynamic/disturbance shifts, step-based recovery time, directional gaps (`test_distribution_shift_benchmark.py`) |
+| Long-Horizon Convergence (>100k steps) | Research | **Not yet validated** | Training loops are functional; systematic scaling benchmarks require compute allocations |
+| Formal Asymptotic Optimality of RRT* | Algorithm | **Not yet validated** | Current implementation uses a fixed connection radius approximation; not shrinking radius |
+
+---
+
+## 16. Provenance Metadata vs. Bitwise Reproducibility
+
+AdaptiveRL draws a fundamental methodological distinction between **execution provenance tracking** and **bitwise floating-point reproducibility**:
+
+1. **Provenance Tracking (Guaranteed)**:
+   - Every experiment run captures an immutable `manifest.json` recording:
+     - Exact Git commit SHA, active branch name, and uncommitted dirty working-tree status.
+     - Python interpreter version, operating system, kernel, and CPU architecture.
+     - Exact pinned installed package versions (`gymnasium`, `torch`, `stable-baselines3`, `pydantic`).
+     - Source YAML configuration and effective merged runtime overrides.
+     - Base random seeds and per-episode evaluation seed sequences.
+   - This ensures complete research transparency, enabling external researchers to inspect the exact configuration and codebase state of every trial.
+
+2. **Bitwise Reproducibility (Caveats & Scoping)**:
+   - **Deterministic Components**: Classical planners (A*) and procedural environment generation (GridWorld, Navigation obstacle placement) are **bitwise deterministic** given identical seeds.
+   - **Non-Bitwise Components**: Neural network training using PyTorch (PPO, SAC) is **not guaranteed to be bitwise identical** across different hardware architectures (e.g. CPU vs GPU, different CUDA compute capabilities) or different BLAS/MKL thread pool reductions due to non-associative floating-point summation.
+   - **Research Standard**: To address stochastic variance, AdaptiveRL enforces **multi-seed benchmarking** (`adaptive-rl benchmark --seeds ...`), reporting mean, standard deviation, and range distributions rather than claiming single-seed bitwise equivalence.
+
+---
+
+## 17. Running Tests
 
 Execute the automated test suite with `pytest`:
 ```bash
@@ -558,13 +644,13 @@ pytest --cov=adaptive_rl tests/
 
 ---
 
-## 16. Contributing
+## 18. Contributing
 
 We welcome contributions! Please review [CONTRIBUTING.md](CONTRIBUTING.md) for branch naming conventions, quality gates, and code formatting standards before opening a pull request.
 
 ---
 
-## 17. License
+## 19. License
 
 This project is licensed under the [MIT License](LICENSE).
 

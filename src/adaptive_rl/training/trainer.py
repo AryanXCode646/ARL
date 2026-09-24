@@ -1,4 +1,4 @@
-"""Training engine implementations for AdaptiveRL."""
+'''Training engine implementations for AdaptiveRL.'''
 
 from __future__ import annotations
 
@@ -22,6 +22,13 @@ from adaptive_rl.experiments.metadata import (
     ExperimentMetadata,
     save_episodes_csv,
 )
+from adaptive_rl.metrics import (
+    DefaultOutcomePolicy,
+    EpisodeMetrics,
+    EpisodeMetricsAccumulator,
+    OutcomePolicy,
+    TrafficOutcomePolicy,
+)
 from adaptive_rl.training.callbacks import (
     BaseCallback,
     CheckpointCallback,
@@ -43,18 +50,19 @@ class TrainingResult:
     checkpoints: List[dict[str, Any]] = field(default_factory=list)
     episode_rewards: List[float] = field(default_factory=list)
     episode_lengths: List[int] = field(default_factory=list)
-    success_rate: float = 0.0
-    collision_rate: float = 0.0
+    success_rate: Optional[float] = None
+    collision_rate: Optional[float] = None
     metadata_path: Optional[Path] = None
     episodes_csv_path: Optional[Path] = None
 
 
 class BaseTrainer(ABC):
-    """Abstract interface for RL training workflows in AdaptiveRL.
+    """Abstract trainer handling the shared lifecycle.
 
-    Handles the shared lifecycle: seeding, env creation, checkpoint manager,
-    callbacks, algorithm construction, training, model saving, metadata
-    generation, and evaluation.
+    This class takes care of deterministic seeding, environment creation,
+    checkpoint management, callbacks, training loop, model saving, metadata
+    generation and evaluation. Sub‑classes only need to provide the concrete
+    algorithm via :meth:`_create_algorithm`.
     """
 
     def __init__(
@@ -63,44 +71,48 @@ class BaseTrainer(ABC):
         env: Optional[gym.Env] = None,
         callbacks: Optional[List[BaseCallback]] = None,
     ) -> None:
-        """Common initialization for all trainers.
+        """Common initialisation for all trainers.
 
         Args:
-            config: Validated ExperimentConfig instance.
-            env: Optional pre‑instantiated Gymnasium environment.
+            config: Validated ``ExperimentConfig`` instance.
+            env: Optional pre‑instantiated environment.
             callbacks: Optional additional callbacks supplied by the caller.
         """
         self.config = config
         self._set_deterministic_seed(self.config.seed)
 
-        # 1. Environment initialization
+        # 1️⃣ Environment initialization
         if env is not None:
             self.env = env
         else:
             self.env = make_env(
-                self.config.environment.name,
-                **self.config.environment.parameters,
+                self.config.environment.name, **self.config.environment.parameters
             )
 
-        # 2. Checkpoint management
+        # 2️⃣ Choose an outcome policy (traffic specific or default)
+        if "traffic" in self.config.environment.name.lower():
+            self.outcome_policy: OutcomePolicy = TrafficOutcomePolicy()
+        else:
+            self.outcome_policy = DefaultOutcomePolicy()
+
+        # 3️⃣ Checkpoint management
         checkpoint_dir = self.config.output_dir / "checkpoints" / self.config.name
         self.checkpoint_manager = CheckpointManager(checkpoint_dir=checkpoint_dir)
 
-        # 3. Callbacks – metric logger always present
+        # 4️⃣ Callback setup – always include a metric logger
         self.metric_logger = MetricLoggerCallback()
         self._callbacks: List[BaseCallback] = [self.metric_logger]
-
-        if self.config.training.checkpoint_freq > 0:
-            checkpoint_cb = CheckpointCallback(
-                checkpoint_manager=self.checkpoint_manager,
-                save_freq=self.config.training.checkpoint_freq,
+        if self.config.training and self.config.training.checkpoint_freq > 0:
+            self._callbacks.append(
+                CheckpointCallback(
+                    checkpoint_manager=self.checkpoint_manager,
+                    save_freq=self.config.training.checkpoint_freq,
+                )
             )
-            self._callbacks.append(checkpoint_cb)
-
         if callbacks:
             self._callbacks.extend(callbacks)
 
-        # 4. Algorithm construction – delegated to subclass
+        # 5️⃣ Algorithm – concrete implementation provided by subclass
         self.algorithm = self._create_algorithm()
 
     @staticmethod
@@ -122,26 +134,23 @@ class BaseTrainer(ABC):
         raise NotImplementedError
 
     def fit(self) -> TrainingResult:
-        """Execute the full training lifecycle.
-
-        This mirrors the previous per‑algorithm implementations but is now
-        centralised. The concrete algorithm is supplied by ``_create_algorithm``.
-        """
+        """Execute the full training lifecycle and return a summary result."""
         started_at = time.time()
         import adaptive_rl
 
+        # SB3‑style callback adapter bridges our callbacks with the algorithm
         adapter = SB3CallbackAdapter(
             callbacks=self._callbacks,
             algorithm=self.algorithm,
+            outcome_policy=self.outcome_policy,
         )
 
-        # Run optimisation
+        assert self.config.training is not None
         self.algorithm.train(
-            total_timesteps=self.config.training.total_timesteps,
-            callback=adapter,
+            total_timesteps=self.config.training.total_timesteps, callback=adapter
         )
 
-        # Save final model
+        # Save the final model artifact
         models_dir = self.config.output_dir / "models"
         models_dir.mkdir(parents=True, exist_ok=True)
         final_model_path = models_dir / f"{self.config.name}_final.zip"
@@ -153,22 +162,36 @@ class BaseTrainer(ABC):
         # Build per‑episode records for CSV export
         episode_records: List[EpisodeRecord] = []
         cumulative_ts = 0
-        for i, (rew, length) in enumerate(
-            zip(self.metric_logger.episode_rewards, self.metric_logger.episode_lengths)
-        ):
-            cumulative_ts += length
-            episode_records.append(
-                EpisodeRecord(
-                    episode=i + 1,
-                    reward=float(rew),
-                    length=int(length),
-                    success=False,
-                    collision=False,
-                    timestep=cumulative_ts,
+        if self.metric_logger.episode_metrics:
+            for i, m in enumerate(self.metric_logger.episode_metrics):
+                cumulative_ts += m.length
+                episode_records.append(
+                    EpisodeRecord(
+                        episode=i + 1,
+                        reward=float(m.reward),
+                        length=int(m.length),
+                        success=m.success,
+                        collision=m.collision,
+                        timestep=cumulative_ts,
+                    )
                 )
-            )
+        else:
+            for i, (rew, length) in enumerate(
+                zip(self.metric_logger.episode_rewards, self.metric_logger.episode_lengths)
+            ):
+                cumulative_ts += length
+                episode_records.append(
+                    EpisodeRecord(
+                        episode=i + 1,
+                        reward=float(rew),
+                        length=int(length),
+                        success=None,
+                        collision=None,
+                        timestep=cumulative_ts,
+                    )
+                )
 
-        # Save metadata.json and episodes.csv
+        # Persist metadata and CSV files
         metadata_dir = self.config.output_dir / "metadata"
         metadata = ExperimentMetadata(
             experiment_name=self.config.name,
@@ -185,9 +208,9 @@ class BaseTrainer(ABC):
             checkpoint_paths=[cp["path"] for cp in self.checkpoint_manager.list_checkpoints()],
             config_snapshot=self.config.model_dump(mode="python"),
             adaptive_rl_version=adaptive_rl.__version__,
-            finished_at=__import__("datetime").datetime.fromtimestamp(
-                finished_at, tz=__import__("datetime").timezone.utc
-            ).isoformat(),
+            finished_at=__import__("datetime")
+            .datetime.fromtimestamp(finished_at, tz=__import__("datetime").timezone.utc)
+            .isoformat(),
             duration_seconds=round(duration, 3),
         )
         metadata_path = metadata.save(metadata_dir, name=self.config.name)
@@ -195,6 +218,7 @@ class BaseTrainer(ABC):
             records=episode_records, output_dir=metadata_dir, name=self.config.name
         )
 
+        # Assemble the high‑level result object
         result = TrainingResult(
             experiment_name=self.config.name,
             total_timesteps=self.config.training.total_timesteps,
@@ -211,32 +235,34 @@ class BaseTrainer(ABC):
         )
         return result
 
-    def evaluate(
-        self,
-        episodes: int = 10,
-        deterministic: bool = True,
-    ) -> tuple[float, float]:
+    def evaluate(self, episodes: int = 10, deterministic: bool = True) -> tuple[float, float]:
         """Run evaluation episodes on the current policy.
 
-        The loop is identical for PPO and SAC, therefore resides in the base
-        class.
+        Returns:
+            (mean_reward, std_reward)
         """
-        rewards: List[float] = []
+        metrics_list: List[EpisodeMetrics] = []
         for ep in range(episodes):
             obs, _ = self.env.reset(seed=self.config.seed + ep if self.config.seed else None)
-            ep_reward = 0.0
+            acc = EpisodeMetricsAccumulator(outcome_policy=self.outcome_policy)
             done = False
             while not done:
                 action, _ = self.algorithm.predict(obs, deterministic=deterministic)
-                obs, reward, terminated, truncated, _ = self.env.step(action)
-                ep_reward += float(reward)
+                obs, reward, terminated, truncated, info = self.env.step(action)
+                acc.record_step(
+                    reward=float(reward),
+                    terminated=terminated,
+                    truncated=truncated,
+                    info=info,
+                )
                 done = terminated or truncated
-            rewards.append(ep_reward)
+            metrics_list.append(acc.finish())
+        rewards = [m.reward for m in metrics_list]
         return float(np.mean(rewards)), float(np.std(rewards))
 
     def close(self) -> None:
-        """Clean up resources such as the environment."""
-        if hasattr(self, "env"):
+        """Clean up trainer resources and close the environment if present."""
+        if hasattr(self, "env") and self.env is not None:
             try:
                 self.env.close()
             except Exception:
@@ -248,11 +274,16 @@ class PPOTrainer(BaseTrainer):
 
     def _create_algorithm(self) -> PPOAlgorithm:
         algo_params = dict(self.config.algorithm.parameters)
+        lr = self.config.algorithm.learning_rate if self.config.algorithm.learning_rate is not None else 3e-4
+        gamma = self.config.algorithm.gamma if self.config.algorithm.gamma is not None else 0.99
+        batch_size = (
+            self.config.algorithm.batch_size if self.config.algorithm.batch_size is not None else 64
+        )
         return PPOAlgorithm(
             env=self.env,
-            learning_rate=self.config.algorithm.learning_rate,
-            gamma=self.config.algorithm.gamma,
-            batch_size=self.config.algorithm.batch_size,
+            learning_rate=lr,
+            gamma=gamma,
+            batch_size=batch_size,
             seed=self.config.seed,
             **algo_params,
         )
@@ -263,11 +294,16 @@ class SACTrainer(BaseTrainer):
 
     def _create_algorithm(self) -> SACAlgorithm:
         algo_params = dict(self.config.algorithm.parameters)
+        lr = self.config.algorithm.learning_rate if self.config.algorithm.learning_rate is not None else 3e-4
+        gamma = self.config.algorithm.gamma if self.config.algorithm.gamma is not None else 0.99
+        batch_size = (
+            self.config.algorithm.batch_size if self.config.algorithm.batch_size is not None else 64
+        )
         return SACAlgorithm(
             env=self.env,
-            learning_rate=self.config.algorithm.learning_rate,
-            gamma=self.config.algorithm.gamma,
-            batch_size=self.config.algorithm.batch_size,
+            learning_rate=lr,
+            gamma=gamma,
+            batch_size=batch_size,
             seed=self.config.seed,
             **algo_params,
         )

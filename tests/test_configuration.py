@@ -108,3 +108,398 @@ def test_config_serialization_roundtrip(tmp_path: Path) -> None:
     assert original_cfg.algorithm.name == reloaded_cfg.algorithm.name
     assert original_cfg.algorithm.learning_rate == reloaded_cfg.algorithm.learning_rate
     assert original_cfg.training.total_timesteps == reloaded_cfg.training.total_timesteps
+
+
+def test_planner_configs_valid() -> None:
+    """Verify clean A* and RRT* planner configs validate without RL hyperparameters or training blocks."""
+    config_dir = Path(__file__).resolve().parent.parent / "configs"
+    for filename in ("gridworld_astar.yaml", "navigation_rrt_star.yaml"):
+        cfg_path = config_dir / filename
+        if not cfg_path.exists():
+            pytest.skip(f"{filename} not present in standalone config PR")
+        cfg = load_config(cfg_path)
+        assert cfg.algorithm.is_planner
+        assert cfg.algorithm.learning_rate is None
+        assert cfg.algorithm.gamma is None
+        assert cfg.algorithm.batch_size is None
+        assert cfg.training is None
+
+
+def test_planner_rejects_rl_hyperparameters(tmp_path: Path) -> None:
+    """Verify that specifying learning_rate or gamma for a planner fails validation clearly."""
+    bad_planner_yaml = tmp_path / "bad_astar.yaml"
+    bad_planner_yaml.write_text(
+        """
+name: "bad_astar"
+seed: 42
+algorithm:
+  name: "astar"
+  learning_rate: 0.001
+environment:
+  name: "gridworld"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="does not accept RL hyperparameter"):
+        load_config(bad_planner_yaml)
+
+
+def test_planner_rejects_training_block(tmp_path: Path) -> None:
+    """Verify that including a training block for a classical planner fails validation."""
+    bad_planner_yaml = tmp_path / "bad_astar_training.yaml"
+    bad_planner_yaml.write_text(
+        """
+name: "bad_astar"
+seed: 42
+algorithm:
+  name: "astar"
+environment:
+  name: "gridworld"
+training:
+  total_timesteps: 1000
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="does not support a 'training' configuration block"):
+        load_config(bad_planner_yaml)
+
+
+def test_rl_algorithm_requires_training_block(tmp_path: Path) -> None:
+    """Verify that RL algorithms require a training configuration block."""
+    bad_rl_yaml = tmp_path / "bad_ppo.yaml"
+    bad_rl_yaml.write_text(
+        """
+name: "bad_ppo"
+seed: 42
+algorithm:
+  name: "ppo"
+environment:
+  name: "gridworld"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="Training configuration \\('training'\\) is required"):
+        load_config(bad_rl_yaml)
+
+
+def test_experiment_wrapper_block_unpacking(tmp_path: Path) -> None:
+    """Verify that YAML configs using the experiment: namespace unpack name and seed."""
+    exp_yaml = tmp_path / "namespaced_exp.yaml"
+    exp_yaml.write_text(
+        """
+experiment:
+  name: "namespaced_astar"
+  seed: 99
+algorithm:
+  name: "astar"
+  params:
+    heuristic: "manhattan"
+environment:
+  name: "gridworld"
+evaluation:
+  episodes: 5
+""",
+        encoding="utf-8",
+    )
+    cfg = load_config(exp_yaml)
+    assert cfg.name == "namespaced_astar"
+    assert cfg.seed == 99
+    assert cfg.algorithm.name == "astar"
+    assert cfg.algorithm.parameters == {"heuristic": "manhattan"}
+    assert cfg.evaluation.eval_episodes == 5
+
+
+def test_astar_invalid_heuristic_rejected(tmp_path: Path) -> None:
+    """Invalid A* heuristic raises ConfigError at load time."""
+    bad_yaml = tmp_path / "bad_astar.yaml"
+    bad_yaml.write_text(
+        """
+name: "bad_astar"
+algorithm:
+  name: "astar"
+  parameters:
+    heuristic: "teleportation"
+environment:
+  name: "gridworld"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        ConfigError, match="Input should be 'manhattan', 'euclidean' or 'chebyshev'"
+    ):
+        load_config(bad_yaml)
+
+
+def test_astar_valid_heuristics_accepted(tmp_path: Path) -> None:
+    """All valid A* heuristics load and validate successfully."""
+    for h in ("manhattan", "euclidean", "chebyshev"):
+        yaml_file = tmp_path / f"astar_{h}.yaml"
+        yaml_file.write_text(
+            f"""
+name: "astar_{h}"
+algorithm:
+  name: "astar"
+  parameters:
+    heuristic: "{h}"
+environment:
+  name: "gridworld"
+""",
+            encoding="utf-8",
+        )
+        cfg = load_config(yaml_file)
+        assert cfg.algorithm.parameters["heuristic"] == h
+
+
+def test_rrt_star_invalid_parameters_rejected(tmp_path: Path) -> None:
+    """Invalid RRT* parameters raise ConfigError at load time."""
+    bad_yaml = tmp_path / "bad_rrt.yaml"
+    bad_yaml.write_text(
+        """
+name: "bad_rrt"
+algorithm:
+  name: "rrt_star"
+  parameters:
+    step_size: -0.5
+environment:
+  name: "navigation"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="step_size"):
+        load_config(bad_yaml)
+
+
+def test_planner_extra_forbidden_parameters_rejected(tmp_path: Path) -> None:
+    """Unknown extra parameters in planner parameters block trigger validation error."""
+    bad_yaml = tmp_path / "extra_param_planner.yaml"
+    bad_yaml.write_text(
+        """
+name: "extra_param"
+algorithm:
+  name: "astar"
+  parameters:
+    heuristic: "manhattan"
+    unsupported_field: 123
+environment:
+  name: "gridworld"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="Extra inputs are not permitted"):
+        load_config(bad_yaml)
+
+
+def test_config_sha256_deterministic(tmp_path: Path) -> None:
+    """compute_config_sha256 is deterministic and independent of runtime paths."""
+    from adaptive_rl.config import compute_config_sha256
+
+    cfg_yaml = tmp_path / "test_exp.yaml"
+    cfg_yaml.write_text(
+        """
+name: "sha256_test"
+seed: 42
+algorithm:
+  name: "astar"
+  parameters:
+    heuristic: "euclidean"
+environment:
+  name: "gridworld"
+""",
+        encoding="utf-8",
+    )
+    cfg1 = load_config(cfg_yaml)
+    hash1 = compute_config_sha256(cfg1)
+    assert len(hash1) == 64
+    assert isinstance(hash1, str)
+
+    # Change runtime output_dir
+    cfg1.output_dir = tmp_path / "somewhere_else"
+    cfg1.log_dir = tmp_path / "somewhere_else" / "logs"
+    hash2 = compute_config_sha256(cfg1)
+    assert hash1 == hash2
+
+    # But changing a hyperparameter changes the hash
+    cfg1.seed = 999
+    assert compute_config_sha256(cfg1) != hash1
+
+
+def test_plain_rrt_rejected_in_config(tmp_path: Path) -> None:
+    """Plain 'rrt' is explicitly rejected in configuration."""
+    rrt_yaml = tmp_path / "rrt.yaml"
+    rrt_yaml.write_text(
+        """
+name: "plain_rrt"
+algorithm:
+  name: "rrt"
+environment:
+  name: "navigation"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="Standard RRT does not perform tree rewiring"):
+        load_config(rrt_yaml)
+
+
+def test_rrt_star_relational_validation_in_config(tmp_path: Path) -> None:
+    """Relational constraint violations in RRT* parameters raise ConfigError."""
+    # collision_resolution > step_size
+    bad_yaml = tmp_path / "bad_tunnel.yaml"
+    bad_yaml.write_text(
+        """
+name: "bad_tunnel"
+algorithm:
+  name: "rrt_star"
+  parameters:
+    step_size: 0.2
+    collision_resolution: 0.5
+environment:
+  name: "navigation"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="cannot be greater than step_size"):
+        load_config(bad_yaml)
+
+
+def test_planner_algorithms_dynamic_lookup_and_runtime_registration() -> None:
+    """Verify PLANNER_ALGORITHMS and AlgorithmConfig dynamically query AlgorithmRegistry."""
+    from adaptive_rl.algorithms.registry import (
+        AlgorithmKind,
+        AlgorithmMetadata,
+        algorithm_registry,
+    )
+    from adaptive_rl.config import PLANNER_ALGORITHMS, AlgorithmConfig
+
+    # 1. Standard registered planners are recognized
+    assert "astar" in PLANNER_ALGORITHMS
+    assert "rrt_star" in PLANNER_ALGORITHMS
+    assert "rrt*" in PLANNER_ALGORITHMS
+    assert AlgorithmConfig(name="astar").is_planner is True
+    assert AlgorithmConfig(name="rrt_star").is_planner is True
+    assert AlgorithmConfig(name="rrt*").is_planner is True
+
+    # 2. Unknown planner is NOT in PLANNER_ALGORITHMS and fails validation
+    assert "custom_mock_planner" not in PLANNER_ALGORITHMS
+    with pytest.raises(ValueError, match="Unknown algorithm 'custom_mock_planner'"):
+        AlgorithmConfig(name="custom_mock_planner")
+
+    # 3. Dynamically register a new planner at runtime
+    class DummyPlanner:
+        def plan(self, *args: object, **kwargs: object) -> None:
+            pass
+
+    try:
+        algorithm_registry.register(
+            name="custom_mock_planner",
+            factory=DummyPlanner,
+            metadata=AlgorithmMetadata(
+                name="custom_mock_planner",
+                kind=AlgorithmKind.PLANNER,
+                trainable=False,
+            ),
+        )
+
+        # Immediately recognized without any edits to config.py!
+        assert "custom_mock_planner" in PLANNER_ALGORITHMS
+        cfg = AlgorithmConfig(name="custom_mock_planner")
+        assert cfg.is_planner is True
+    finally:
+        algorithm_registry.reset_defaults()
+
+    # After reset, it is removed again
+    assert "custom_mock_planner" not in PLANNER_ALGORITHMS
+
+
+def test_registry_failure_behavior(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Phase 4 regression tests: AlgorithmRegistry single-source-of-truth and failure behavior.
+
+    Proves:
+    1. Registered planner is recognized.
+    2. Dynamically registered planner is recognized.
+    3. rrt* alias remains supported.
+    4. Unknown algorithm raises explicit error during validation and unvalidated access.
+    5. Registry failure does NOT silently restore a hard-coded planner list.
+    6. Registry metadata remains authoritative.
+    """
+    from adaptive_rl.algorithms.registry import (
+        AlgorithmKind,
+        AlgorithmMetadata,
+        AlgorithmRegistryError,
+        algorithm_registry,
+    )
+    from adaptive_rl.config import PLANNER_ALGORITHMS, AlgorithmConfig
+
+    # 1. Registered planner is recognized
+    assert "astar" in PLANNER_ALGORITHMS
+    assert AlgorithmConfig(name="astar").is_planner is True
+    assert AlgorithmConfig(name="ppo").is_planner is False
+
+    # 2. Dynamically registered planner is recognized
+    class DynamicTestPlanner:
+        pass
+
+    try:
+        algorithm_registry.register(
+            name="dynamic_test_planner",
+            factory=DynamicTestPlanner,
+            metadata=AlgorithmMetadata(
+                name="dynamic_test_planner",
+                kind=AlgorithmKind.PLANNER,
+                trainable=False,
+            ),
+        )
+        assert "dynamic_test_planner" in PLANNER_ALGORITHMS
+        assert AlgorithmConfig(name="dynamic_test_planner").is_planner is True
+    finally:
+        algorithm_registry.reset_defaults()
+
+    # 3. rrt* alias remains supported
+    assert "rrt*" in PLANNER_ALGORITHMS
+    assert "rrt_star" in PLANNER_ALGORITHMS
+    assert AlgorithmConfig(name="rrt*").is_planner is True
+    assert AlgorithmConfig(name="rrt_star").is_planner is True
+
+    # 4. Unknown algorithm raises explicit error
+    with pytest.raises(ValueError, match="Unknown algorithm 'unregistered_nonexistent_xyz'"):
+        AlgorithmConfig(name="unregistered_nonexistent_xyz")
+
+    unvalidated_unknown = AlgorithmConfig.model_construct(name="unregistered_nonexistent_xyz")
+    with pytest.raises(AlgorithmRegistryError):
+        _ = unvalidated_unknown.is_planner
+
+    # 5. Registry failure does NOT silently restore a hard-coded planner list
+    # Simulate an internal registry crash during metadata lookup
+    def mock_broken_get_metadata(name: str) -> AlgorithmMetadata:
+        raise RuntimeError("Authoritative registry database unavailable")
+
+    monkeypatch.setattr(algorithm_registry, "get_metadata", mock_broken_get_metadata)
+
+    # In the old code, this silently caught Exception and checked hard-coded {"astar", ...}
+    # Now it must propagate the real registry failure!
+    astar_cfg = AlgorithmConfig.model_construct(name="astar")
+    with pytest.raises(RuntimeError, match="Authoritative registry database unavailable"):
+        _ = astar_cfg.is_planner
+
+    # Also verify PLANNER_ALGORITHMS propagation when list_by_kind fails
+    monkeypatch.undo()
+
+    def mock_broken_list_by_kind(kind: AlgorithmKind) -> list[str]:
+        raise RuntimeError("Registry iteration failed")
+
+    monkeypatch.setattr(algorithm_registry, "list_by_kind", mock_broken_list_by_kind)
+    with pytest.raises(RuntimeError, match="Registry iteration failed"):
+        _ = iter(PLANNER_ALGORITHMS)
+    with pytest.raises(RuntimeError, match="Registry iteration failed"):
+        _ = len(PLANNER_ALGORITHMS)
+
+    monkeypatch.undo()
+
+    # 6. Registry metadata remains authoritative
+    # If an algorithm kind is changed to RL in the registry, is_planner reflects it immediately
+    assert AlgorithmConfig(name="astar").is_planner is True
+    monkeypatch.setattr(
+        algorithm_registry,
+        "get_metadata",
+        lambda name: AlgorithmMetadata(name=name, kind=AlgorithmKind.RL_POLICY, trainable=True),
+    )
+    assert astar_cfg.is_planner is False

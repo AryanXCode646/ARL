@@ -74,8 +74,28 @@ class TrafficSignalEnv(AdaptiveRLEnv[np.ndarray, int]):
         overflow_penalty: float = 20.0,
         terminate_on_overflow: bool = False,
         render_mode: Optional[str] = None,
+        success_queue_threshold: int = 8,
     ) -> None:
         """Initialize the Traffic Signal environment.
+
+        Episode Semantics:
+            - Episode Success (`episode_success` and `success`):
+              Outcome evaluated strictly upon episode completion (terminated or truncated).
+              An episode is successful if and only if:
+              (1) Normal completion occurred at time horizon without early termination (truncated is True, terminated is False).
+              (2) No queue overflow occurred at any point during the episode (had_overflow is False).
+              (3) Total queue length at completion is <= success_queue_threshold.
+              An episode that experienced overflow can NEVER be successful.
+              During intermediate non-terminal timesteps, `success` and `episode_success` are False.
+            - Step Diagnostics:
+              - `step_controlled`: True if total queue at the current timestep is <= success_queue_threshold.
+              - `step_success`: Instantaneous diagnostic; True if total queue at current timestep is controlled and had_overflow is False.
+            - Overflow (`overflow`, `step_overflow`, `had_overflow`):
+              Occurs when vehicle count on any approach reaches max_queue.
+            - Termination (`terminated`):
+              Occurs immediately if terminate_on_overflow is True and overflow occurs.
+            - Truncation (`truncated`):
+              Occurs when step >= max_steps and not terminated.
 
         Args:
             arrival_rates: Poisson arrival lambda parameters for (North, South, East, West).
@@ -93,6 +113,7 @@ class TrafficSignalEnv(AdaptiveRLEnv[np.ndarray, int]):
             overflow_penalty: Penalty applied when an approach queue overflows.
             terminate_on_overflow: Whether queue overflow terminates the episode immediately.
             render_mode: Rendering mode ('ansi' or 'human').
+            success_queue_threshold: Maximum total queue at episode end to count as success.
         """
         super().__init__()
         if max_steps < 1:
@@ -115,6 +136,7 @@ class TrafficSignalEnv(AdaptiveRLEnv[np.ndarray, int]):
         self.overflow_penalty = overflow_penalty
         self.terminate_on_overflow = terminate_on_overflow
         self.render_mode = render_mode
+        self.success_queue_threshold = success_queue_threshold
 
         # Define Farama Gymnasium action and observation spaces
         self.action_space = spaces.Discrete(2)
@@ -133,6 +155,7 @@ class TrafficSignalEnv(AdaptiveRLEnv[np.ndarray, int]):
             min_green_steps=min_green_steps,
         )
         self._current_step = 0
+        self._had_overflow = False
 
     def _get_obs(self) -> np.ndarray:
         """Construct normalized 10-dimensional observation vector."""
@@ -177,6 +200,9 @@ class TrafficSignalEnv(AdaptiveRLEnv[np.ndarray, int]):
         ]
         total_q = sum(queues)
 
+        step_controlled = total_q <= self.success_queue_threshold
+        step_success = step_controlled and (not self._had_overflow)
+
         return {
             "step": self._current_step,
             "max_steps": self.max_steps,
@@ -191,7 +217,14 @@ class TrafficSignalEnv(AdaptiveRLEnv[np.ndarray, int]):
             "cumulative_departures": self.intersection.cumulative_departures,
             "cumulative_arrivals": self.intersection.cumulative_arrivals,
             "cumulative_delay": self.intersection.cumulative_delay,
-            "success": total_q <= 8,
+            "overflow": self._had_overflow,
+            "step_overflow": False,
+            "had_overflow": self._had_overflow,
+            "step_controlled": step_controlled,
+            "step_success": step_success,
+            "episode_success": False,
+            "success": False,
+            "success_queue_threshold": self.success_queue_threshold,
         }
 
     def reset(
@@ -203,6 +236,7 @@ class TrafficSignalEnv(AdaptiveRLEnv[np.ndarray, int]):
         """Reset the traffic intersection environment to initial state."""
         super().reset(seed=seed, options=options)
         self._current_step = 0
+        self._had_overflow = False
 
         # Optional parameter overrides via reset options
         rates = self.arrival_rates
@@ -258,7 +292,9 @@ class TrafficSignalEnv(AdaptiveRLEnv[np.ndarray, int]):
         reward = float(throughput_bonus - queue_cost - wait_cost - switch_cost - premature_cost)
 
         terminated = False
-        if telemetry.overflow:
+        step_overflow = bool(telemetry.overflow)
+        if step_overflow:
+            self._had_overflow = True
             reward -= self.overflow_penalty
             if self.terminate_on_overflow:
                 terminated = True
@@ -271,8 +307,30 @@ class TrafficSignalEnv(AdaptiveRLEnv[np.ndarray, int]):
         info["phase_switched"] = telemetry.phase_switched
         info["step_departures"] = telemetry.total_departures
         info["step_arrivals"] = telemetry.total_arrivals
-        info["overflow"] = telemetry.overflow
+        info["overflow"] = step_overflow
+        info["step_overflow"] = step_overflow
+        info["had_overflow"] = self._had_overflow
         info["premature_switch"] = was_premature
+
+        step_controlled = total_q <= self.success_queue_threshold
+        step_success = step_controlled and (not self._had_overflow)
+        info["step_controlled"] = step_controlled
+        info["step_success"] = step_success
+
+        # Episode-level outcome:
+        # Success is strictly evaluated upon episode completion (terminated or truncated).
+        # An episode is successful iff it reached horizon (truncated), did not terminate early or overflow,
+        # and finished with controlled queues. Intermediate steps are never marked as episode success.
+        is_done = terminated or truncated
+        episode_success = bool(
+            is_done
+            and truncated
+            and (not terminated)
+            and (not self._had_overflow)
+            and step_controlled
+        )
+        info["episode_success"] = episode_success
+        info["success"] = episode_success
 
         if self.render_mode == "human":
             print(self.render())
