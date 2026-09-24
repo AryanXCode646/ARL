@@ -53,6 +53,7 @@ from adaptive_rl.training.trainer import (
     TrainingResult,
 )
 
+
 # Helper to read artifacts
 def _read_training_artifacts(result: TrainingResult) -> tuple[list[EpisodeRecord], dict[str, Any]]:
     """Load episodes CSV and metadata JSON from a TrainingResult.
@@ -65,6 +66,7 @@ def _read_training_artifacts(result: TrainingResult) -> tuple[list[EpisodeRecord
     metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
     return records, metadata
 
+
 def test_missing_terminal_metrics_are_none() -> None:
     metrics = extract_episode_metrics(
         reward=1.0,
@@ -75,6 +77,7 @@ def test_missing_terminal_metrics_are_none() -> None:
     )
     assert metrics.success is None
     assert metrics.collision is None
+
 
 def test_explicit_false_is_not_treated_as_missing() -> None:
     metrics = extract_episode_metrics(
@@ -87,6 +90,7 @@ def test_explicit_false_is_not_treated_as_missing() -> None:
     assert metrics.success is False
     assert metrics.collision is False
 
+
 def test_terminal_success_and_collision_are_extracted() -> None:
     metrics = extract_episode_metrics(
         reward=5.0,
@@ -97,6 +101,7 @@ def test_terminal_success_and_collision_are_extracted() -> None:
     )
     assert metrics.success is True
     assert metrics.collision is False
+
 
 def test_collision_overrides_conflicting_positive_success() -> None:
     metrics = extract_episode_metrics(
@@ -109,6 +114,7 @@ def test_collision_overrides_conflicting_positive_success() -> None:
     assert metrics.collision is True
     assert metrics.success is False
 
+
 def test_equivalent_success_keys_are_supported() -> None:
     metrics = extract_episode_metrics(
         reward=1.0,
@@ -119,11 +125,14 @@ def test_equivalent_success_keys_are_supported() -> None:
     )
     assert metrics.success is True
 
+
 def test_zero_rate_is_zero_not_none() -> None:
     assert compute_rate([False, False]) == 0.0
 
+
 def test_undefined_rate_is_none() -> None:
     assert compute_rate([None, None]) is None
+
 
 def test_zero_valued_additional_metric_is_preserved() -> None:
     metrics = extract_episode_metrics(
@@ -134,6 +143,7 @@ def test_zero_valued_additional_metric_is_preserved() -> None:
         info={"success": False, "collision": False, "energy": 0.0},
     )
     assert metrics.additional_metrics["energy"] == 0.0
+
 
 def test_metric_logger_consumes_canonical_metrics() -> None:
     logger = MetricLoggerCallback()
@@ -157,6 +167,7 @@ def test_metric_logger_consumes_canonical_metrics() -> None:
     assert logger.success_rate == 1.0
     assert logger.collision_rate == 0.0
 
+
 def test_metric_logger_preserves_unknown_outcomes() -> None:
     logger = MetricLoggerCallback()
     metrics = extract_episode_metrics(
@@ -178,6 +189,7 @@ def test_metric_logger_preserves_unknown_outcomes() -> None:
     assert logger.success_rate is None
     assert logger.collision_rate is None
 
+
 def test_episode_record_accepts_nullable_outcomes() -> None:
     record = EpisodeRecord(
         episode=1,
@@ -189,6 +201,7 @@ def test_episode_record_accepts_nullable_outcomes() -> None:
     )
     assert record.success is None
     assert record.collision is None
+
 
 def test_nullable_outcomes_are_preserved_in_csv(tmp_path: Path) -> None:
     record = EpisodeRecord(
@@ -204,6 +217,7 @@ def test_nullable_outcomes_are_preserved_in_csv(tmp_path: Path) -> None:
         row = next(csv.DictReader(handle))
     assert row["success"] == ""
     assert row["collision"] == ""
+
 
 def test_metadata_preserves_none_rates(tmp_path: Path) -> None:
     metadata = ExperimentMetadata(
@@ -224,11 +238,16 @@ def test_metadata_preserves_none_rates(tmp_path: Path) -> None:
     assert payload["success_rate"] is None
     assert payload["collision_rate"] is None
 
+
 def test_sb3_callback_adapter_feeds_metric_logger_canonical_metrics() -> None:
     logger = MetricLoggerCallback()
     adapter = SB3CallbackAdapter(callbacks=[logger])
     adapter.num_timesteps = 5
-    adapter.locals = {"dones": [True], "rewards": [1.0], "infos": [{"success": True, "collision": False}]}
+    adapter.locals = {
+        "dones": [True],
+        "rewards": [1.0],
+        "infos": [{"success": True, "collision": False}],
+    }
     adapter._on_step()
     adapter.num_timesteps = 10
     adapter.locals = {"dones": [True], "rewards": [0.0], "infos": [{}]}
@@ -241,9 +260,11 @@ def test_sb3_callback_adapter_feeds_metric_logger_canonical_metrics() -> None:
     assert logger.success_rate == 1.0
     assert logger.collision_rate == 0.0
 
+
 # ---------------------------------------------------------------------------
 # Deterministic Test Environment for Real End-to-End PPO & SAC Training
 # ---------------------------------------------------------------------------
+
 
 class DeterministicOutcomeEnv(gym.Env):
     """Deterministic, lightweight environment for testing episode terminal metrics.
@@ -278,7 +299,9 @@ class DeterministicOutcomeEnv(gym.Env):
         self._current_step = 0
         self._episode_index = 0
 
-    def reset(self, *, seed: Optional[int] = None, options: Optional[dict[str, Any]] = None) -> tuple[np.ndarray, dict[str, Any]]:
+    def reset(
+        self, *, seed: Optional[int] = None, options: Optional[dict[str, Any]] = None
+    ) -> tuple[np.ndarray, dict[str, Any]]:
         super().reset(seed=seed)
         self._current_step = 0
         return np.zeros(2, dtype=np.float32), {}
@@ -291,7 +314,9 @@ class DeterministicOutcomeEnv(gym.Env):
         if terminated:
             terminal_info = {}
             if self.episode_infos:
-                terminal_info = dict(self.episode_infos[self._episode_index % len(self.episode_infos)])
+                terminal_info = dict(
+                    self.episode_infos[self._episode_index % len(self.episode_infos)]
+                )
             self._episode_index += 1
             self._current_step = 0
             if self.truncated_flag:
@@ -301,6 +326,7 @@ class DeterministicOutcomeEnv(gym.Env):
         else:
             info = self.non_terminal_info or {}
         return np.zeros(2, dtype=np.float32), reward, terminated, truncated, info
+
 
 def _run_trainer_e2e(
     trainer_cls: type[PPOTrainer] | type[SACTrainer],
@@ -328,12 +354,16 @@ def _run_trainer_e2e(
     trainer = trainer_cls(config=config, env=env)
     return trainer.fit()
 
+
 # ---------------------------------------------------------------------------
 # Real End-to-End PPO and SAC Training Tests
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize("trainer_cls", [PPOTrainer, SACTrainer])
-def test_e2e_training_positive_outcome_artifact(trainer_cls: type[PPOTrainer] | type[SACTrainer], tmp_path: Path) -> None:
+def test_e2e_training_positive_outcome_artifact(
+    trainer_cls: type[PPOTrainer] | type[SACTrainer], tmp_path: Path
+) -> None:
     """Case A: info={\"success\": True, \"collision\": False}."""
     env = DeterministicOutcomeEnv([{"success": True, "collision": False}])
     prefix = "ppo" if trainer_cls is PPOTrainer else "sac"
@@ -352,8 +382,11 @@ def test_e2e_training_positive_outcome_artifact(trainer_cls: type[PPOTrainer] | 
     assert metadata["success_rate"] == 1.0
     assert metadata["collision_rate"] == 0.0
 
+
 @pytest.mark.parametrize("trainer_cls", [PPOTrainer, SACTrainer])
-def test_e2e_training_missing_telemetry_artifact(trainer_cls: type[PPOTrainer] | type[SACTrainer], tmp_path: Path) -> None:
+def test_e2e_training_missing_telemetry_artifact(
+    trainer_cls: type[PPOTrainer] | type[SACTrainer], tmp_path: Path
+) -> None:
     """Case C: info={}."""
     env = DeterministicOutcomeEnv([{}])
     prefix = "ppo" if trainer_cls is PPOTrainer else "sac"
@@ -372,8 +405,11 @@ def test_e2e_training_missing_telemetry_artifact(trainer_cls: type[PPOTrainer] |
     assert metadata["success_rate"] is None
     assert metadata["collision_rate"] is None
 
+
 @pytest.mark.parametrize("trainer_cls", [PPOTrainer, SACTrainer])
-def test_e2e_training_explicit_zero_rate_artifact(trainer_cls: type[PPOTrainer] | type[SACTrainer], tmp_path: Path) -> None:
+def test_e2e_training_explicit_zero_rate_artifact(
+    trainer_cls: type[PPOTrainer] | type[SACTrainer], tmp_path: Path
+) -> None:
     """Case B: info={\"success\": False, \"collision\": False}."""
     env = DeterministicOutcomeEnv([{"success": False, "collision": False}])
     prefix = "ppo" if trainer_cls is PPOTrainer else "sac"
@@ -392,8 +428,11 @@ def test_e2e_training_explicit_zero_rate_artifact(trainer_cls: type[PPOTrainer] 
     assert metadata["success_rate"] == 0.0
     assert metadata["collision_rate"] == 0.0
 
+
 @pytest.mark.parametrize("trainer_cls", [PPOTrainer, SACTrainer])
-def test_e2e_training_collision_overrides_success_artifact(trainer_cls: type[PPOTrainer] | type[SACTrainer], tmp_path: Path) -> None:
+def test_e2e_training_collision_overrides_success_artifact(
+    trainer_cls: type[PPOTrainer] | type[SACTrainer], tmp_path: Path
+) -> None:
     """Case D: info={\"success\": True, \"collision\": True}."""
     env = DeterministicOutcomeEnv([{"success": True, "collision": True}])
     prefix = "ppo" if trainer_cls is PPOTrainer else "sac"
@@ -412,8 +451,11 @@ def test_e2e_training_collision_overrides_success_artifact(trainer_cls: type[PPO
     assert metadata["success_rate"] == 0.0
     assert metadata["collision_rate"] == 1.0
 
+
 @pytest.mark.parametrize("trainer_cls", [PPOTrainer, SACTrainer])
-def test_e2e_training_multi_episode_mixed_outcomes_and_denominator(trainer_cls: type[PPOTrainer] | type[SACTrainer], tmp_path: Path) -> None:
+def test_e2e_training_multi_episode_mixed_outcomes_and_denominator(
+    trainer_cls: type[PPOTrainer] | type[SACTrainer], tmp_path: Path
+) -> None:
     """Multi‑episode sequence verifying denominator semantics and tri‑state outcomes.
 
     Episodes:
@@ -450,8 +492,11 @@ def test_e2e_training_multi_episode_mixed_outcomes_and_denominator(trainer_cls: 
     assert metadata["success_rate"] == pytest.approx(expected)
     assert metadata["collision_rate"] == pytest.approx(expected)
 
+
 @pytest.mark.parametrize("trainer_cls", [PPOTrainer, SACTrainer])
-def test_e2e_training_multi_step_episode_accumulation(trainer_cls: type[PPOTrainer] | type[SACTrainer], tmp_path: Path) -> None:
+def test_e2e_training_multi_step_episode_accumulation(
+    trainer_cls: type[PPOTrainer] | type[SACTrainer], tmp_path: Path
+) -> None:
     """Verify multi‑step episode accumulation.
 
     Two episodes, each with two steps (total_timesteps=4).
@@ -467,13 +512,26 @@ def test_e2e_training_multi_step_episode_accumulation(trainer_cls: type[PPOTrain
     assert result.collision_rate == 0.0
     records, metadata = _read_training_artifacts(result)
     assert len(records) == 2
-    assert records[0].episode == 1 and records[0].length == 2 and records[0].reward == 2.0 and records[0].timestep == 2
+    assert (
+        records[0].episode == 1
+        and records[0].length == 2
+        and records[0].reward == 2.0
+        and records[0].timestep == 2
+    )
     assert records[0].success is True and records[0].collision is False
-    assert records[1].episode == 2 and records[1].length == 2 and records[1].reward == 2.0 and records[1].timestep == 4
+    assert (
+        records[1].episode == 2
+        and records[1].length == 2
+        and records[1].reward == 2.0
+        and records[1].timestep == 4
+    )
     assert records[1].success is False and records[1].collision is False
 
+
 @pytest.mark.parametrize("trainer_cls", [PPOTrainer, SACTrainer])
-def test_e2e_training_truncated_episode_artifact(trainer_cls: type[PPOTrainer] | type[SACTrainer], tmp_path: Path) -> None:
+def test_e2e_training_truncated_episode_artifact(
+    trainer_cls: type[PPOTrainer] | type[SACTrainer], tmp_path: Path
+) -> None:
     """Test handling of Gymnasium truncated episodes.
 
     The environment emits truncated=True with telemetry on episode end.
@@ -493,28 +551,43 @@ def test_e2e_training_truncated_episode_artifact(trainer_cls: type[PPOTrainer] |
     assert metadata["success_rate"] == 1.0
     assert metadata["collision_rate"] == 0.0
 
+
 @pytest.mark.parametrize("trainer_cls", [PPOTrainer, SACTrainer])
-def test_e2e_training_misleading_nonterminal_telemetry_artifact(trainer_cls: type[PPOTrainer] | type[SACTrainer], tmp_path: Path) -> None:
+def test_e2e_training_misleading_nonterminal_telemetry_artifact(
+    trainer_cls: type[PPOTrainer] | type[SACTrainer], tmp_path: Path
+) -> None:
     """Test that non‑terminal telemetry does not affect the canonical outcome.
 
     First step (non‑terminal) emits success=True, then terminal step has no telemetry.
     """
+
     class MisleadingEnv(gym.Env):
         def __init__(self) -> None:
             super().__init__()
-            self.observation_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
+            self.observation_space = gym.spaces.Box(
+                low=-1.0, high=1.0, shape=(2,), dtype=np.float32
+            )
             self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
             self._step = 0
+
         def reset(self, *, seed: Optional[int] = None, options: Optional[dict[str, Any]] = None):
             self._step = 0
             return np.zeros(2, dtype=np.float32), {}
+
         def step(self, action: Any):
             self._step += 1
             reward = 1.0
             if self._step == 1:
-                return np.zeros(2, dtype=np.float32), reward, False, False, {"success": True, "collision": False}
+                return (
+                    np.zeros(2, dtype=np.float32),
+                    reward,
+                    False,
+                    False,
+                    {"success": True, "collision": False},
+                )
             else:
                 return np.zeros(2, dtype=np.float32), reward, True, False, {}
+
     env = MisleadingEnv()
     prefix = "ppo" if trainer_cls is PPOTrainer else "sac"
     result = _run_trainer_e2e(trainer_cls, env, tmp_path, f"{prefix}_mislead")
@@ -522,13 +595,14 @@ def test_e2e_training_misleading_nonterminal_telemetry_artifact(trainer_cls: typ
     assert result.success_rate is None
     assert result.collision_rate is None
     records, metadata = _read_training_artifacts(result)
-    assert result.episodes_completed == 4
-    assert len(records) == 4
+    assert result.episodes_completed == 2
+    assert len(records) == 2
     for record in records:
         assert record.success is None
         assert record.collision is None
     assert metadata["success_rate"] is None
     assert metadata["collision_rate"] is None
+
 
 # NOTE: The original test_ppo_and_sac_forward_same_callback was removed in the commit.
 # The above tests, especially test_sb3_callback_adapter_feeds_metric_logger_canonical_metrics,

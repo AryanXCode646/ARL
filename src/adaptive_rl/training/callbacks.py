@@ -75,7 +75,8 @@ class MetricLoggerCallback(BaseCallback):
         """Initialize metric logger.
 
         Args:
-            window_size: Number of recent episodes used to calculate rolling statistics.
+            window_size: Number of recent episodes used to calculate rolling
+                statistics.
         """
         self.window_size = window_size
         self.episode_rewards: List[float] = []
@@ -98,15 +99,18 @@ class MetricLoggerCallback(BaseCallback):
         self.episode_rewards.append(episode_reward)
         self.episode_lengths.append(episode_length)
 
-        # Compatibility path for callers that have not yet migrated to the
-        # canonical EpisodeMetrics contract.
+        # Compatibility path for direct callers that have not yet migrated
+        # to the canonical EpisodeMetrics contract.
         if metrics is None:
             info_dict = dict(info or {})
 
             is_truncated = bool(
-                info_dict.get("TimeLimit.truncated", False) or info_dict.get("truncated", False)
+                info_dict.get("TimeLimit.truncated", False)
+                or info_dict.get("truncated", False)
             )
-            is_terminated = bool(info_dict.get("terminated", not is_truncated))
+            is_terminated = bool(
+                info_dict.get("terminated", not is_truncated)
+            )
 
             metrics = extract_episode_metrics(
                 reward=episode_reward,
@@ -150,7 +154,9 @@ class MetricLoggerCallback(BaseCallback):
         if not self.episode_metrics:
             return None
 
-        return compute_rate([metrics.success for metrics in self.episode_metrics])
+        return compute_rate(
+            [metrics.success for metrics in self.episode_metrics]
+        )
 
     @property
     def collision_rate(self) -> Optional[float]:
@@ -158,7 +164,9 @@ class MetricLoggerCallback(BaseCallback):
         if not self.episode_metrics:
             return None
 
-        return compute_rate([metrics.collision for metrics in self.episode_metrics])
+        return compute_rate(
+            [metrics.collision for metrics in self.episode_metrics]
+        )
 
 
 class CheckpointCallback(BaseCallback):
@@ -195,7 +203,9 @@ class CheckpointCallback(BaseCallback):
         locals_dict: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """Check save frequency and persist checkpoint."""
-        if self.save_freq > 0 and (step - self.last_save_step) >= self.save_freq:
+        if self.save_freq > 0 and (
+            step - self.last_save_step
+        ) >= self.save_freq:
             self.last_save_step = step
 
             if self.model is not None:
@@ -225,6 +235,10 @@ class SB3CallbackAdapter(SB3BaseCallback):
         MetricLoggerCallback / CurriculumCallback
             ↓
         EpisodeRecord / TrainingResult / serialization
+
+    The adapter always supplies the canonical ``metrics`` argument.
+    Callback implementations that do not accept ``metrics`` therefore fail
+    loudly instead of being silently treated as legacy callbacks.
     """
 
     def __init__(
@@ -248,7 +262,10 @@ class SB3CallbackAdapter(SB3BaseCallback):
     def _on_training_start(self) -> None:
         """Propagate training start event."""
         for callback in self.callbacks:
-            if isinstance(callback, CheckpointCallback) and self.algorithm is not None:
+            if (
+                isinstance(callback, CheckpointCallback)
+                and self.algorithm is not None
+            ):
                 callback.set_model(self.algorithm)
 
             callback.on_training_start(
@@ -268,8 +285,12 @@ class SB3CallbackAdapter(SB3BaseCallback):
             reward = float(rewards[i]) if i < len(rewards) else 0.0
             info = infos[i] if i < len(infos) else {}
 
-            self._current_rewards[i] = self._current_rewards.get(i, 0.0) + reward
-            self._current_lengths[i] = self._current_lengths.get(i, 0) + 1
+            self._current_rewards[i] = (
+                self._current_rewards.get(i, 0.0) + reward
+            )
+            self._current_lengths[i] = (
+                self._current_lengths.get(i, 0) + 1
+            )
 
             if i not in self._accumulators:
                 self._accumulators[i] = EpisodeMetricsAccumulator(
@@ -277,10 +298,13 @@ class SB3CallbackAdapter(SB3BaseCallback):
                 )
 
             is_truncated = bool(
-                info.get("TimeLimit.truncated", False) or info.get("truncated", False)
+                info.get("TimeLimit.truncated", False)
+                or info.get("truncated", False)
             )
 
-            is_terminated = bool(info.get("terminated", done and not is_truncated))
+            is_terminated = bool(
+                info.get("terminated", done and not is_truncated)
+            )
 
             accumulator = self._accumulators[i]
 
