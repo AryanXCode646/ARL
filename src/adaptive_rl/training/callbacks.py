@@ -75,7 +75,8 @@ class MetricLoggerCallback(BaseCallback):
         """Initialize metric logger.
 
         Args:
-            window_size: Number of recent episodes used to calculate rolling statistics.
+            window_size: Number of recent episodes used to calculate rolling
+                statistics.
         """
         self.window_size = window_size
         self.episode_rewards: List[float] = []
@@ -98,8 +99,8 @@ class MetricLoggerCallback(BaseCallback):
         self.episode_rewards.append(episode_reward)
         self.episode_lengths.append(episode_length)
 
-        # Compatibility path for callers that have not yet migrated to the
-        # canonical EpisodeMetrics contract.
+        # Compatibility path for direct callers that have not yet migrated
+        # to the canonical EpisodeMetrics contract.
         if metrics is None:
             info_dict = dict(info or {})
 
@@ -225,6 +226,10 @@ class SB3CallbackAdapter(SB3BaseCallback):
         MetricLoggerCallback / CurriculumCallback
             ↓
         EpisodeRecord / TrainingResult / serialization
+
+    The adapter always supplies the canonical ``metrics`` argument.
+    Callback implementations that do not accept ``metrics`` therefore fail
+    loudly instead of being silently treated as legacy callbacks.
     """
 
     def __init__(
@@ -283,12 +288,13 @@ class SB3CallbackAdapter(SB3BaseCallback):
             is_terminated = bool(info.get("terminated", done and not is_truncated))
 
             accumulator = self._accumulators[i]
+            step_info = info if done else None
 
             accumulator.record_step(
                 reward=reward,
                 terminated=is_terminated,
                 truncated=is_truncated,
-                info=info,
+                info=step_info,
             )
 
             if done:

@@ -1332,31 +1332,36 @@ def test_full_lifecycle_end_to_end_explicit_false(tmp_path: Path) -> None:
 
 
 def test_full_lifecycle_multi_step_precedence_and_truncation() -> None:
-    """Verify multi-step precedence: collision overrides success, and truncation is preserved."""
+    """Verify multi-step precedence: collision overrides success, and truncation is preserved.
+
+    Only terminal-step info contributes to outcome extraction.  Non-terminal
+    telemetry is intentionally ignored by the SB3CallbackAdapter to prevent
+    misleading intermediate signals from contaminating canonical outcomes.
+    """
     from adaptive_rl.training.callbacks import MetricLoggerCallback, SB3CallbackAdapter
 
     logger = MetricLoggerCallback()
     adapter = SB3CallbackAdapter(callbacks=[logger])
 
-    # Step 1: No result
+    # Step 1: No result (non-terminal)
     adapter.locals = {"dones": [False], "infos": [{}], "rewards": [1.0]}
     adapter.num_timesteps = 1
     adapter._on_step()
 
-    # Step 2: Collision occurred
-    adapter.locals = {"dones": [False], "infos": [{"collision": True}], "rewards": [-5.0]}
+    # Step 2: Intermediate step (non-terminal — info ignored for outcome)
+    adapter.locals = {"dones": [False], "infos": [{}], "rewards": [-5.0]}
     adapter.num_timesteps = 2
     adapter._on_step()
 
-    # Step 3: Success flag reported
-    adapter.locals = {"dones": [False], "infos": [{"success": True}], "rewards": [10.0]}
+    # Step 3: Intermediate step (non-terminal — info ignored for outcome)
+    adapter.locals = {"dones": [False], "infos": [{}], "rewards": [10.0]}
     adapter.num_timesteps = 3
     adapter._on_step()
 
-    # Step 4: Truncated timeout
+    # Step 4: Truncated timeout with collision + success on terminal step
     adapter.locals = {
         "dones": [True],
-        "infos": [{"TimeLimit.truncated": True}],
+        "infos": [{"TimeLimit.truncated": True, "collision": True, "success": True}],
         "rewards": [0.0],
     }
     adapter.num_timesteps = 4
