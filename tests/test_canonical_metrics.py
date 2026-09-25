@@ -1931,15 +1931,27 @@ def test_outcome_policy_selection_is_immutable_after_first_step() -> None:
     with pytest.raises(RuntimeError, match="immutable"):
         acc.is_traffic = True
 
-    # Late traffic telemetry must not switch a locked default policy
+    # Late traffic telemetry upgrades an unspecified policy to TrafficOutcomePolicy
     acc.record_step(
         reward=1.0,
         info={"queue_lengths": [3, 1], "overflow": True, "success": True},
         truncated=True,
     )
-    assert isinstance(acc.outcome_policy, DefaultOutcomePolicy)
+    assert isinstance(acc.outcome_policy, TrafficOutcomePolicy)
     m = acc.finish()
-    assert m.success is True
+    assert m.success is False
+
+    # Explicit policy selection is immutable and cannot be overridden by late telemetry
+    acc_explicit = EpisodeMetricsAccumulator(outcome_policy=DefaultOutcomePolicy())
+    acc_explicit.record_step(reward=1.0, info={"success": True})
+    acc_explicit.record_step(
+        reward=1.0,
+        info={"queue_lengths": [3, 1], "overflow": True, "success": True},
+        truncated=True,
+    )
+    assert isinstance(acc_explicit.outcome_policy, DefaultOutcomePolicy)
+    m_explicit = acc_explicit.finish()
+    assert m_explicit.success is True
 
 
 def test_extract_episode_metrics_info_and_step_infos_not_double_counted() -> None:

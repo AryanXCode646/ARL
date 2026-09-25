@@ -21,7 +21,6 @@ from adaptive_rl.curriculum.stage import CurriculumStage
 from adaptive_rl.curriculum.wrapper import CurriculumEnvWrapper
 from adaptive_rl.environments.registry import make_env
 from adaptive_rl.metrics import (
-    DefaultOutcomePolicy,
     EpisodeMetrics,
     EpisodeMetricsAccumulator,
     OutcomePolicy,
@@ -46,6 +45,7 @@ class CurriculumTrainer(BaseTrainer):
         curriculum: Optional[Curriculum] = None,
         env: Optional[gym.Env] = None,
         callbacks: Optional[List[BaseCallback]] = None,
+        outcome_policy: Optional[OutcomePolicy] = None,
     ) -> None:
         """Initialize CurriculumTrainer.
 
@@ -54,6 +54,7 @@ class CurriculumTrainer(BaseTrainer):
             curriculum: Optional explicit Curriculum instance.
             env: Optional base Gymnasium environment.
             callbacks: Optional additional callbacks.
+            outcome_policy: Optional explicit domain OutcomePolicy instance.
         """
         self.config = config
         self._set_deterministic_seed(self.config.seed)
@@ -135,10 +136,12 @@ class CurriculumTrainer(BaseTrainer):
             )
         training_cfg = self.config.training
 
-        if "traffic" in self.config.environment.name.lower():
-            self.outcome_policy: OutcomePolicy = TrafficOutcomePolicy()
+        if outcome_policy is not None:
+            self.outcome_policy: Optional[OutcomePolicy] = outcome_policy
+        elif "traffic" in self.config.environment.name.lower():
+            self.outcome_policy = TrafficOutcomePolicy()
         else:
-            self.outcome_policy = DefaultOutcomePolicy()
+            self.outcome_policy = None
 
         self._callbacks: List[BaseCallback] = [self.metric_logger, self.curriculum_callback]
 
