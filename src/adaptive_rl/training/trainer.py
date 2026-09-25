@@ -1,4 +1,4 @@
-'''Training engine implementations for AdaptiveRL.'''
+"""Training engine implementations for AdaptiveRL."""
 
 from __future__ import annotations
 
@@ -85,9 +85,7 @@ class BaseTrainer(ABC):
         if env is not None:
             self.env = env
         else:
-            self.env = make_env(
-                self.config.environment.name, **self.config.environment.parameters
-            )
+            self.env = make_env(self.config.environment.name, **self.config.environment.parameters)
 
         # 2️⃣ Choose an outcome policy (traffic specific or default)
         if "traffic" in self.config.environment.name.lower():
@@ -146,9 +144,7 @@ class BaseTrainer(ABC):
         )
 
         assert self.config.training is not None
-        self.algorithm.train(
-            total_timesteps=self.config.training.total_timesteps, callback=adapter
-        )
+        self.algorithm.train(total_timesteps=self.config.training.total_timesteps, callback=adapter)
 
         # Save the final model artifact
         models_dir = self.config.output_dir / "models"
@@ -274,7 +270,11 @@ class PPOTrainer(BaseTrainer):
 
     def _create_algorithm(self) -> PPOAlgorithm:
         algo_params = dict(self.config.algorithm.parameters)
-        lr = self.config.algorithm.learning_rate if self.config.algorithm.learning_rate is not None else 3e-4
+        lr = (
+            self.config.algorithm.learning_rate
+            if self.config.algorithm.learning_rate is not None
+            else 3e-4
+        )
         gamma = self.config.algorithm.gamma if self.config.algorithm.gamma is not None else 0.99
         batch_size = (
             self.config.algorithm.batch_size if self.config.algorithm.batch_size is not None else 64
@@ -294,7 +294,11 @@ class SACTrainer(BaseTrainer):
 
     def _create_algorithm(self) -> SACAlgorithm:
         algo_params = dict(self.config.algorithm.parameters)
-        lr = self.config.algorithm.learning_rate if self.config.algorithm.learning_rate is not None else 3e-4
+        lr = (
+            self.config.algorithm.learning_rate
+            if self.config.algorithm.learning_rate is not None
+            else 3e-4
+        )
         gamma = self.config.algorithm.gamma if self.config.algorithm.gamma is not None else 0.99
         batch_size = (
             self.config.algorithm.batch_size if self.config.algorithm.batch_size is not None else 64
