@@ -21,6 +21,17 @@ if TYPE_CHECKING:
     from adaptive_rl.training.checkpointing import CheckpointManager
 
 
+def _extract_bool_flag(value: Any, default: bool = False) -> bool:
+    """Safely extract a boolean flag handling NumPy scalars and arrays."""
+    if value is None:
+        return default
+    if isinstance(value, np.ndarray):
+        if value.size == 1:
+            return bool(value.item())
+        return bool(np.all(value))
+    return bool(value)
+
+
 class BaseCallback(ABC):
     """Abstract base class for monitoring, logging, and checkpointing during training."""
 
@@ -75,7 +86,8 @@ class MetricLoggerCallback(BaseCallback):
         """Initialize metric logger.
 
         Args:
-            window_size: Number of recent episodes used to calculate rolling statistics.
+            window_size: Number of recent episodes used to calculate rolling
+                statistics.
         """
         self.window_size = window_size
         self.episode_rewards: List[float] = []
@@ -98,15 +110,18 @@ class MetricLoggerCallback(BaseCallback):
         self.episode_rewards.append(episode_reward)
         self.episode_lengths.append(episode_length)
 
-        # Compatibility path for callers that have not yet migrated to the
-        # canonical EpisodeMetrics contract.
+        # Compatibility path for direct callers that have not yet migrated
+        # to the canonical EpisodeMetrics contract.
         if metrics is None:
             info_dict = dict(info or {})
 
-            is_truncated = bool(
-                info_dict.get("TimeLimit.truncated", False) or info_dict.get("truncated", False)
-            )
-            is_terminated = bool(info_dict.get("terminated", not is_truncated))
+            raw_truncated = info_dict.get("TimeLimit.truncated")
+            if raw_truncated is None:
+                raw_truncated = info_dict.get("truncated")
+            is_truncated = _extract_bool_flag(raw_truncated, default=False)
+
+            raw_terminated = info_dict.get("terminated")
+            is_terminated = _extract_bool_flag(raw_terminated, default=not is_truncated)
 
             metrics = extract_episode_metrics(
                 reward=episode_reward,
@@ -216,7 +231,11 @@ class SB3CallbackAdapter(SB3BaseCallback):
             ↓
         SB3CallbackAdapter._on_step()
             ↓
+        full step telemetry + Gymnasium flags
+            ↓
         EpisodeMetricsAccumulator.record_step()
+            ↓
+        OutcomePolicy (terminal-authoritative resolution)
             ↓
         EpisodeMetricsAccumulator.finish() -> EpisodeMetrics
             ↓
@@ -225,6 +244,15 @@ class SB3CallbackAdapter(SB3BaseCallback):
         MetricLoggerCallback / CurriculumCallback
             ↓
         EpisodeRecord / TrainingResult / serialization
+
+    The adapter transports raw step telemetry to the accumulator without
+    filtering.  Outcome authority (success/collision resolution) lives
+    exclusively in the OutcomePolicy layer, ensuring canonical results
+    are identical regardless of entry point (SB3, Evaluator, direct).
+
+    The adapter always supplies the canonical ``metrics`` argument.
+    Callback implementations that do not accept ``metrics`` therefore fail
+    loudly instead of being silently treated as legacy callbacks.
     """
 
     def __init__(
@@ -276,11 +304,15 @@ class SB3CallbackAdapter(SB3BaseCallback):
                     outcome_policy=self.outcome_policy,
                 )
 
-            is_truncated = bool(
-                info.get("TimeLimit.truncated", False) or info.get("truncated", False)
-            )
+            raw_truncated = info.get("TimeLimit.truncated")
+            if raw_truncated is None:
+                raw_truncated = info.get("truncated")
+            is_truncated = _extract_bool_flag(raw_truncated, default=False)
 
-            is_terminated = bool(info.get("terminated", done and not is_truncated))
+            raw_terminated = info.get("terminated")
+            is_terminated = _extract_bool_flag(
+                raw_terminated, default=bool(done and not is_truncated)
+            )
 
             accumulator = self._accumulators[i]
 

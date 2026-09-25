@@ -75,14 +75,19 @@ def aggregate_seed_evaluation(
     evaluator and the distribution-shift benchmark runner), so success,
     collision, reward, truncation, and recovery semantics stay identical.
 
-    Recovery aggregation (never collapses unavailable into 0.0):
-    - measured: episode terminal info carries a non-None `episode_recovery_time`
-      (mean completed recovery time in environment steps for that episode);
-    - unavailable: `recovery_events == 0` (no disturbance occurred);
-    - censored: events occurred but none completed before episode end.
-    `recovery_time` is the mean over measured episodes only, or None when no
-    episode measured a recovery. Episode-class counts are recorded under
-    `additional_metrics` (`recovery_episodes_measured/unavailable/censored`).
+    Recovery aggregation (event-weighted, censoring-aware, never collapsing
+    unavailable into 0.0):
+    - `recovery_time` pools every completed event time from each episode's
+      `recovery_times` list (episodes with many events weigh proportionally
+      more; per-episode means are NOT averaged).
+    - measured episodes carry a non-empty `recovery_times` list; unavailable
+      episodes have `recovery_events == 0`; censored-only episodes have events
+      but an empty `recovery_times` list.
+    - `recovery_completion_rate` (`recovery_censoring_rate`) is completed
+      (censored) events over total events, or None when total events is 0.
+    - When no episode exposes disturbance telemetry, every recovery field stays
+      None. Episode-class counts are still recorded under `additional_metrics`
+      (`recovery_episodes_measured/unavailable/censored`).
     """
     episode_list = list(episode_metrics)
     total = len(episode_list)
@@ -98,22 +103,52 @@ def aggregate_seed_evaluation(
         float(sum(1 for m in episode_list if m.truncated) / total) if total > 0 else None
     )
 
-    measured_recoveries: List[float] = []
-    unavailable_count = 0
-    censored_count = 0
-    for m in episode_list:
-        extra = m.additional_metrics if isinstance(m.additional_metrics, dict) else {}
-        episode_recovery = extra.get("episode_recovery_time")
-        if episode_recovery is not None:
-            measured_recoveries.append(float(episode_recovery))
-        elif int(extra.get("recovery_events", 0) or 0) > 0:
-            censored_count += 1
-        else:
-            unavailable_count += 1
-
-    recovery_time: Optional[float] = (
-        float(sum(measured_recoveries) / len(measured_recoveries)) if measured_recoveries else None
+    telemetry_present = any(
+        isinstance(m.additional_metrics, dict)
+        and ("recovery_times" in m.additional_metrics or "recovery_events" in m.additional_metrics)
+        for m in episode_list
     )
+
+    all_completed_times: List[float] = []
+    total_events = 0
+    censored_events = 0
+    measured_episodes = 0
+    unavailable_episodes = 0
+    censored_only_episodes = 0
+    if telemetry_present:
+        for m in episode_list:
+            extra = m.additional_metrics if isinstance(m.additional_metrics, dict) else {}
+            times = [float(t) for t in (extra.get("recovery_times") or [])]
+            events = int(extra.get("recovery_events") or 0)
+            censored = int(extra.get("recovery_censored") or 0)
+            all_completed_times.extend(times)
+            total_events += events
+            censored_events += censored
+            if times:
+                measured_episodes += 1
+            elif events > 0:
+                censored_only_episodes += 1
+            else:
+                unavailable_episodes += 1
+    else:
+        unavailable_episodes = total
+
+    completed_events = len(all_completed_times)
+    recovery_time: Optional[float] = (
+        float(sum(all_completed_times) / len(all_completed_times)) if all_completed_times else None
+    )
+    if not telemetry_present:
+        recovery_total: Optional[int] = None
+        recovery_completed: Optional[int] = None
+        recovery_censored: Optional[int] = None
+        completion_rate: Optional[float] = None
+        censoring_rate: Optional[float] = None
+    else:
+        recovery_total = total_events
+        recovery_completed = completed_events
+        recovery_censored = censored_events
+        completion_rate = float(completed_events / total_events) if total_events > 0 else None
+        censoring_rate = float(censored_events / total_events) if total_events > 0 else None
 
     return EvaluationMetrics(
         episodes=total,
@@ -125,15 +160,20 @@ def aggregate_seed_evaluation(
         collision_rate=collision_rate,
         truncation_rate=truncation_rate,
         recovery_time=recovery_time,
+        recovery_events=recovery_total,
+        recovery_completed_events=recovery_completed,
+        recovery_censored_events=recovery_censored,
+        recovery_completion_rate=completion_rate,
+        recovery_censoring_rate=censoring_rate,
         mean_episode_length=float(np.mean(lengths)) if lengths else 0.0,
         std_episode_length=float(np.std(lengths)) if lengths else 0.0,
         additional_metrics={
             "evaluated_seeds": [int(s) for s in seeds],
             "all_rewards": rewards,
             "all_lengths": lengths,
-            "recovery_episodes_measured": len(measured_recoveries),
-            "recovery_episodes_unavailable": unavailable_count,
-            "recovery_episodes_censored": censored_count,
+            "recovery_episodes_measured": measured_episodes,
+            "recovery_episodes_unavailable": unavailable_episodes,
+            "recovery_episodes_censored": censored_only_episodes,
         },
     )
 

@@ -200,6 +200,7 @@ class DroneDisturbance3DEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
         disturbance_strength: float = 0.0,
         disturbance_theta: float = 0.15,
         disturbance_event_factor: float = 1.5,
+        disturbance_event_threshold_override: Optional[float] = None,
         recovery_speed_tolerance: float = 1.0,
         recovery_hold_steps: int = 5,
     ) -> None:
@@ -216,6 +217,10 @@ class DroneDisturbance3DEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
             disturbance_event_factor: Dimensionless onset factor; a disturbance
                 event starts when ``||gust + injected||`` reaches
                 ``disturbance_event_factor`` times the transient RMS scale.
+            disturbance_event_threshold_override: Optional fixed event threshold
+                (m/s). When set, every scenario uses the same event definition
+                regardless of its disturbance severity; when None (default) the
+                legacy derived threshold is used.
             recovery_speed_tolerance: Allowed speed deviation (m/s) from the
                 onset reference speed for recovery.
             recovery_hold_steps: Consecutive calm steps required for recovery.
@@ -236,6 +241,14 @@ class DroneDisturbance3DEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
         if disturbance_event_factor <= 0.0:
             raise ValueError(
                 f"disturbance_event_factor must be positive, got {disturbance_event_factor}"
+            )
+        if (
+            disturbance_event_threshold_override is not None
+            and disturbance_event_threshold_override <= 0.0
+        ):
+            raise ValueError(
+                "disturbance_event_threshold_override must be positive, "
+                f"got {disturbance_event_threshold_override}"
             )
         if recovery_speed_tolerance < 0.0:
             raise ValueError(
@@ -288,6 +301,11 @@ class DroneDisturbance3DEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
         self.disturbance_strength = float(disturbance_strength)
         self.disturbance_theta = float(disturbance_theta)
         self.disturbance_event_factor = float(disturbance_event_factor)
+        self.disturbance_event_threshold_override: Optional[float] = (
+            None
+            if disturbance_event_threshold_override is None
+            else float(disturbance_event_threshold_override)
+        )
         self.recovery_speed_tolerance = float(recovery_speed_tolerance)
         self.recovery_hold_steps = int(recovery_hold_steps)
 
@@ -394,12 +412,16 @@ class DroneDisturbance3DEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
     def disturbance_event_threshold(self) -> float:
         """Magnitude threshold (m/s) at which a disturbance event starts.
 
-        Defined as ``disturbance_event_factor`` times the transient RMS scale
-        ``sqrt(3) * sqrt(gust_stat^2 + disturbance_strength^2)``, where
-        ``gust_stat = gust_sigma / sqrt(2 * gust_theta)`` is the per-axis
+        When ``disturbance_event_threshold_override`` is set, that fixed value is
+        returned so every scenario shares one event definition. Otherwise the
+        legacy derived threshold is used: ``disturbance_event_factor`` times the
+        transient RMS scale ``sqrt(3) * sqrt(gust_stat^2 + disturbance_strength^2)``,
+        where ``gust_stat = gust_sigma / sqrt(2 * gust_theta)`` is the per-axis
         stationary gust standard deviation. Returns ``0.0`` (detection disabled)
         when no stochastic disturbance is configured.
         """
+        if self.disturbance_event_threshold_override is not None:
+            return float(self.disturbance_event_threshold_override)
         theta = float(self.wind_field.gust_theta)
         sigma = float(self.wind_field.gust_sigma)
         gust_stat = sigma / math.sqrt(2.0 * theta) if theta > 0.0 else sigma
@@ -429,7 +451,13 @@ class DroneDisturbance3DEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
             "disturbance_strength": float(self.disturbance_strength),
             "disturbance_theta": float(self.disturbance_theta),
             "disturbance_event_factor": float(self.disturbance_event_factor),
+            "disturbance_event_threshold_override": self.disturbance_event_threshold_override,
             "disturbance_event_threshold": float(self.disturbance_event_threshold),
+            "disturbance_event_threshold_source": (
+                "benchmark_override"
+                if self.disturbance_event_threshold_override is not None
+                else "derived"
+            ),
             "recovery_speed_tolerance": float(self.recovery_speed_tolerance),
             "recovery_hold_steps": int(self.recovery_hold_steps),
             "linear_damping": float(self.linear_damping),
@@ -840,6 +868,15 @@ class DroneDisturbance3DEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
                 if float(value) <= 0.0:
                     raise ValueError(f"disturbance_event_factor must be positive, got {value}")
                 self.disturbance_event_factor = float(value)
+            elif key == "disturbance_event_threshold_override":
+                if value is None:
+                    self.disturbance_event_threshold_override = None
+                else:
+                    if float(value) <= 0.0:
+                        raise ValueError(
+                            f"disturbance_event_threshold_override must be positive, got {value}"
+                        )
+                    self.disturbance_event_threshold_override = float(value)
             elif key == "recovery_speed_tolerance":
                 if float(value) < 0.0:
                     raise ValueError(f"recovery_speed_tolerance cannot be negative, got {value}")

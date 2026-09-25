@@ -1,10 +1,15 @@
 """Tests for the Issue #105 controlled distribution-shift benchmark.
 
 Covers:
-- Benchmark spec validation (seed overlap, TRAIN count, empty seeds, duplicate names)
+- Benchmark spec validation (seed overlap, TRAIN count, empty seeds, duplicate names,
+  duplicate seeds within a scenario)
 - Environment overrides actually changing dynamics (real registered environments)
 - TRAIN-only training containment and frozen-policy evaluation
 - Success/collision/reward extraction and recovery-time measurement/censoring
+- Event-weighted, censoring-aware recovery aggregation (no false-positive gaps)
+- Fixed cross-scenario event threshold with recorded provenance
+- Raw per-episode records reconstructing every aggregate
+- Preflight executing a real environment step
 - Generalization gap math with explicit directionality
 - Backward compatibility (generalization pipeline, drone defaults)
 - CLI benchmark-shifts command and end-to-end JSON artifact smoke test
@@ -13,6 +18,7 @@ Covers:
 import json
 from pathlib import Path
 from typing import Any, Dict, List
+from unittest import mock
 
 import numpy as np
 import pytest
@@ -31,16 +37,18 @@ from adaptive_rl.environments import make_env
 from adaptive_rl.evaluation.generalization import (
     GeneralizationDistribution,
     GeneralizationEvaluator,
+    aggregate_seed_evaluation,
 )
 from adaptive_rl.evaluation.metrics import EvaluationMetrics
 from adaptive_rl.evaluation.shift_benchmark import (
     DistributionShiftBenchmarkSpec,
+    RecoverySummary,
     ShiftScenario,
     compute_scenario_gaps,
     load_shift_benchmark_config,
 )
 from adaptive_rl.experiments.shift_runner import DistributionShiftBenchmarkRunner
-from adaptive_rl.metrics import compute_rate
+from adaptive_rl.metrics import EpisodeMetrics, compute_rate
 
 runner = CliRunner()
 
@@ -261,7 +269,7 @@ def test_end_to_end_smoke_produces_valid_json_artifact(tmp_path: Path) -> None:
     assert artifact.exists()
     with open(artifact, "r", encoding="utf-8") as f:
         data = json.load(f)
-    assert data["schema_version"] == "1.0"
+    assert data["schema_version"] == "1.1"
     assert [s["scenario_name"] for s in data["scenarios"]] == ["TRAIN", "TEST-A", "TEST-B"]
     assert data["training_provenance"]["test_seed_contamination"] is False
 
@@ -418,13 +426,15 @@ def test_recovery_telemetry_consistent_on_real_disturbed_episodes() -> None:
 
 
 def test_generalization_gaps_mathematically_correct() -> None:
-    """Gap directionality: positive always means TEST performed worse than TRAIN."""
+    """Gap directionality: positive means TEST worse; recovery time gap needs full completion."""
 
     def _metrics(
         success: float | None,
         collision: float | None,
         reward: float,
         recovery: float | None,
+        completion: float | None,
+        censoring: float | None,
     ) -> EvaluationMetrics:
         return EvaluationMetrics(
             episodes=4,
@@ -432,26 +442,45 @@ def test_generalization_gaps_mathematically_correct() -> None:
             success_rate=success,
             collision_rate=collision,
             recovery_time=recovery,
+            recovery_events=10 if completion is not None else None,
+            recovery_completed_events=(int(10 * completion) if completion is not None else None),
+            recovery_censored_events=int(10 * censoring) if censoring is not None else None,
+            recovery_completion_rate=completion,
+            recovery_censoring_rate=censoring,
             mean_episode_length=10.0,
         )
 
+    # Both sides fully recovered: time gap defined (test - train).
     gaps = compute_scenario_gaps(
-        _metrics(0.8, 0.1, 10.0, 5.0),
-        _metrics(0.5, 0.4, 4.0, 12.0),
+        _metrics(0.8, 0.1, 10.0, 5.0, 1.0, 0.0),
+        _metrics(0.5, 0.4, 4.0, 12.0, 1.0, 0.0),
     )
     assert gaps.success_gap == pytest.approx(0.3)  # train - test
     assert gaps.reward_gap == pytest.approx(6.0)  # train - test
     assert gaps.collision_gap == pytest.approx(0.3)  # test - train
-    assert gaps.recovery_gap == pytest.approx(7.0)  # test - train
+    assert gaps.recovery_time_gap == pytest.approx(7.0)  # test - train
+    assert gaps.recovery_completion_gap == pytest.approx(0.0)
+    assert gaps.recovery_censoring_gap == pytest.approx(0.0)
+
+    # TEST censored: time gap suppressed, completion/censoring gaps carry the signal.
+    gaps_cens = compute_scenario_gaps(
+        _metrics(0.8, 0.1, 10.0, 5.0, 1.0, 0.0),
+        _metrics(0.5, 0.4, 4.0, 4.0, 0.2, 0.8),
+    )
+    assert gaps_cens.recovery_time_gap is None
+    assert gaps_cens.recovery_completion_gap == pytest.approx(0.8)  # train - test
+    assert gaps_cens.recovery_censoring_gap == pytest.approx(0.8)  # test - train
 
     # Unavailable inputs propagate None instead of collapsing into 0.0.
     gaps_none = compute_scenario_gaps(
-        _metrics(None, None, 10.0, None),
-        _metrics(0.5, 0.4, 4.0, 12.0),
+        _metrics(None, None, 10.0, None, None, None),
+        _metrics(0.5, 0.4, 4.0, 12.0, 1.0, 0.0),
     )
     assert gaps_none.success_gap is None
     assert gaps_none.collision_gap is None
-    assert gaps_none.recovery_gap is None
+    assert gaps_none.recovery_time_gap is None
+    assert gaps_none.recovery_completion_gap is None
+    assert gaps_none.recovery_censoring_gap is None
     assert gaps_none.reward_gap == pytest.approx(6.0)
 
 
@@ -558,3 +587,243 @@ def test_cli_benchmark_shifts_command(tmp_path: Path) -> None:
         "TEST-C",
         "TEST-D",
     ]
+
+
+def _episode(
+    reward: float,
+    success: bool | None,
+    collision: bool | None,
+    times: List[int],
+    events: int,
+    censored: int,
+    length: int = 10,
+) -> EpisodeMetrics:
+    """Build a synthetic canonical episode with drone-style recovery telemetry."""
+    mean_time = float(sum(times) / len(times)) if times else None
+    return EpisodeMetrics(
+        reward=reward,
+        length=length,
+        success=success,
+        collision=collision,
+        terminated=True,
+        truncated=False,
+        additional_metrics={
+            "recovery_times": list(times),
+            "recovery_events": events,
+            "recovery_completed": len(times),
+            "recovery_censored": censored,
+            "episode_recovery_time": mean_time,
+        },
+    )
+
+
+def test_recovery_time_is_event_weighted() -> None:
+    """Episodes with many events weigh proportionally more (no mean-of-means)."""
+    episodes = [
+        _episode(1.0, True, False, [30], 1, 0),
+        _episode(2.0, True, False, [5] * 10, 10, 0),
+    ]
+    metrics = aggregate_seed_evaluation(episodes, [1, 2])
+    # Event-weighted: (30 + 10*5) / 11 = 80/11; mean-of-means would be 17.5.
+    assert metrics.recovery_time == pytest.approx(80.0 / 11.0)
+    assert metrics.recovery_time != pytest.approx(17.5)
+    assert metrics.recovery_events == 11
+    assert metrics.recovery_completed_events == 11
+    assert metrics.recovery_censored_events == 0
+    assert metrics.recovery_completion_rate == pytest.approx(1.0)
+    assert metrics.recovery_censoring_rate == pytest.approx(0.0)
+
+
+def test_recovery_censoring_does_not_create_false_positive_gap() -> None:
+    """A censored TEST with a low conditional mean must not look spuriously faster."""
+    train_episodes = [_episode(5.0, True, False, [10] * 10, 10, 0)]
+    test_episodes = [_episode(1.0, False, True, [4, 4], 10, 8)]
+    train_metrics = aggregate_seed_evaluation(train_episodes, [1])
+    test_metrics = aggregate_seed_evaluation(test_episodes, [2])
+
+    assert train_metrics.recovery_time == pytest.approx(10.0)
+    assert test_metrics.recovery_time == pytest.approx(4.0)  # conditional only
+    assert test_metrics.recovery_completion_rate == pytest.approx(0.2)
+    assert test_metrics.recovery_censoring_rate == pytest.approx(0.8)
+
+    gaps = compute_scenario_gaps(train_metrics, test_metrics)
+    assert gaps.recovery_time_gap is None  # 4.0 < 10.0 must never read as "better"
+    assert gaps.recovery_completion_gap == pytest.approx(0.8)  # TEST worse
+    assert gaps.recovery_censoring_gap == pytest.approx(0.8)  # TEST worse
+
+
+def test_recovery_completion_rate_is_reported() -> None:
+    """Completion/censoring rates and counts are first-class scenario metrics."""
+    episodes = [
+        _episode(1.0, True, False, [6, 8], 2, 0),
+        _episode(2.0, False, True, [], 1, 1),
+        _episode(3.0, False, False, [], 0, 0),
+    ]
+    metrics = aggregate_seed_evaluation(episodes, [1, 2, 3])
+    assert metrics.recovery_events == 3
+    assert metrics.recovery_completed_events == 2
+    assert metrics.recovery_censored_events == 1
+    assert metrics.recovery_completion_rate == pytest.approx(2.0 / 3.0)
+    assert metrics.recovery_censoring_rate == pytest.approx(1.0 / 3.0)
+    assert metrics.recovery_time == pytest.approx(7.0)
+    assert metrics.additional_metrics["recovery_episodes_measured"] == 1
+    assert metrics.additional_metrics["recovery_episodes_unavailable"] == 1
+    assert metrics.additional_metrics["recovery_episodes_censored"] == 1
+
+    summary = RecoverySummary.from_metrics(metrics)
+    assert summary.total_events == 3
+    assert summary.completed_events == 2
+    assert summary.censored_events == 1
+    assert summary.completion_rate == pytest.approx(2.0 / 3.0)
+    assert summary.censoring_rate == pytest.approx(1.0 / 3.0)
+    assert summary.mean_completed_recovery_time == pytest.approx(7.0)
+
+
+def test_recovery_time_gap_none_when_test_has_censoring() -> None:
+    """Time gap requires 100% completion on both sides; completion gap stays defined."""
+    train_metrics = aggregate_seed_evaluation([_episode(1.0, True, False, [9], 1, 0)], [1])
+    test_metrics = aggregate_seed_evaluation(
+        [_episode(1.0, True, False, [9], 1, 0), _episode(0.0, False, True, [], 1, 1)],
+        [2, 3],
+    )
+    assert test_metrics.recovery_completion_rate == pytest.approx(0.5)
+    gaps = compute_scenario_gaps(train_metrics, test_metrics)
+    assert gaps.recovery_time_gap is None
+    assert gaps.recovery_completion_gap == pytest.approx(0.5)
+    assert gaps.recovery_censoring_gap == pytest.approx(0.5)
+
+
+def test_fixed_recovery_threshold_is_identical_across_scenarios() -> None:
+    """The benchmark fixed threshold reaches every scenario with the same value."""
+    _, spec = load_shift_benchmark_config("configs/drone_distribution_shift.yaml")
+    assert spec.recovery_event_threshold == pytest.approx(0.7)
+    from adaptive_rl.environments.drone.disturbed_drone import DroneDisturbance3DEnv
+
+    for scenario in spec.scenarios:
+        params = spec.effective_scenario_parameters(scenario)
+        assert params["disturbance_event_threshold_override"] == pytest.approx(0.7)
+        env = DroneDisturbance3DEnv(**{k: v for k, v in params.items() if k != "max_steps"})
+        assert env.disturbance_event_threshold == pytest.approx(0.7)
+        env.close()
+
+
+def test_recovery_threshold_is_recorded_in_effective_parameters() -> None:
+    """Effective parameters record both the threshold value and its source."""
+    from adaptive_rl.environments.drone.disturbed_drone import DroneDisturbance3DEnv
+
+    fixed = DroneDisturbance3DEnv(disturbance_event_threshold_override=0.7)
+    eff = fixed.get_effective_parameters()
+    assert eff["disturbance_event_threshold"] == pytest.approx(0.7)
+    assert eff["disturbance_event_threshold_source"] == "benchmark_override"
+    fixed.close()
+
+    derived = DroneDisturbance3DEnv()
+    eff_derived = derived.get_effective_parameters()
+    assert eff_derived["disturbance_event_threshold_source"] == "derived"
+    assert eff_derived["disturbance_event_threshold"] == pytest.approx(
+        derived.disturbance_event_threshold
+    )
+    # Legacy derived behavior is unchanged when the override is absent.
+    import math
+
+    gust_stat = 0.4 / math.sqrt(2.0 * 0.15)
+    assert eff_derived["disturbance_event_threshold"] == pytest.approx(
+        1.5 * math.sqrt(3.0 * gust_stat**2)
+    )
+    derived.close()
+
+
+def test_per_episode_records_are_written_to_report(tmp_path: Path) -> None:
+    """Every scenario stores one raw record per evaluated seed, in seed order."""
+    spec = _gridworld_spec()
+    config = _gridworld_experiment_config(tmp_path)
+    report = DistributionShiftBenchmarkRunner(spec=spec).run(config)
+
+    for res in report.scenarios:
+        assert len(res.episodes) == len(res.seeds)
+        assert [rec.seed for rec in res.episodes] == res.seeds
+        for rec in res.episodes:
+            assert rec.recovery_completed == len(rec.recovery_times)
+            assert rec.recovery_events == rec.recovery_completed + rec.recovery_censored
+
+
+def test_per_episode_records_reconstruct_aggregate_metrics(tmp_path: Path) -> None:
+    """Aggregates recomputed from raw records match the reported scenario metrics."""
+    spec = _gridworld_spec()
+    config = _gridworld_experiment_config(tmp_path)
+    report = DistributionShiftBenchmarkRunner(spec=spec).run(config)
+
+    for res in report.scenarios:
+        recs = res.episodes
+        assert res.metrics.success_rate == compute_rate([r.success for r in recs])
+        assert res.metrics.collision_rate == compute_rate([r.collision for r in recs])
+        assert res.metrics.mean_reward == pytest.approx(float(np.mean([r.reward for r in recs])))
+        all_times = [t for r in recs for t in r.recovery_times]
+        if all_times:
+            assert res.metrics.recovery_time == pytest.approx(float(np.mean(all_times)))
+            assert res.recovery.total_events == sum(r.recovery_events for r in recs)
+            assert res.recovery.completed_events == len(all_times)
+        else:
+            assert res.metrics.recovery_time is None
+            assert res.recovery.total_events == 0
+            assert res.recovery.completion_rate is None
+
+
+def test_preflight_executes_real_environment_step() -> None:
+    """Preflight validation executes step() dynamics (spy passes through to real code)."""
+    from adaptive_rl.environments.drone.disturbed_drone import DroneDisturbance3DEnv
+
+    spec = DistributionShiftBenchmarkSpec(
+        name="preflight_probe",
+        environment_name="drone_disturbed",
+        scenarios=[
+            ShiftScenario(
+                name="TRAIN",
+                role="train",
+                seeds=[11],
+                environment_overrides={"num_obstacles": 8, "num_dynamic_obstacles": 0},
+            ),
+            ShiftScenario(
+                name="TEST-A",
+                role="test",
+                seeds=[22],
+                environment_overrides={"num_obstacles": 10, "num_dynamic_obstacles": 0},
+            ),
+        ],
+    )
+    calls: List[int] = []
+    original_step = DroneDisturbance3DEnv.step
+
+    def spy_step(self: DroneDisturbance3DEnv, action: Any) -> Any:
+        calls.append(1)
+        return original_step(self, action)
+
+    with mock.patch.object(DroneDisturbance3DEnv, "step", spy_step):
+        effective = spec.validate_environments(max_steps=50)
+    assert len(calls) == 2  # one real step per scenario
+    assert set(effective) == {"TRAIN", "TEST-A"}
+
+    # A construct-time failure names the offending scenario.
+    bad = DistributionShiftBenchmarkSpec(
+        name="preflight_bad",
+        environment_name="drone_disturbed",
+        scenarios=[
+            ShiftScenario(name="TRAIN", role="train", seeds=[11]),
+            ShiftScenario(
+                name="TEST-BROKEN",
+                role="test",
+                seeds=[22],
+                environment_overrides={"bounds": [-1.0, 5.0, 5.0]},
+            ),
+        ],
+    )
+    with pytest.raises(ValueError, match="TEST-BROKEN"):
+        bad.validate_environments(max_steps=50)
+
+
+def test_duplicate_seeds_within_scenario_are_rejected() -> None:
+    """Seed lists must contain unique integers inside each scenario."""
+    with pytest.raises(ValueError, match="must be unique"):
+        _gridworld_spec(train_seeds=[100, 100, 101])
+    with pytest.raises(ValueError, match="must be unique"):
+        _gridworld_spec(test_a_seeds=[200, 201, 200])

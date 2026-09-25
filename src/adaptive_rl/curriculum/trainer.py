@@ -21,7 +21,6 @@ from adaptive_rl.curriculum.stage import CurriculumStage
 from adaptive_rl.curriculum.wrapper import CurriculumEnvWrapper
 from adaptive_rl.environments.registry import make_env
 from adaptive_rl.metrics import (
-    DefaultOutcomePolicy,
     EpisodeMetrics,
     EpisodeMetricsAccumulator,
     OutcomePolicy,
@@ -46,6 +45,7 @@ class CurriculumTrainer(BaseTrainer):
         curriculum: Optional[Curriculum] = None,
         env: Optional[gym.Env] = None,
         callbacks: Optional[List[BaseCallback]] = None,
+        outcome_policy: Optional[OutcomePolicy] = None,
     ) -> None:
         """Initialize CurriculumTrainer.
 
@@ -54,6 +54,7 @@ class CurriculumTrainer(BaseTrainer):
             curriculum: Optional explicit Curriculum instance.
             env: Optional base Gymnasium environment.
             callbacks: Optional additional callbacks.
+            outcome_policy: Optional explicit domain OutcomePolicy instance.
         """
         self.config = config
         self._set_deterministic_seed(self.config.seed)
@@ -135,10 +136,12 @@ class CurriculumTrainer(BaseTrainer):
             )
         training_cfg = self.config.training
 
-        if "traffic" in self.config.environment.name.lower():
-            self.outcome_policy: OutcomePolicy = TrafficOutcomePolicy()
+        if outcome_policy is not None:
+            self.outcome_policy: Optional[OutcomePolicy] = outcome_policy
+        elif "traffic" in self.config.environment.name.lower():
+            self.outcome_policy = TrafficOutcomePolicy()
         else:
-            self.outcome_policy = DefaultOutcomePolicy()
+            self.outcome_policy = None
 
         self._callbacks: List[BaseCallback] = [self.metric_logger, self.curriculum_callback]
 
@@ -152,7 +155,10 @@ class CurriculumTrainer(BaseTrainer):
         if callbacks:
             self._callbacks.extend(callbacks)
 
-        # 5. Algorithm initialization
+        self.algorithm = self._create_algorithm()
+
+    def _create_algorithm(self) -> BaseAlgorithm:
+        """Create and configure the RL algorithm instance for curriculum training."""
         algo_name = self.config.algorithm.name.lower()
         algo_params = dict(self.config.algorithm.parameters)
         lr = (
@@ -165,9 +171,8 @@ class CurriculumTrainer(BaseTrainer):
             self.config.algorithm.batch_size if self.config.algorithm.batch_size is not None else 64
         )
 
-        self.algorithm: BaseAlgorithm
         if algo_name == "ppo":
-            self.algorithm = PPOAlgorithm(
+            return PPOAlgorithm(
                 env=self.env,
                 learning_rate=lr,
                 gamma=gamma,
@@ -176,7 +181,7 @@ class CurriculumTrainer(BaseTrainer):
                 **algo_params,
             )
         elif algo_name == "sac":
-            self.algorithm = SACAlgorithm(
+            return SACAlgorithm(
                 env=self.env,
                 learning_rate=lr,
                 gamma=gamma,
