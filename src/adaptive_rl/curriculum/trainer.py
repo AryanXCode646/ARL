@@ -152,7 +152,10 @@ class CurriculumTrainer(BaseTrainer):
         if callbacks:
             self._callbacks.extend(callbacks)
 
-        # 5. Algorithm initialization
+        self.algorithm = self._create_algorithm()
+
+    def _create_algorithm(self) -> BaseAlgorithm:
+        """Create and configure the RL algorithm instance for curriculum training."""
         algo_name = self.config.algorithm.name.lower()
         algo_params = dict(self.config.algorithm.parameters)
         lr = (
@@ -165,9 +168,8 @@ class CurriculumTrainer(BaseTrainer):
             self.config.algorithm.batch_size if self.config.algorithm.batch_size is not None else 64
         )
 
-        self.algorithm: BaseAlgorithm
         if algo_name == "ppo":
-            self.algorithm = PPOAlgorithm(
+            return PPOAlgorithm(
                 env=self.env,
                 learning_rate=lr,
                 gamma=gamma,
@@ -176,7 +178,7 @@ class CurriculumTrainer(BaseTrainer):
                 **algo_params,
             )
         elif algo_name == "sac":
-            self.algorithm = SACAlgorithm(
+            return SACAlgorithm(
                 env=self.env,
                 learning_rate=lr,
                 gamma=gamma,

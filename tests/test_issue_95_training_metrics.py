@@ -26,6 +26,8 @@ from adaptive_rl.experiments.metadata import (
 )
 from adaptive_rl.metrics import (
     EpisodeMetrics,
+    EpisodeMetricsAccumulator,
+    TrafficOutcomePolicy,
     compute_rate,
     extract_episode_metrics,
 )
@@ -625,14 +627,596 @@ def test_e2e_training_misleading_nonterminal_telemetry_artifact(
     env = MisleadingEnv()
     prefix = "ppo" if trainer_cls is PPOTrainer else "sac"
     result = _run_trainer_e2e(trainer_cls, env, tmp_path, f"{prefix}_mislead")
-    # Outcome should be undefined because terminal info is missing
+    # Success is terminal-authoritative: terminal step has no success key -> None.
     assert result.success_rate is None
-    assert result.collision_rate is None
+    # Collision is episode-level: non-terminal step explicitly reported collision=False,
+    # so collision is defined (False), not unknown (None).
+    assert result.collision_rate == 0.0
     records, metadata = _read_training_artifacts(result)
     assert result.episodes_completed == 2
     assert len(records) == 2
     for record in records:
         assert record.success is None
-        assert record.collision is None
+        assert record.collision is False
     assert metadata["success_rate"] is None
-    assert metadata["collision_rate"] is None
+    assert metadata["collision_rate"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 & Phase 6/7/19 Comprehensive Verification Matrix
+# ---------------------------------------------------------------------------
+
+
+class TestCanonicalSemanticsMatrix:
+    """Explicit regression coverage for TEST A through TEST F and Phase 19."""
+
+    def test_matrix_a_nonterminal_success_terminal_empty(self) -> None:
+        """TEST A: Non-terminal success=True, terminal info empty -> success=None."""
+        acc = EpisodeMetricsAccumulator()
+        acc.record_step(reward=1.0, terminated=False, truncated=False, info={"success": True})
+        acc.record_step(reward=1.0, terminated=True, truncated=False, info={})
+        m = acc.finish()
+        assert m.success is None
+
+    def test_matrix_b_nonterminal_success_terminal_false(self) -> None:
+        """TEST B: Non-terminal success=True, terminal success=False -> success=False."""
+        acc = EpisodeMetricsAccumulator()
+        acc.record_step(reward=1.0, terminated=False, truncated=False, info={"success": True})
+        acc.record_step(reward=1.0, terminated=True, truncated=False, info={"success": False})
+        m = acc.finish()
+        assert m.success is False
+
+    def test_matrix_c_nonterminal_success_terminal_true(self) -> None:
+        """TEST C: Non-terminal success=True, terminal success=True -> success=True."""
+        acc = EpisodeMetricsAccumulator()
+        acc.record_step(reward=1.0, terminated=False, truncated=False, info={"success": True})
+        acc.record_step(reward=1.0, terminated=True, truncated=False, info={"success": True})
+        m = acc.finish()
+        assert m.success is True
+
+    def test_matrix_d_nonterminal_collision_terminal_absent(self) -> None:
+        """TEST D: Non-terminal collision=True, terminal collision absent -> collision=True."""
+        acc = EpisodeMetricsAccumulator()
+        acc.record_step(reward=1.0, terminated=False, truncated=False, info={"collision": True})
+        acc.record_step(reward=1.0, terminated=True, truncated=False, info={})
+        m = acc.finish()
+        assert m.collision is True
+
+    def test_matrix_e_terminal_success_true_collision_true(self) -> None:
+        """TEST E: Terminal success=True + collision=True -> success=False, collision=True."""
+        acc = EpisodeMetricsAccumulator()
+        acc.record_step(
+            reward=1.0,
+            terminated=True,
+            truncated=False,
+            info={"success": True, "collision": True},
+        )
+        m = acc.finish()
+        assert m.success is False
+        assert m.collision is True
+
+    def test_matrix_f_terminal_collision_with_success_absent(self) -> None:
+        """TEST F: Terminal collision=True with success absent -> success=None, collision=True."""
+        acc = EpisodeMetricsAccumulator()
+        acc.record_step(
+            reward=1.0,
+            terminated=True,
+            truncated=False,
+            info={"collision": True},
+        )
+        m = acc.finish()
+        assert m.success is None
+        assert m.collision is True
+
+    def test_phase_19_manual_semantic_proof_episode(self) -> None:
+        """PHASE 19: Step 1 success=True, Step 2 collision=True, Step 3 info={}.
+
+        Canonical outcome must NOT become success=True. Monotonic collision=True must be preserved.
+        """
+        acc = EpisodeMetricsAccumulator()
+        acc.record_step(reward=1.0, terminated=False, truncated=False, info={"success": True})
+        acc.record_step(reward=1.0, terminated=False, truncated=False, info={"collision": True})
+        acc.record_step(reward=1.0, terminated=True, truncated=False, info={})
+        m = acc.finish()
+        assert m.success is None
+        assert m.collision is True
+
+
+class TestTrafficTelemetrySB3:
+    """Explicit regression coverage for TEST G & H (Traffic Telemetry Retention & Policy)."""
+
+    def test_matrix_g_nonterminal_traffic_overflow_preserved_in_sb3(self) -> None:
+        """TEST G: Non-terminal traffic overflow=True, terminal success=True.
+
+        The SB3 path MUST preserve step-1 traffic telemetry so TrafficOutcomePolicy
+        sees the overflow and applies overflow semantics (success=False).
+        """
+        logger = MetricLoggerCallback()
+        adapter = SB3CallbackAdapter(
+            callbacks=[logger],
+            outcome_policy=TrafficOutcomePolicy(),
+        )
+
+        # Step 1: non-terminal with traffic overflow
+        adapter.num_timesteps = 1
+        adapter.locals = {
+            "dones": [False],
+            "rewards": [1.0],
+            "infos": [{"step_overflow": True, "total_queue": 15}],
+        }
+        adapter._on_step()
+
+        # Step 2: terminal with success=True
+        adapter.num_timesteps = 2
+        adapter.locals = {
+            "dones": [True],
+            "rewards": [2.0],
+            "infos": [{"success": True, "total_queue": 5}],
+        }
+        adapter._on_step()
+
+        assert len(logger.episode_metrics) == 1
+        m = logger.episode_metrics[0]
+        # Overflow overrides positive terminal success in TrafficOutcomePolicy
+        assert m.success is False
+        assert m.additional_metrics.get("had_overflow") is True
+        assert m.reward == 3.0
+        assert m.length == 2
+
+    @pytest.mark.parametrize("trainer_cls", [PPOTrainer, SACTrainer])
+    def test_matrix_g_traffic_overflow_in_real_training_path(
+        self, trainer_cls: type[PPOTrainer] | type[SACTrainer], tmp_path: Path
+    ) -> None:
+        """TEST G (Real Trainer Path): Step 1 emits overflow=True, Step 2 emits success=True.
+
+        Verifies that non-terminal telemetry survives all the way through SB3 PPO/SAC training
+        to TrafficOutcomePolicy.
+        """
+
+        class TrafficOverflowEnv(gym.Env):
+            def __init__(self) -> None:
+                super().__init__()
+                self.observation_space = gym.spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32)
+                self.action_space = gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32)
+                self._step = 0
+
+            def reset(self, *, seed=None, options=None):
+                super().reset(seed=seed)
+                self._step = 0
+                return np.zeros(2, dtype=np.float32), {}
+
+            def step(self, action):
+                self._step += 1
+                if self._step == 1:
+                    return (
+                        np.zeros(2, dtype=np.float32),
+                        1.0,
+                        False,
+                        False,
+                        {"step_overflow": True, "total_queue": 20},
+                    )
+                return (
+                    np.zeros(2, dtype=np.float32),
+                    1.0,
+                    True,
+                    False,
+                    {"success": True, "total_queue": 5},
+                )
+
+        prefix = "ppo_traffic" if trainer_cls is PPOTrainer else "sac_traffic"
+        total_ts = 2
+        algo_name = "ppo" if trainer_cls is PPOTrainer else "sac"
+        algo_params = (
+            {"n_steps": total_ts, "n_epochs": 1}
+            if trainer_cls is PPOTrainer
+            else {"buffer_size": 50, "learning_starts": 1}
+        )
+        config = ExperimentConfig(
+            name=f"{prefix}_overflow",
+            seed=42,
+            algorithm=AlgorithmConfig(name=algo_name, batch_size=2, parameters=algo_params),
+            environment=EnvironmentConfig(name="traffic_intersection"),
+            training=TrainingConfig(total_timesteps=total_ts),
+            output_dir=tmp_path / f"{prefix}_overflow",
+        )
+        trainer = trainer_cls(config=config, env=TrafficOverflowEnv())
+        try:
+            result = trainer.fit()
+        finally:
+            trainer.close()
+
+        records, metadata = _read_training_artifacts(result)
+        assert len(records) >= 1
+        # In TrafficOutcomePolicy, overflow anywhere makes success False
+        for rec in records:
+            assert rec.success is False
+        assert result.success_rate == 0.0
+        assert metadata["success_rate"] == 0.0
+
+    def test_matrix_h_traffic_telemetry_only_nonterminal_autodetection(self) -> None:
+        """TEST H: Traffic telemetry only on non-terminal step, terminal info empty.
+
+        Verify traffic auto-detection upgrades to TrafficOutcomePolicy when identifying signal
+        appears before termination, and that premature termination without horizon is failure.
+        """
+        logger = MetricLoggerCallback()
+        # No explicit policy supplied -> DefaultOutcomePolicy initially
+        adapter = SB3CallbackAdapter(callbacks=[logger])
+
+        # Step 1: non-terminal with traffic key
+        adapter.num_timesteps = 1
+        adapter.locals = {
+            "dones": [False],
+            "rewards": [0.0],
+            "infos": [{"total_queue": 10}],
+        }
+        adapter._on_step()
+
+        # Step 2: terminal with empty info (premature termination: terminated=True, truncated=False)
+        adapter.num_timesteps = 2
+        adapter.locals = {
+            "dones": [True],
+            "rewards": [0.0],
+            "infos": [{}],
+        }
+        adapter._on_step()
+
+        assert len(logger.episode_metrics) == 1
+        m = logger.episode_metrics[0]
+        # Premature natural termination in TrafficOutcomePolicy -> success=False
+        assert m.success is False
+
+
+class TestDeduplicationAndNumPySafety:
+    """Explicit regression coverage for TEST I & TEST J (Deduplication & NumPy Safety)."""
+
+    def test_matrix_i_terminal_info_already_present_in_step_infos(self) -> None:
+        """TEST I: Terminal info object is also already present as the last step info."""
+        step_1 = {"collision": False, "step": 1}
+        step_2 = {"collision": False, "success": True, "step": 2}
+        step_infos = [step_1, step_2]
+
+        m = extract_episode_metrics(
+            reward=2.0,
+            length=2,
+            terminated=True,
+            truncated=False,
+            info=step_2,  # Same object as step_infos[-1]
+            step_infos=step_infos,
+        )
+        assert m.length == 2
+        assert m.success is True
+        assert m.collision is False
+
+    def test_matrix_j_distinct_dicts_with_multielement_numpy_arrays(self) -> None:
+        """TEST J: Two DISTINCT dictionaries containing multi-element NumPy arrays.
+
+        Must NOT compare arbitrary dictionaries using a == b which raises ValueError:
+        The truth value of an array with more than one element is ambiguous.
+        Explicit identity check deduplication must be safe.
+        """
+        arr1 = np.array([1, 2, 3])
+        arr2 = np.array([1, 2, 3])  # distinct array instance, identical values
+        dict1 = {"array": arr1, "success": True}
+        dict2 = {"array": arr2, "success": True}  # distinct dict instance
+
+        # Comparing dicts directly raises ValueError
+        with pytest.raises(ValueError, match="ambiguous"):
+            dict1 == dict2  # noqa: B015
+
+        # extract_episode_metrics safely handles distinct dicts with numpy arrays without crashing
+        m = extract_episode_metrics(
+            reward=2.0,
+            length=2,
+            terminated=True,
+            truncated=False,
+            info=dict2,
+            step_infos=[dict1],
+        )
+        assert m.length == 2
+        assert m.success is True
+
+    def test_matrix_j_distinct_dicts_different_numpy_arrays_not_deduped(self) -> None:
+        """TEST J variant: Two distinct dicts with DIFFERENT NumPy arrays are NOT deduplicated."""
+        arr1 = np.array([1, 2, 3])
+        arr2 = np.array([1, 2, 4])
+        dict1 = {"array": arr1}
+        dict2 = {"array": arr2, "success": True}
+
+        m = extract_episode_metrics(
+            reward=2.0,
+            length=2,
+            terminated=True,
+            truncated=False,
+            info=dict2,
+            step_infos=[dict1],
+        )
+        assert m.length == 2
+        assert m.success is True
+
+    def test_numpy_in_episode_metrics_equality_safe(self) -> None:
+        """NumPy arrays in additional_metrics do not crash EpisodeMetrics.__eq__."""
+        m1 = EpisodeMetrics(
+            reward=1.0,
+            length=5,
+            success=True,
+            collision=False,
+            terminated=True,
+            truncated=False,
+            additional_metrics={"weights": np.array([0.1, 0.2, 0.3])},
+        )
+        m2 = EpisodeMetrics(
+            reward=1.0,
+            length=5,
+            success=True,
+            collision=False,
+            terminated=True,
+            truncated=False,
+            additional_metrics={"weights": np.array([0.1, 0.2, 0.3])},
+        )
+        assert m1 == m2
+
+        m3 = EpisodeMetrics(
+            reward=1.0,
+            length=5,
+            success=True,
+            collision=False,
+            terminated=True,
+            truncated=False,
+            additional_metrics={"weights": np.array([0.1, 0.2, 0.4])},
+        )
+        assert m1 != m3
+
+
+class TestMultiEnvironmentSB3Adapter:
+    """Explicit regression coverage for TEST K through TEST N (Single & Vectorized Environments)."""
+
+    def test_matrix_k_single_environment_lifecycle(self) -> None:
+        """TEST K: Single-environment SB3 lifecycle."""
+        logger = MetricLoggerCallback()
+        adapter = SB3CallbackAdapter(callbacks=[logger])
+
+        adapter.num_timesteps = 1
+        adapter.locals = {"dones": [False], "rewards": [1.0], "infos": [{"step": 1}]}
+        adapter._on_step()
+
+        adapter.num_timesteps = 2
+        adapter.locals = {
+            "dones": [True],
+            "rewards": [2.0],
+            "infos": [{"step": 2, "success": True, "collision": False}],
+        }
+        adapter._on_step()
+
+        assert len(logger.episode_metrics) == 1
+        m = logger.episode_metrics[0]
+        assert m.reward == 3.0
+        assert m.length == 2
+        assert m.success is True
+        assert m.collision is False
+
+    def test_matrix_l_m_n_vectorized_environments(self) -> None:
+        """TEST L, M, N: Vectorized environments with asynchronous and synchronous completions.
+
+        - TEST L: Multiple environments running concurrently without cross-talk.
+        - TEST M: Two environments terminate at different timesteps (Env 0 at step 2, Env 1 at step 4).
+                  Then reverse (Env 1 terminates first).
+        - TEST N: Two environments terminate simultaneously (dones=[True, True]).
+        """
+        logger = MetricLoggerCallback()
+        adapter = SB3CallbackAdapter(callbacks=[logger])
+
+        # Step 1: env 0 and env 1 running
+        adapter.num_timesteps = 1
+        adapter.locals = {
+            "dones": [False, False],
+            "rewards": [1.0, 10.0],
+            "infos": [{"env": 0, "collision": False}, {"env": 1, "collision": False}],
+        }
+        adapter._on_step()
+
+        # Step 2: env 0 finishes (success=True), env 1 continues (TEST M)
+        adapter.num_timesteps = 2
+        adapter.locals = {
+            "dones": [True, False],
+            "rewards": [1.0, 10.0],
+            "infos": [{"env": 0, "success": True}, {"env": 1}],
+        }
+        adapter._on_step()
+        assert len(logger.episode_metrics) == 1
+        m0 = logger.episode_metrics[0]
+        assert m0.reward == 2.0
+        assert m0.length == 2
+        assert m0.success is True
+
+        # Step 3: env 0 restarted new episode, env 1 continues
+        adapter.num_timesteps = 3
+        adapter.locals = {
+            "dones": [False, False],
+            "rewards": [5.0, 10.0],
+            "infos": [{"env": 0}, {"env": 1}],
+        }
+        adapter._on_step()
+
+        # Step 4: env 1 finishes (collision=True), env 0 continues
+        adapter.num_timesteps = 4
+        adapter.locals = {
+            "dones": [False, True],
+            "rewards": [5.0, 10.0],
+            "infos": [{"env": 0}, {"env": 1, "collision": True, "success": True}],
+        }
+        adapter._on_step()
+        assert len(logger.episode_metrics) == 2
+        m1 = logger.episode_metrics[1]
+        assert m1.reward == 40.0
+        assert m1.length == 4
+        # Collision overrides positive success
+        assert m1.collision is True
+        assert m1.success is False
+
+        # Step 5: Both finish simultaneously (TEST N)
+        adapter.num_timesteps = 5
+        adapter.locals = {
+            "dones": [True, True],
+            "rewards": [5.0, 1.0],
+            "infos": [
+                {"env": 0, "success": True, "collision": False},
+                {"env": 1, "success": False, "collision": False},
+            ],
+        }
+        adapter._on_step()
+        assert len(logger.episode_metrics) == 4
+        # Env 0 had steps 3, 4, 5 -> length 3, reward 5 + 5 + 5 = 15
+        m0_ep2 = logger.episode_metrics[2]
+        assert m0_ep2.reward == 15.0
+        assert m0_ep2.length == 3
+        assert m0_ep2.success is True
+        # Env 1 had step 5 only -> length 1, reward 1.0
+        m1_ep2 = logger.episode_metrics[3]
+        assert m1_ep2.reward == 1.0
+        assert m1_ep2.length == 1
+        assert m1_ep2.success is False
+
+
+class TestDirectExtractionVsSB3Consistency:
+    """Explicit regression coverage for PHASE 7 (Direct vs SB3 vs PPO vs SAC Consistency)."""
+
+    def test_phase_7_consistency_across_all_evaluation_and_training_paths(
+        self, tmp_path: Path
+    ) -> None:
+        """Process the same logical episode across 5 distinct execution paths:
+
+        1. EpisodeMetricsAccumulator directly
+        2. extract_episode_metrics
+        3. SB3CallbackAdapter
+        4. PPOTrainer training path
+        5. SACTrainer training path
+
+        Verify semantic equivalence for: reward, length, success, collision, terminated, truncated.
+        """
+        step_1_info = {"step": 1, "collision": False}
+        step_2_info = {"step": 2, "collision": False, "success": True}
+
+        # 1. EpisodeMetricsAccumulator
+        acc = EpisodeMetricsAccumulator()
+        acc.record_step(reward=1.0, terminated=False, truncated=False, info=step_1_info)
+        acc.record_step(reward=2.0, terminated=True, truncated=False, info=step_2_info)
+        m_acc = acc.finish()
+
+        # 2. extract_episode_metrics
+        m_extract = extract_episode_metrics(
+            reward=3.0,
+            length=2,
+            terminated=True,
+            truncated=False,
+            info=step_2_info,
+            step_infos=[step_1_info, step_2_info],
+        )
+
+        # 3. SB3CallbackAdapter
+        logger = MetricLoggerCallback()
+        adapter = SB3CallbackAdapter(callbacks=[logger])
+        adapter.num_timesteps = 1
+        adapter.locals = {"dones": [False], "rewards": [1.0], "infos": [step_1_info]}
+        adapter._on_step()
+        adapter.num_timesteps = 2
+        adapter.locals = {"dones": [True], "rewards": [2.0], "infos": [step_2_info]}
+        adapter._on_step()
+        assert len(logger.episode_metrics) == 1
+        m_sb3 = logger.episode_metrics[0]
+
+        # 4 & 5. PPO and SAC training paths
+        class ReplayEnv(gym.Env):
+            def __init__(self) -> None:
+                super().__init__()
+                self.observation_space = gym.spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32)
+                self.action_space = gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32)
+                self.step_idx = 0
+
+            def reset(self, *, seed=None, options=None):
+                super().reset(seed=seed)
+                self.step_idx = 0
+                return np.zeros(2, dtype=np.float32), {}
+
+            def step(self, action):
+                self.step_idx += 1
+                if self.step_idx == 1:
+                    return np.zeros(2, dtype=np.float32), 1.0, False, False, dict(step_1_info)
+                return np.zeros(2, dtype=np.float32), 2.0, True, False, dict(step_2_info)
+
+        ppo_result = _run_trainer_e2e(
+            PPOTrainer, ReplayEnv(), tmp_path, "ppo_consistency", total_timesteps=2
+        )
+        ppo_records, _ = _read_training_artifacts(ppo_result)
+        m_ppo = ppo_records[0]
+
+        sac_result = _run_trainer_e2e(
+            SACTrainer, ReplayEnv(), tmp_path, "sac_consistency", total_timesteps=2
+        )
+        sac_records, _ = _read_training_artifacts(sac_result)
+        m_sac = sac_records[0]
+
+        # Verify semantic equivalence across all 5 paths
+        for path_name, m_path in [
+            ("accumulator", m_acc),
+            ("extract", m_extract),
+            ("sb3", m_sb3),
+        ]:
+            assert m_path.reward == 3.0, f"{path_name} reward mismatch"
+            assert m_path.length == 2, f"{path_name} length mismatch"
+            assert m_path.success is True, f"{path_name} success mismatch"
+            assert m_path.collision is False, f"{path_name} collision mismatch"
+            assert m_path.terminated is True, f"{path_name} terminated mismatch"
+            assert m_path.truncated is False, f"{path_name} truncated mismatch"
+
+        for trainer_name, rec in [("PPO", m_ppo), ("SAC", m_sac)]:
+            assert rec.reward == 3.0, f"{trainer_name} reward mismatch"
+            assert rec.length == 2, f"{trainer_name} length mismatch"
+            assert rec.success is True, f"{trainer_name} success mismatch"
+            assert rec.collision is False, f"{trainer_name} collision mismatch"
+
+
+class TestFlagDistinctions:
+    """Explicit regression coverage for TEST O, P, Q."""
+
+    def test_matrix_o_terminated_vs_truncated_distinction(self) -> None:
+        """TEST O: Terminated vs truncated distinction."""
+        m_term = extract_episode_metrics(
+            reward=1.0, length=5, terminated=True, truncated=False, info={}
+        )
+        assert m_term.terminated is True
+        assert m_term.truncated is False
+
+        m_trunc = extract_episode_metrics(
+            reward=1.0, length=5, terminated=False, truncated=True, info={}
+        )
+        assert m_trunc.terminated is False
+        assert m_trunc.truncated is True
+
+    def test_matrix_p_terminal_info_absent(self) -> None:
+        """TEST P: Terminal info absent (None / empty)."""
+        m_none = extract_episode_metrics(
+            reward=1.0, length=5, terminated=True, truncated=False, info=None
+        )
+        assert m_none.success is None
+        assert m_none.collision is None
+
+        m_empty = extract_episode_metrics(
+            reward=1.0, length=5, terminated=True, truncated=False, info={}
+        )
+        assert m_empty.success is None
+        assert m_empty.collision is None
+
+    def test_matrix_q_terminal_info_present_outcome_fields_absent(self) -> None:
+        """TEST Q: Terminal info present but outcome fields absent."""
+        m = extract_episode_metrics(
+            reward=1.0,
+            length=5,
+            terminated=True,
+            truncated=False,
+            info={"score": 42, "battery": 95.5},
+        )
+        assert m.success is None
+        assert m.collision is None
+        assert m.additional_metrics.get("score") == 42
+        assert m.additional_metrics.get("battery") == 95.5

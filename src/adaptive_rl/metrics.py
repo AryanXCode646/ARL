@@ -10,6 +10,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, SupportsFloat
 
+import numpy as np
+
 # Canonical precedence order for episode outcome fields.
 SUCCESS_KEYS: Sequence[str] = ("episode_success", "success", "is_success")
 COLLISION_KEYS: Sequence[str] = ("collision", "is_collision", "had_collision")
@@ -29,6 +31,33 @@ TRAFFIC_KEYS: Sequence[str] = (
 _EXCLUDED_OUTCOME_KEYS = frozenset(SUCCESS_KEYS).union(COLLISION_KEYS)
 
 
+def _safe_value_equal(v1: Any, v2: Any) -> bool:
+    """Safely compare two values, mappings, sequences, or NumPy arrays without ambiguous truth errors."""
+    if v1 is v2:
+        return True
+    if isinstance(v1, np.ndarray) or isinstance(v2, np.ndarray):
+        if not (isinstance(v1, np.ndarray) and isinstance(v2, np.ndarray)):
+            return False
+        if v1.shape != v2.shape or v1.dtype != v2.dtype:
+            return False
+        return bool(np.array_equal(v1, v2, equal_nan=True))
+    if isinstance(v1, Mapping) and isinstance(v2, Mapping):
+        if v1.keys() != v2.keys():
+            return False
+        return all(_safe_value_equal(v1[k], v2[k]) for k in v1)
+    if isinstance(v1, (list, tuple)) and isinstance(v2, (list, tuple)):
+        if len(v1) != len(v2):
+            return False
+        return all(_safe_value_equal(i1, i2) for i1, i2 in zip(v1, v2))
+    try:
+        eq = v1 == v2
+        if isinstance(eq, np.ndarray):
+            return bool(np.all(eq))
+        return bool(eq)
+    except Exception:
+        return False
+
+
 def _extract_flag(
     info: Optional[Mapping[str, Any]],
     keys: Sequence[str],
@@ -46,7 +75,12 @@ def _extract_flag(
 
     for key in keys:
         if key in info and info[key] is not None:
-            return bool(info[key])
+            val = info[key]
+            if isinstance(val, np.ndarray):
+                if val.size == 1:
+                    return bool(val.item())
+                return bool(np.all(val))
+            return bool(val)
 
     return None
 
@@ -119,6 +153,20 @@ class EpisodeMetrics:
             "additional_metrics": dict(self.additional_metrics),
         }
 
+    def __eq__(self, other: object) -> bool:
+        """Safely compare EpisodeMetrics instances even if additional_metrics contains NumPy arrays."""
+        if not isinstance(other, EpisodeMetrics):
+            return False
+        return (
+            self.reward == other.reward
+            and self.length == other.length
+            and self.success == other.success
+            and self.collision == other.collision
+            and self.terminated == other.terminated
+            and self.truncated == other.truncated
+            and _safe_value_equal(self.additional_metrics, other.additional_metrics)
+        )
+
 
 class OutcomePolicy:
     """Stateless strategy for interpreting episode-local facts.
@@ -140,7 +188,14 @@ class OutcomePolicy:
         self,
         accumulator: EpisodeMetricsAccumulator,
     ) -> Optional[bool]:
-        """Resolve the final collision outcome."""
+        """Resolve the final collision outcome.
+
+        Episode-level and monotonic: if any step during the episode explicitly
+        reported collision=True, the final outcome is True.  If collision
+        information was observed but no collision occurred on any step,
+        the outcome is False.  If collision information was never present on
+        any step, None is returned.
+        """
         if not accumulator.has_collision_info:
             return None
 
@@ -150,22 +205,26 @@ class OutcomePolicy:
         self,
         accumulator: EpisodeMetricsAccumulator,
     ) -> Optional[bool]:
-        """Resolve the final success outcome."""
+        """Resolve the final success outcome.
+
+        Terminal-authoritative: only the terminal step's success key
+        determines the final outcome.  Intermediate success observations
+        are intentionally ignored to prevent telemetry contamination
+        (Issue #95).
+
+        If the terminal step does not contain a success key, success
+        is None regardless of whether intermediate steps reported
+        success=True.
+        """
         if accumulator.explicit_success is not None:
             return accumulator.explicit_success
-
-        if not accumulator.has_success_info:
-            return None
 
         terminal_success = _extract_flag(
             accumulator.last_info,
             SUCCESS_KEYS,
         )
 
-        if terminal_success is not None:
-            return terminal_success
-
-        return accumulator.had_success
+        return terminal_success
 
     def get_additional_metrics(
         self,
@@ -182,9 +241,10 @@ class DefaultOutcomePolicy(OutcomePolicy):
     environments.
 
     Rules:
-    - No success telemetry anywhere -> success=None.
+    - No success telemetry on the terminal step -> success=None.
     - Explicit terminal success takes precedence.
-    - Otherwise an observed intermediate success is preserved.
+    - Intermediate success observations are NOT preserved (terminal-
+      authoritative, Issue #95).
     - Collision is handled by the accumulator's universal invariant and
       overrides positive success at finish time.
     """

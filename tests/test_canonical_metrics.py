@@ -806,13 +806,19 @@ def test_intermediate_collision_not_repeated_on_terminal_step() -> None:
 
 
 def test_intermediate_success_occurring_before_terminal_step() -> None:
-    """Verify that success reached on an intermediate step is recorded as success if collision-free.
+    """Verify terminal-authoritative outcome: intermediate success does NOT latch.
 
-    Step 1: success=False, collision=False
-    Step 2: success=True, collision=False (reached target)
-    Step 3: success=False, collision=False
-    Step 4: terminated=True, success=False, collision=False
-    Canonical outcome: success=True, collision=False.
+    Step 1: collision=False
+    Step 2: success=True, collision=False (reached target mid-episode)
+    Step 3: collision=False
+    Step 4: terminated=True, collision=False (no success key)
+    Canonical outcome: success=None (terminal step has no success key),
+    collision=False (monotonic collision is False).
+
+    Note: This behavior was changed by Issue #95.  Previously intermediate
+    success=True latched into the final outcome when terminal success was
+    absent.  That allowed misleading non-terminal telemetry to contaminate
+    training metrics.  Terminal-authoritative resolution prevents this.
     """
     step_infos = [
         {"collision": False},
@@ -829,7 +835,7 @@ def test_intermediate_success_occurring_before_terminal_step() -> None:
     acc.record_step(reward=0.0, terminated=True, truncated=False, info=step_infos[3])
     m = acc.finish()
 
-    assert m.success is True
+    assert m.success is None
     assert m.collision is False
     assert m.reward == 10.0
     assert m.length == 4
@@ -843,7 +849,7 @@ def test_intermediate_success_occurring_before_terminal_step() -> None:
         info=step_infos[-1],
         step_infos=step_infos[:-1],
     )
-    assert m_ext.success is True
+    assert m_ext.success is None
     assert m_ext.collision is False
 
     # 3. Evaluator
@@ -856,9 +862,9 @@ def test_intermediate_success_occurring_before_terminal_step() -> None:
     env = MockStepEnv(step_trace)
     evaluator = Evaluator(algorithm=MockPolicyAlgo(), env=env)
     eval_metrics = evaluator.evaluate(num_episodes=1, deterministic=True)
-    assert evaluator.last_episode_metrics[0].success is True
+    assert evaluator.last_episode_metrics[0].success is None
     assert evaluator.last_episode_metrics[0].collision is False
-    assert eval_metrics.success_rate == 1.0
+    assert eval_metrics.success_rate is None
     assert eval_metrics.collision_rate == 0.0
     env.close()
 
@@ -872,9 +878,10 @@ def test_intermediate_success_occurring_before_terminal_step() -> None:
     env_col = MockStepEnv(step_trace_col)
     evaluator_col = Evaluator(algorithm=MockPolicyAlgo(), env=env_col)
     eval_col_metrics = evaluator_col.evaluate(num_episodes=1, deterministic=True)
-    assert evaluator_col.last_episode_metrics[0].success is False
+    # Terminal step has no success key -> None, but collision latched True -> override
+    assert evaluator_col.last_episode_metrics[0].success is None
     assert evaluator_col.last_episode_metrics[0].collision is True
-    assert eval_col_metrics.success_rate == 0.0
+    assert eval_col_metrics.success_rate is None
     assert eval_col_metrics.collision_rate == 1.0
     env_col.close()
 
@@ -1334,9 +1341,10 @@ def test_full_lifecycle_end_to_end_explicit_false(tmp_path: Path) -> None:
 def test_full_lifecycle_multi_step_precedence_and_truncation() -> None:
     """Verify multi-step precedence: collision overrides success, and truncation is preserved.
 
-    Only terminal-step info contributes to outcome extraction.  Non-terminal
-    telemetry is intentionally ignored by the SB3CallbackAdapter to prevent
-    misleading intermediate signals from contaminating canonical outcomes.
+    Terminal-authoritative outcome resolution in the OutcomePolicy layer
+    ensures only the terminal step's success/collision keys determine
+    the final outcome.  Non-terminal telemetry is preserved for episode-
+    level aggregation (e.g. traffic overflow detection).
     """
     from adaptive_rl.training.callbacks import MetricLoggerCallback, SB3CallbackAdapter
 
