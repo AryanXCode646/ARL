@@ -6,7 +6,7 @@ import csv
 import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 
 import gymnasium as gym
 import numpy as np
@@ -1220,3 +1220,421 @@ class TestFlagDistinctions:
         assert m.collision is None
         assert m.additional_metrics.get("score") == 42
         assert m.additional_metrics.get("battery") == 95.5
+
+
+class TestCrossEntryEquivalenceAndPrecedenceMatrix:
+    """Comprehensive cross-entry equivalence and precedence matrix covering STEP 3, 4, 5, 6, 7."""
+
+    @staticmethod
+    def _run_all_pathways(
+        step_infos: List[Dict[str, Any]],
+        rewards: List[float],
+        terminated: bool,
+        truncated: bool,
+        tmp_path: Path,
+        case_name: str,
+    ) -> tuple[
+        EpisodeMetrics,
+        EpisodeMetrics,
+        EpisodeMetrics,
+        EpisodeRecord,
+        EpisodeRecord,
+        TrainingResult,
+        TrainingResult,
+    ]:
+        """Run a single logical episode through all 5 execution pathways:
+        1. EpisodeMetricsAccumulator
+        2. extract_episode_metrics
+        3. SB3CallbackAdapter
+        4. PPOTrainer
+        5. SACTrainer
+        """
+        # 1. EpisodeMetricsAccumulator
+        acc = EpisodeMetricsAccumulator()
+        for i, s_info in enumerate(step_infos):
+            is_last = i == len(step_infos) - 1
+            acc.record_step(
+                reward=rewards[i],
+                terminated=terminated if is_last else False,
+                truncated=truncated if is_last else False,
+                info=s_info,
+            )
+        m_acc = acc.finish()
+
+        # 2. extract_episode_metrics
+        m_extract = extract_episode_metrics(
+            reward=sum(rewards),
+            length=len(step_infos),
+            terminated=terminated,
+            truncated=truncated,
+            info=step_infos[-1],
+            step_infos=step_infos,
+        )
+
+        # 3. SB3CallbackAdapter
+        logger = MetricLoggerCallback()
+        adapter = SB3CallbackAdapter(callbacks=[logger])
+        for i, s_info in enumerate(step_infos):
+            is_last = i == len(step_infos) - 1
+            adapter.num_timesteps = i + 1
+            adapter.locals = {
+                "dones": [is_last],
+                "rewards": [rewards[i]],
+                "infos": [s_info],
+            }
+            adapter._on_step()
+        assert len(logger.episode_metrics) == 1
+        m_sb3 = logger.episode_metrics[0]
+
+        # 4 & 5. PPO and SAC training
+        class TraceReplayEnv(gym.Env):
+            def __init__(self) -> None:
+                super().__init__()
+                self.observation_space = gym.spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32)
+                self.action_space = gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32)
+                self.step_idx = 0
+
+            def reset(
+                self, *, seed: Optional[int] = None, options: Optional[dict[str, Any]] = None
+            ):
+                super().reset(seed=seed)
+                self.step_idx = 0
+                return np.zeros(2, dtype=np.float32), {}
+
+            def step(self, action: Any):
+                idx = self.step_idx
+                self.step_idx += 1
+                rew = rewards[idx]
+                is_last = self.step_idx >= len(step_infos)
+                term = terminated if is_last else False
+                trunc = truncated if is_last else False
+                info = dict(step_infos[idx])
+                if trunc:
+                    info["TimeLimit.truncated"] = True
+                return np.zeros(2, dtype=np.float32), rew, term, trunc, info
+
+        ppo_result = _run_trainer_e2e(
+            PPOTrainer,
+            TraceReplayEnv(),
+            tmp_path,
+            f"ppo_{case_name}",
+            total_timesteps=len(step_infos),
+        )
+        ppo_records, _ = _read_training_artifacts(ppo_result)
+        m_ppo = ppo_records[0]
+
+        sac_result = _run_trainer_e2e(
+            SACTrainer,
+            TraceReplayEnv(),
+            tmp_path,
+            f"sac_{case_name}",
+            total_timesteps=len(step_infos),
+        )
+        sac_records, _ = _read_training_artifacts(sac_result)
+        m_sac = sac_records[0]
+
+        return m_acc, m_extract, m_sb3, m_ppo, m_sac, ppo_result, sac_result
+
+    def test_case_a_late_traffic_telemetry_cross_entry_equivalence(self, tmp_path: Path) -> None:
+        """Case A: Late traffic telemetry appears only on terminal step.
+
+        step 1: {}
+        step 2: {"overflow": True, "success": True}
+        direct == SB3 == PPO == SAC.
+        Under TrafficOutcomePolicy, overflow is a hard failure -> success=False.
+        """
+        step_infos = [{}, {"overflow": True, "success": True}]
+        rewards = [1.0, 2.0]
+        m_acc, m_ext, m_sb3, m_ppo, m_sac, ppo_res, sac_res = self._run_all_pathways(
+            step_infos=step_infos,
+            rewards=rewards,
+            terminated=True,
+            truncated=False,
+            tmp_path=tmp_path,
+            case_name="case_a",
+        )
+
+        assert m_acc == m_ext
+        assert m_acc == m_sb3
+        assert m_acc.reward == 3.0
+        assert m_acc.length == 2
+        assert m_acc.success is False
+        assert m_acc.collision is None
+        assert m_acc.terminated is True
+        assert m_acc.truncated is False
+        assert m_acc.additional_metrics.get("had_overflow") is True
+
+        for trainer_name, rec in [("PPO", m_ppo), ("SAC", m_sac)]:
+            assert rec.reward == 3.0, f"{trainer_name} reward mismatch"
+            assert rec.length == 2, f"{trainer_name} length mismatch"
+            assert rec.success is False, f"{trainer_name} success mismatch"
+            assert rec.collision is None, f"{trainer_name} collision mismatch"
+
+        assert ppo_res.success_rate == 0.0
+        assert sac_res.success_rate == 0.0
+        assert ppo_res.collision_rate is None
+        assert sac_res.collision_rate is None
+
+    def test_case_b_intermediate_success_overridden_by_terminal_failure(
+        self, tmp_path: Path
+    ) -> None:
+        """Case B: Intermediate success overridden by terminal failure.
+
+        step 1: {"success": True}
+        step 2: {"success": False}
+        Terminal telemetry is authoritative -> final success=False.
+        """
+        step_infos = [{"success": True}, {"success": False}]
+        rewards = [1.0, 2.0]
+        m_acc, m_ext, m_sb3, m_ppo, m_sac, ppo_res, sac_res = self._run_all_pathways(
+            step_infos=step_infos,
+            rewards=rewards,
+            terminated=True,
+            truncated=False,
+            tmp_path=tmp_path,
+            case_name="case_b",
+        )
+
+        assert m_acc == m_ext
+        assert m_acc == m_sb3
+        assert m_acc.reward == 3.0
+        assert m_acc.length == 2
+        assert m_acc.success is False
+        assert m_acc.collision is None
+        assert m_acc.terminated is True
+        assert m_acc.truncated is False
+
+        assert m_ppo.success is False
+        assert m_sac.success is False
+        assert ppo_res.success_rate == 0.0
+        assert sac_res.success_rate == 0.0
+
+    def test_case_c_intermediate_failure_followed_by_terminal_success(self, tmp_path: Path) -> None:
+        """Case C: Intermediate failure followed by terminal success.
+
+        step 1: {"success": False}
+        step 2: {"success": True}
+        Terminal telemetry is authoritative -> final success=True.
+        """
+        step_infos = [{"success": False}, {"success": True}]
+        rewards = [1.0, 2.0]
+        m_acc, m_ext, m_sb3, m_ppo, m_sac, ppo_res, sac_res = self._run_all_pathways(
+            step_infos=step_infos,
+            rewards=rewards,
+            terminated=True,
+            truncated=False,
+            tmp_path=tmp_path,
+            case_name="case_c",
+        )
+
+        assert m_acc == m_ext
+        assert m_acc == m_sb3
+        assert m_acc.reward == 3.0
+        assert m_acc.length == 2
+        assert m_acc.success is True
+        assert m_acc.collision is None
+        assert m_acc.terminated is True
+        assert m_acc.truncated is False
+
+        assert m_ppo.success is True
+        assert m_sac.success is True
+        assert ppo_res.success_rate == 1.0
+        assert sac_res.success_rate == 1.0
+
+    def test_case_d_no_telemetry_preserves_nullable_semantics(self, tmp_path: Path) -> None:
+        """Case D: No telemetry preserves nullable semantics across all entry points.
+
+        step 1: {}
+        step 2: {}
+        success=None, collision=None.
+        """
+        step_infos = [{}, {}]
+        rewards = [1.0, 2.0]
+        m_acc, m_ext, m_sb3, m_ppo, m_sac, ppo_res, sac_res = self._run_all_pathways(
+            step_infos=step_infos,
+            rewards=rewards,
+            terminated=True,
+            truncated=False,
+            tmp_path=tmp_path,
+            case_name="case_d",
+        )
+
+        assert m_acc == m_ext
+        assert m_acc == m_sb3
+        assert m_acc.reward == 3.0
+        assert m_acc.length == 2
+        assert m_acc.success is None
+        assert m_acc.collision is None
+        assert m_acc.terminated is True
+        assert m_acc.truncated is False
+
+        assert m_ppo.success is None
+        assert m_sac.success is None
+        assert ppo_res.success_rate is None
+        assert sac_res.success_rate is None
+
+    def test_case_e_collision_monotonic_semantics(self, tmp_path: Path) -> None:
+        """Case E: Monotonic collision semantics across all entry points.
+
+        step 1: {"collision": True, "success": True}
+        step 2: {"collision": False, "success": True}
+        Terminal False does NOT erase intermediate True.
+        Collision overrides positive success -> collision=True, success=False.
+        """
+        step_infos = [
+            {"collision": True, "success": True},
+            {"collision": False, "success": True},
+        ]
+        rewards = [1.0, 2.0]
+        m_acc, m_ext, m_sb3, m_ppo, m_sac, ppo_res, sac_res = self._run_all_pathways(
+            step_infos=step_infos,
+            rewards=rewards,
+            terminated=True,
+            truncated=False,
+            tmp_path=tmp_path,
+            case_name="case_e",
+        )
+
+        assert m_acc == m_ext
+        assert m_acc == m_sb3
+        assert m_acc.reward == 3.0
+        assert m_acc.length == 2
+        assert m_acc.collision is True
+        assert m_acc.success is False
+        assert m_acc.terminated is True
+        assert m_acc.truncated is False
+
+        assert m_ppo.collision is True
+        assert m_ppo.success is False
+        assert m_sac.collision is True
+        assert m_sac.success is False
+        assert ppo_res.collision_rate == 1.0
+        assert ppo_res.success_rate == 0.0
+        assert sac_res.collision_rate == 1.0
+        assert sac_res.success_rate == 0.0
+
+    @pytest.mark.parametrize(
+        ("terminal_info", "had_success_arg", "expected_success"),
+        [
+            # terminal True + had_success True -> True
+            ({"success": True}, True, True),
+            # terminal False + had_success True -> False (terminal authoritative!)
+            ({"success": False}, True, False),
+            # terminal True + had_success False -> True (terminal authoritative!)
+            ({"success": True}, False, True),
+            # terminal False + had_success False -> False
+            ({"success": False}, False, False),
+            # terminal None + had_success True -> True (fallback)
+            ({"success": None}, True, True),
+            # terminal None + had_success False -> False (fallback)
+            ({"success": None}, False, False),
+            # terminal None + had_success None -> None (tri-state preserved)
+            ({"success": None}, None, None),
+            # terminal missing + had_success True -> True (fallback)
+            ({}, True, True),
+            # terminal missing + had_success False -> False (fallback)
+            ({}, False, False),
+            # terminal missing + had_success None -> None (tri-state preserved)
+            ({}, None, None),
+        ],
+    )
+    def test_case_f_had_success_conflicts_full_precedence_matrix(
+        self,
+        terminal_info: Dict[str, Any],
+        had_success_arg: Optional[bool],
+        expected_success: Optional[bool],
+    ) -> None:
+        """Case F: Enforce explicit precedence hierarchy:
+        explicit terminal success > derived/intermediate > legacy had_success fallback.
+        """
+        # Direct extraction with terminal info only
+        m_direct = extract_episode_metrics(
+            reward=1.0,
+            length=1,
+            terminated=True,
+            truncated=False,
+            info=terminal_info,
+            had_success=had_success_arg,
+        )
+        assert m_direct.success is expected_success, (
+            f"Direct mismatch: got {m_direct.success}, expected {expected_success}"
+        )
+
+        # Direct extraction with multi-step trace
+        step_infos = [{"step": 1}, terminal_info]
+        m_multistep = extract_episode_metrics(
+            reward=2.0,
+            length=2,
+            terminated=True,
+            truncated=False,
+            info=terminal_info,
+            step_infos=step_infos,
+            had_success=had_success_arg,
+        )
+        assert m_multistep.success is expected_success, (
+            f"Multi-step mismatch: got {m_multistep.success}, expected {expected_success}"
+        )
+
+    def test_case_g_late_traffic_clean_completion_to_horizon(self, tmp_path: Path) -> None:
+        """Case G: Late traffic telemetry with clean horizon completion (no overflow).
+
+        step 1: {}
+        step 2: {"queue_lengths": [2, 1], "step_overflow": False, "success": True}
+        truncated=True.
+        All pathways select TrafficOutcomePolicy and resolve success=True.
+        """
+        step_infos = [
+            {},
+            {
+                "queue_lengths": [2, 1],
+                "step_overflow": False,
+                "success": True,
+                "TimeLimit.truncated": True,
+            },
+        ]
+        rewards = [1.0, 2.0]
+        m_acc, m_ext, m_sb3, m_ppo, m_sac, ppo_res, sac_res = self._run_all_pathways(
+            step_infos=step_infos,
+            rewards=rewards,
+            terminated=False,
+            truncated=True,
+            tmp_path=tmp_path,
+            case_name="case_g",
+        )
+
+        assert m_acc == m_ext
+        assert m_acc == m_sb3
+        assert m_acc.reward == 3.0
+        assert m_acc.length == 2
+        assert m_acc.success is True
+        assert m_acc.collision is None
+        assert m_acc.terminated is False
+        assert m_acc.truncated is True
+        assert m_acc.additional_metrics.get("had_overflow") is False
+
+        assert m_ppo.success is True
+        assert m_sac.success is True
+        assert ppo_res.success_rate == 1.0
+        assert sac_res.success_rate == 1.0
+
+    def test_case_h_monotonic_collision_over_intermediate_steps(self) -> None:
+        """Case H: Collision observed on intermediate step latches True and overrides success."""
+        step_infos = [
+            {"collision": False},
+            {"collision": True},
+            {"collision": False},
+            {"collision": False, "success": True},
+        ]
+        acc = EpisodeMetricsAccumulator()
+        for i, info in enumerate(step_infos):
+            acc.record_step(
+                reward=1.0,
+                terminated=(i == len(step_infos) - 1),
+                truncated=False,
+                info=info,
+            )
+        m = acc.finish()
+        assert m.collision is True
+        assert m.success is False
+        assert m.reward == 4.0
+        assert m.length == 4

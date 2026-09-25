@@ -23,7 +23,6 @@ from adaptive_rl.experiments.metadata import (
     save_episodes_csv,
 )
 from adaptive_rl.metrics import (
-    DefaultOutcomePolicy,
     EpisodeMetrics,
     EpisodeMetricsAccumulator,
     OutcomePolicy,
@@ -70,6 +69,7 @@ class BaseTrainer(ABC):
         config: ExperimentConfig,
         env: Optional[gym.Env] = None,
         callbacks: Optional[List[BaseCallback]] = None,
+        outcome_policy: Optional[OutcomePolicy] = None,
     ) -> None:
         """Common initialisation for all trainers.
 
@@ -77,6 +77,7 @@ class BaseTrainer(ABC):
             config: Validated ``ExperimentConfig`` instance.
             env: Optional pre‑instantiated environment.
             callbacks: Optional additional callbacks supplied by the caller.
+            outcome_policy: Optional explicit domain OutcomePolicy instance.
         """
         self.config = config
         self._set_deterministic_seed(self.config.seed)
@@ -88,10 +89,12 @@ class BaseTrainer(ABC):
             self.env = make_env(self.config.environment.name, **self.config.environment.parameters)
 
         # 2️⃣ Choose an outcome policy (traffic specific or default)
-        if "traffic" in self.config.environment.name.lower():
-            self.outcome_policy: OutcomePolicy = TrafficOutcomePolicy()
+        if outcome_policy is not None:
+            self.outcome_policy: Optional[OutcomePolicy] = outcome_policy
+        elif "traffic" in self.config.environment.name.lower():
+            self.outcome_policy = TrafficOutcomePolicy()
         else:
-            self.outcome_policy = DefaultOutcomePolicy()
+            self.outcome_policy = None
 
         # 3️⃣ Checkpoint management
         checkpoint_dir = self.config.output_dir / "checkpoints" / self.config.name
@@ -317,6 +320,7 @@ def get_trainer(
     config: ExperimentConfig,
     env: Optional[gym.Env] = None,
     callbacks: Optional[List[BaseCallback]] = None,
+    outcome_policy: Optional[OutcomePolicy] = None,
 ) -> BaseTrainer:
     """Factory returning the appropriate trainer based on configuration.
 
@@ -325,13 +329,19 @@ def get_trainer(
     if config.curriculum is not None and config.curriculum.enabled:
         from adaptive_rl.curriculum.trainer import CurriculumTrainer
 
-        return CurriculumTrainer(config=config, env=env, callbacks=callbacks)
+        return CurriculumTrainer(
+            config=config, env=env, callbacks=callbacks, outcome_policy=outcome_policy
+        )
 
     algo_name = config.algorithm.name.lower()
     if algo_name == "ppo":
-        return PPOTrainer(config=config, env=env, callbacks=callbacks)
+        return PPOTrainer(
+            config=config, env=env, callbacks=callbacks, outcome_policy=outcome_policy
+        )
     elif algo_name == "sac":
-        return SACTrainer(config=config, env=env, callbacks=callbacks)
+        return SACTrainer(
+            config=config, env=env, callbacks=callbacks, outcome_policy=outcome_policy
+        )
     else:
         raise ValueError(
             f"Unsupported algorithm '{config.algorithm.name}'. Supported algorithms: 'ppo', 'sac'"
