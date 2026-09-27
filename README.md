@@ -127,7 +127,7 @@ Use `--output-dir` to point Studio at another experiment artifact directory:
 
 ```bash
 adaptive-rl studio --output-dir experiments/results
-```
+```\n\n### Episode‑level export\n\nThe `--episode-report` (`-er`) option on the `adaptive-rl evaluate` command exports per‑episode metrics for the most recent evaluation. Provide a file path ending with `.json` or `.csv`.\n\n- **JSON**: a list of objects matching `EpisodeEvaluationRecord` (`episode`, `seed`, `scenario_name`, `reward`, `length`, `success`, `collision`, `truncated`, `additional_metrics`).\n- **CSV**: a comma‑separated table with the same columns (order: `episode,seed,scenario_name,reward,length,success,collision,truncated,additional_metrics`).\n\nExample usage:\n\n```bash\nadaptive-rl evaluate -c configs/gridworld_ppo.yaml -m experiments/results/models/gridworld_ppo_baseline_final.zip -e 3 -er report.json\n```\n\n```bash\nadaptive-rl evaluate -c configs/gridworld_ppo.yaml -m experiments/results/models/gridworld_ppo_baseline_final.zip -e 3 -er report.csv\n```\n\nThe generated file contains one record per episode, which can be inspected or processed downstream.\n```
 # Inspect development roadmap and completed phases
 adaptive-rl info
 

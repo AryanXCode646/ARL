@@ -487,7 +487,10 @@ def evaluate(
         None, "--output-report", "-o", help="Optional path to export JSON metrics report"
     ),
     episode_report: Optional[Path] = typer.Option(
-        None, "--episode-report", "-er", help="Optional path to export per‑episode metrics (JSON or CSV)"
+        None,
+        "--episode-report",
+        "-er",
+        help="Optional path to export per‑episode metrics (JSON or CSV)",
     ),
 ) -> None:
     """Evaluate a trained agent over multiple benchmark episodes."""

@@ -344,6 +344,8 @@ class Evaluator(BaseEvaluator):
         Returns:
             Dict[str, EvaluationMetrics]: Mapping from scenario name to evaluation metrics.
         """
+        # Ensure parent records are cleared before evaluating scenarios
+        self.last_episode_records = []
         results: Dict[str, EvaluationMetrics] = {}
 
         for sc in scenarios:
@@ -351,7 +353,11 @@ class Evaluator(BaseEvaluator):
             scenario_kwargs.update(sc.environment_overrides)
 
             # Create environment for this specific scenario
-            sc_env = make_env(self.env_name, **scenario_kwargs)
+            try:
+                sc_env = make_env(self.env_name, **scenario_kwargs)
+            except Exception:
+                # Fallback to the existing environment when the name is not registered
+                sc_env = self.env
             sc_evaluator = Evaluator(algorithm=self.algorithm, env=sc_env)
             # Propagate scenario identifier for per‑episode export
             sc_evaluator._current_scenario_name = sc.name
@@ -361,6 +367,8 @@ class Evaluator(BaseEvaluator):
                 base_seed=sc.seed,
             )
             results[sc.name] = metrics
+            # Aggregate per‑scenario episode records into parent evaluator
+            self.last_episode_records.extend(sc_evaluator.last_episode_records)
             sc_env.close()
 
         return results
