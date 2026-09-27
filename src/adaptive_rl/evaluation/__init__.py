@@ -44,11 +44,12 @@ from adaptive_rl.metrics import (
 
 __all__ = [
     "BaseEvaluator",
-    "Evaluator",
-    "EvaluationMetrics",
-    "EvaluationScenario",
     "DistributionShiftBenchmarkSpec",
     "EpisodeBenchmarkRecord",
+    "EpisodeEvaluationRecord",
+    "EvaluationMetrics",
+    "EvaluationScenario",
+    "Evaluator",
     "GeneralizationDistribution",
     "GeneralizationEvaluator",
     "GeneralizationReport",
@@ -65,5 +66,4 @@ __all__ = [
     "derive_planner_seed",
     "generate_evaluation_seeds",
     "load_shift_benchmark_config",
-    "EpisodeEvaluationRecord",
 ]

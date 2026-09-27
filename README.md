@@ -127,7 +127,9 @@ Use `--output-dir` to point Studio at another experiment artifact directory:
 
 ```bash
 adaptive-rl studio --output-dir experiments/results
-```\n\n### Episode‑level export\n\nThe `--episode-report` (`-er`) option on the `adaptive-rl evaluate` command exports per‑episode metrics for the most recent evaluation. Provide a file path ending with `.json` or `.csv`.\n\n- **JSON**: a list of objects matching `EpisodeEvaluationRecord` (`episode`, `seed`, `scenario_name`, `reward`, `length`, `success`, `collision`, `truncated`, `additional_metrics`).\n- **CSV**: a comma‑separated table with the same columns (order: `episode,seed,scenario_name,reward,length,success,collision,truncated,additional_metrics`).\n\nExample usage:\n\n```bash\nadaptive-rl evaluate -c configs/gridworld_ppo.yaml -m experiments/results/models/gridworld_ppo_baseline_final.zip -e 3 -er report.json\n```\n\n```bash\nadaptive-rl evaluate -c configs/gridworld_ppo.yaml -m experiments/results/models/gridworld_ppo_baseline_final.zip -e 3 -er report.csv\n```\n\nThe generated file contains one record per episode, which can be inspected or processed downstream.\n```
+```
+
+```bash
 # Inspect development roadmap and completed phases
 adaptive-rl info
 
@@ -217,8 +219,37 @@ AdaptiveRL provides a standardized evaluation benchmark engine to measure policy
 # Evaluate a trained model over 20 deterministic episodes
 adaptive-rl evaluate --config configs/gridworld_ppo.yaml --model experiments/results/models/gridworld_ppo_baseline_final.zip --episodes 20
 
-# Export structured JSON metrics report
+# Export structured aggregate JSON metrics report
 adaptive-rl evaluate --config configs/gridworld_ppo.yaml --model experiments/results/models/gridworld_ppo_baseline_final.zip --episodes 20 --output-report experiments/results/eval_report.json
+
+# Export per-episode metrics report in JSON or CSV
+adaptive-rl evaluate --config configs/gridworld_ppo.yaml --model experiments/results/models/gridworld_ppo_baseline_final.zip --episodes 20 --episode-report experiments/results/episodes.json
+adaptive-rl evaluate --config configs/gridworld_ppo.yaml --model experiments/results/models/gridworld_ppo_baseline_final.zip --episodes 20 -er experiments/results/episodes.csv
+```
+
+#### Episode-Level Export
+
+The `--episode-report` (`-er`) option exports individual evaluation episode records without re-running the evaluation pass. Supported file formats: `.json` and `.csv`.
+
+* **Relationship to `--output-report`:** `--output-report` (`-o`) saves aggregate statistics across the full evaluation benchmark (`EvaluationMetrics`: mean reward, success rate, collision rate, episode length). In contrast, `--episode-report` (`-er`) exports fine-grained records (`EpisodeEvaluationRecord`), with exactly one record per evaluated episode. Both flags can be used together in a single evaluation run.
+* **Scenario Support:** When evaluating across curated scenarios (`evaluate_scenarios()`), records from all scenarios are aggregated into canonical records preserving their individual scenario identifiers, seeds, and episode indices.
+
+##### Output Structure & Schema
+
+Each record contains the following fields:
+
+* `episode_index` (`int`): Zero-based index of the episode.
+* `seed` (`int | null`): Deterministic random seed used for the episode environment reset.
+* `environment` (`str`): Environment identifier.
+* `scenario` (`str | null`): Scenario name if evaluated within a scenario benchmark, or `null`.
+* `return` (`float`): Total cumulative episodic return.
+* `episode_length` (`int`): Total timesteps elapsed during the episode.
+* `success` (`bool | null`): True if successful, False if failed, or null if undefined.
+* `collision` (`bool | null`): True if collision occurred, False if collision-free, or null if undefined.
+
+##### CSV Column Order
+```text
+episode_index,seed,environment,scenario,return,episode_length,success,collision
 ```
 
 ### Evaluation via Python API
@@ -226,7 +257,7 @@ adaptive-rl evaluate --config configs/gridworld_ppo.yaml --model experiments/res
 ```python
 from adaptive_rl.algorithms.ppo import PPOAlgorithm
 from adaptive_rl.environments.registry import make_env
-from adaptive_rl.evaluation import Evaluator, EvaluationScenario
+from adaptive_rl.evaluation import EpisodeEvaluationRecord, EvaluationScenario, Evaluator
 
 # 1. Instantiate environment and loaded agent
 env = make_env("gridworld", width=6, height=5, num_obstacles=3)
@@ -242,8 +273,12 @@ print(f"Mean Return: {metrics.mean_reward:.2f} ± {metrics.std_reward:.2f}")
 print(f"Success Rate: {metrics.success_rate * 100:.1f}%")
 print(f"Collision Rate: {metrics.collision_rate * 100:.1f}%")
 
-# 3. Export JSON report
+# 3. Export aggregate JSON report
 evaluator.save_report(metrics, "experiments/results/eval_report.json")
+
+# 4. Export per-episode metrics (JSON or CSV)
+evaluator.save_episode_report(evaluator.last_episode_records, "experiments/results/episodes.json")
+evaluator.save_episode_report(evaluator.last_episode_records, "experiments/results/episodes.csv")
 ```
 
 ---

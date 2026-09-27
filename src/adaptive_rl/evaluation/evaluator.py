@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
+import csv
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 import gymnasium as gym
 import numpy as np
 
 from adaptive_rl.algorithms.base import BaseAlgorithm
-from adaptive_rl.environments.registry import make_env
+from adaptive_rl.environments.registry import list_environments, make_env
 from adaptive_rl.evaluation.metrics import EvaluationMetrics
 from adaptive_rl.evaluation.scenarios import EvaluationScenario
+from adaptive_rl.evaluation.seeding import derive_evaluation_seed
 from adaptive_rl.metrics import (
     DefaultOutcomePolicy,
     EpisodeMetrics,
@@ -22,6 +24,24 @@ from adaptive_rl.metrics import (
     OutcomePolicy,
     TrafficOutcomePolicy,
     compute_rate,
+)
+
+__all__ = [
+    "BaseEvaluator",
+    "Evaluator",
+    "EpisodeEvaluationRecord",
+    "EPISODE_RECORD_FIELDS",
+]
+
+EPISODE_RECORD_FIELDS: tuple[str, ...] = (
+    "episode_index",
+    "seed",
+    "environment",
+    "scenario",
+    "return",
+    "episode_length",
+    "success",
+    "collision",
 )
 
 
@@ -41,6 +61,28 @@ class EpisodeEvaluationRecord:
     episode_length: int
     success: Optional[bool]
     collision: Optional[bool]
+
+    @classmethod
+    def from_episode_metrics(
+        cls,
+        metrics: EpisodeMetrics,
+        *,
+        episode_index: int,
+        seed: Optional[int],
+        environment: str,
+        scenario: Optional[str] = None,
+    ) -> EpisodeEvaluationRecord:
+        """Create an export record directly from canonical EpisodeMetrics."""
+        return cls(
+            episode_index=episode_index,
+            seed=seed,
+            environment=environment,
+            scenario=scenario,
+            return_value=metrics.reward,
+            episode_length=metrics.length,
+            success=metrics.success,
+            collision=metrics.collision,
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to a plain dict suitable for JSON/CSV output."""
@@ -80,6 +122,7 @@ class Evaluator(BaseEvaluator):
         env_name: Optional[str] = None,
         env_kwargs: Optional[Dict[str, Any]] = None,
         outcome_policy: Optional[OutcomePolicy] = None,
+        scenario: Optional[str] = None,
     ) -> None:
         """Initialize evaluator with algorithm and evaluation environment.
 
@@ -89,9 +132,11 @@ class Evaluator(BaseEvaluator):
             env_name: Registered environment name to instantiate via factory (optional).
             env_kwargs: Additional parameters forwarded to make_env when env_name is used.
             outcome_policy: Optional explicit domain OutcomePolicy instance.
+            scenario: Optional scenario name context.
         """
         self.algorithm = algorithm
         self.env_kwargs = dict(env_kwargs or {})
+        self.scenario = scenario
 
         if env_name is not None:
             self.env_name = env_name
@@ -102,8 +147,6 @@ class Evaluator(BaseEvaluator):
             if spec is not None and getattr(spec, "id", None):
                 self.env_name = str(spec.id)
             else:
-                from adaptive_rl.environments.registry import list_environments
-
                 registered = list_environments()
                 cls_name = type(env).__name__
                 simplified = cls_name.lower().replace("env", "")
@@ -128,9 +171,7 @@ class Evaluator(BaseEvaluator):
 
         self.last_episode_metrics: List[EpisodeMetrics] = []
         # Records for optional episode‑level export. Cleared at the start of each evaluate call.
-        self.last_episode_records: List["EpisodeEvaluationRecord"] = []
-        # Holds the name of the scenario being evaluated (if any).
-        self._current_scenario_name: Optional[str] = None
+        self.last_episode_records: List[EpisodeEvaluationRecord] = []
 
     def _make_episode_accumulator(self) -> EpisodeMetricsAccumulator:
         """Bind a policy for one episode without treating inferred defaults as explicit.
@@ -151,6 +192,7 @@ class Evaluator(BaseEvaluator):
         num_episodes: int = 10,
         deterministic: bool = True,
         base_seed: Optional[int] = None,
+        scenario: Optional[str] = None,
     ) -> EvaluationMetrics:
         """Execute evaluation rollouts and compute aggregated metrics.
 
@@ -158,6 +200,7 @@ class Evaluator(BaseEvaluator):
             num_episodes: Number of evaluation episodes to execute.
             deterministic: Whether to use deterministic action selection.
             base_seed: Base seed for reproducible evaluation episode initializations.
+            scenario: Optional scenario name overriding the evaluator-level scenario.
 
         Returns:
             EvaluationMetrics: Standardized aggregated performance metrics.
@@ -169,6 +212,7 @@ class Evaluator(BaseEvaluator):
             raise ValueError(f"num_episodes must be positive, got {num_episodes}")
         # Ensure per‑evaluation records are cleared to avoid leakage when reusing the same Evaluator instance
         self.last_episode_records = []
+        active_scenario = scenario if scenario is not None else self.scenario
 
         episode_metrics: List[EpisodeMetrics] = []
 
@@ -180,8 +224,6 @@ class Evaluator(BaseEvaluator):
         ep_max_waits: List[int] = []
         ep_final_departures: List[int] = []
         ep_final_delays: List[float] = []
-
-        from adaptive_rl.evaluation.seeding import derive_evaluation_seed
 
         for ep in range(num_episodes):
             seed = derive_evaluation_seed(base_seed, ep) if base_seed is not None else None
@@ -227,16 +269,13 @@ class Evaluator(BaseEvaluator):
             m = acc.finish()
             episode_metrics.append(m)
 
-            # Build episode export record
-            record = EpisodeEvaluationRecord(
+            # Build episode export record from canonical EpisodeMetrics
+            record = EpisodeEvaluationRecord.from_episode_metrics(
+                m,
                 episode_index=ep,
                 seed=seed,
                 environment=self.env_name,
-                scenario=self._current_scenario_name,
-                return_value=m.reward,
-                episode_length=m.length,
-                success=m.success,
-                collision=m.collision,
+                scenario=active_scenario,
             )
             self.last_episode_records.append(record)
 
@@ -334,12 +373,14 @@ class Evaluator(BaseEvaluator):
         self,
         scenarios: List[EvaluationScenario],
         deterministic: bool = True,
+        num_episodes_per_scenario: int = 1,
     ) -> Dict[str, EvaluationMetrics]:
         """Benchmark the agent across a curated collection of evaluation scenarios.
 
         Args:
             scenarios: List of EvaluationScenario specifications.
             deterministic: Whether to evaluate deterministically.
+            num_episodes_per_scenario: Number of evaluation episodes per scenario (defaults to 1).
 
         Returns:
             Dict[str, EvaluationMetrics]: Mapping from scenario name to evaluation metrics.
@@ -349,27 +390,34 @@ class Evaluator(BaseEvaluator):
         results: Dict[str, EvaluationMetrics] = {}
 
         for sc in scenarios:
-            scenario_kwargs = dict(self.env_kwargs)
-            scenario_kwargs.update(sc.environment_overrides)
-
-            # Create environment for this specific scenario
-            try:
-                sc_env = make_env(self.env_name, **scenario_kwargs)
-            except Exception:
-                # Fallback to the existing environment when the name is not registered
+            is_new_env = False
+            if not sc.environment_overrides and self.env is not None:
                 sc_env = self.env
-            sc_evaluator = Evaluator(algorithm=self.algorithm, env=sc_env)
-            # Propagate scenario identifier for per‑episode export
-            sc_evaluator._current_scenario_name = sc.name
-            metrics = sc_evaluator.evaluate(
-                num_episodes=1,
-                deterministic=deterministic,
-                base_seed=sc.seed,
-            )
-            results[sc.name] = metrics
-            # Aggregate per‑scenario episode records into parent evaluator
-            self.last_episode_records.extend(sc_evaluator.last_episode_records)
-            sc_env.close()
+            else:
+                scenario_kwargs = dict(self.env_kwargs)
+                scenario_kwargs.update(sc.environment_overrides)
+                sc_env = make_env(self.env_name, **scenario_kwargs)
+                is_new_env = True
+
+            try:
+                sc_evaluator = Evaluator(
+                    algorithm=self.algorithm,
+                    env=sc_env,
+                    outcome_policy=self.outcome_policy if self._explicit_policy else None,
+                    scenario=sc.name,
+                )
+                metrics = sc_evaluator.evaluate(
+                    num_episodes=num_episodes_per_scenario,
+                    deterministic=deterministic,
+                    base_seed=sc.seed,
+                    scenario=sc.name,
+                )
+                results[sc.name] = metrics
+                # Aggregate per‑scenario episode records into parent evaluator
+                self.last_episode_records.extend(sc_evaluator.last_episode_records)
+            finally:
+                if is_new_env:
+                    sc_env.close()
 
         return results
 
@@ -398,14 +446,12 @@ class Evaluator(BaseEvaluator):
         with open(target, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
 
-        # Return after writing aggregate report
-        # New: Serialize per‑episode records to JSON or CSV.
         return target
 
     @staticmethod
     def save_episode_report(
-        records: List[EpisodeEvaluationRecord] | List[Dict[str, Any]],
-        output_path: str | Path,
+        records: Sequence[Union[EpisodeEvaluationRecord, Dict[str, Any]]],
+        output_path: Union[str, Path],
     ) -> Path:
         """Serialize per‑episode evaluation records to JSON or CSV.
 
@@ -413,38 +459,53 @@ class Evaluator(BaseEvaluator):
         - ``.json``: writes a JSON array of record dictionaries.
         - ``.csv``: writes a CSV with columns
           ``episode_index,seed,environment,scenario,return,episode_length,success,collision``.
-        """
-        import csv
-        from pathlib import Path as _Path
 
-        target = _Path(output_path)
+        Args:
+            records: Sequence of EpisodeEvaluationRecord instances or dicts containing
+                required episode fields.
+            output_path: Destination filepath (.json or .csv).
+
+        Returns:
+            Path: Written report path.
+
+        Raises:
+            ValueError: If the file extension is unsupported or a record is malformed.
+            TypeError: If a record is not an EpisodeEvaluationRecord or dict.
+        """
+        target = Path(output_path)
+        ext = target.suffix.lower()
+        if ext not in (".json", ".csv"):
+            raise ValueError(
+                f"Unsupported file extension for episode report: '{ext}'. Supported formats: .json, .csv"
+            )
+
         target.parent.mkdir(parents=True, exist_ok=True)
 
-        # Normalise records to list of dicts
-        data = [r.to_dict() if isinstance(r, EpisodeEvaluationRecord) else r for r in records]
+        data: List[Dict[str, Any]] = []
+        for idx, rec in enumerate(records):
+            if isinstance(rec, EpisodeEvaluationRecord):
+                data.append(rec.to_dict())
+            elif isinstance(rec, dict):
+                missing = [field for field in EPISODE_RECORD_FIELDS if field not in rec]
+                if missing:
+                    raise ValueError(
+                        f"Malformed record at index {idx}: missing required field(s): {', '.join(missing)}"
+                    )
+                data.append({field: rec[field] for field in EPISODE_RECORD_FIELDS})
+            else:
+                raise TypeError(
+                    f"Record at index {idx} must be EpisodeEvaluationRecord or dict, got {type(rec).__name__}"
+                )
 
-        ext = target.suffix.lower()
         if ext == ".json":
             with open(target, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
-        elif ext == ".csv":
-            fieldnames = [
-                "episode_index",
-                "seed",
-                "environment",
-                "scenario",
-                "return",
-                "episode_length",
-                "success",
-                "collision",
-            ]
+        else:
             with open(target, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer = csv.DictWriter(f, fieldnames=list(EPISODE_RECORD_FIELDS))
                 writer.writeheader()
                 for row in data:
-                    writer.writerow({k: row.get(k) for k in fieldnames})
-        else:
-            raise ValueError(f"Unsupported file extension for episode report: {ext}")
+                    writer.writerow(row)
 
         return target
 
