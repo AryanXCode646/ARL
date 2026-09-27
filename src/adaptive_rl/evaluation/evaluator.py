@@ -4,7 +4,40 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
+
+
+@dataclass(frozen=True)
+class EpisodeEvaluationRecord:
+    """Transport record for a single evaluation episode.
+
+    Fields are deliberately minimal and mirror the canonical EpisodeMetrics
+    together with contextual identifiers required for downstream analysis.
+    """
+
+    episode_index: int
+    seed: Optional[int]
+    environment: str
+    scenario: Optional[str]
+    return_value: float
+    episode_length: int
+    success: Optional[bool]
+    collision: Optional[bool]
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to a plain dict suitable for JSON/CSV output."""
+        return {
+            "episode_index": self.episode_index,
+            "seed": self.seed,
+            "environment": self.environment,
+            "scenario": self.scenario,
+            "return": self.return_value,
+            "episode_length": self.episode_length,
+            "success": self.success,
+            "collision": self.collision,
+        }
+
 from typing import Any, Dict, List, Optional
 
 import gymnasium as gym
@@ -95,6 +128,10 @@ class Evaluator(BaseEvaluator):
             self._explicit_policy = False
 
         self.last_episode_metrics: List[EpisodeMetrics] = []
+        # Records for optional episode‑level export. Cleared at the start of each evaluate call.
+        self.last_episode_records: List["EpisodeEvaluationRecord"] = []
+        # Holds the name of the scenario being evaluated (if any).
+        self._current_scenario_name: Optional[str] = None
 
     def _make_episode_accumulator(self) -> EpisodeMetricsAccumulator:
         """Bind a policy for one episode without treating inferred defaults as explicit.
@@ -131,6 +168,8 @@ class Evaluator(BaseEvaluator):
         """
         if num_episodes <= 0:
             raise ValueError(f"num_episodes must be positive, got {num_episodes}")
+        # Ensure per‑evaluation records are cleared to avoid leakage when reusing the same Evaluator instance
+        self.last_episode_records = []
 
         episode_metrics: List[EpisodeMetrics] = []
 
@@ -188,6 +227,19 @@ class Evaluator(BaseEvaluator):
 
             m = acc.finish()
             episode_metrics.append(m)
+
+            # Build episode export record
+            record = EpisodeEvaluationRecord(
+                episode_index=ep,
+                seed=seed,
+                environment=self.env_name,
+                scenario=self._current_scenario_name,
+                return_value=m.reward,
+                episode_length=m.length,
+                success=m.success,
+                collision=m.collision,
+            )
+            self.last_episode_records.append(record)
 
             if is_traffic_env:
                 ep_max_waits.append(max(ep_step_max_waits) if ep_step_max_waits else 0)
@@ -302,6 +354,8 @@ class Evaluator(BaseEvaluator):
             # Create environment for this specific scenario
             sc_env = make_env(self.env_name, **scenario_kwargs)
             sc_evaluator = Evaluator(algorithm=self.algorithm, env=sc_env)
+            # Propagate scenario identifier for per‑episode export
+            sc_evaluator._current_scenario_name = sc.name
             metrics = sc_evaluator.evaluate(
                 num_episodes=1,
                 deterministic=deterministic,
@@ -336,6 +390,57 @@ class Evaluator(BaseEvaluator):
 
         with open(target, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+
+        # Return after writing aggregate report
+        # New: Serialize per‑episode records to JSON or CSV.
+        return target
+
+    @staticmethod
+    def save_episode_report(
+        records: List[EpisodeEvaluationRecord] | List[Dict[str, Any]],
+        output_path: str | Path,
+    ) -> Path:
+        """Serialize per‑episode evaluation records to JSON or CSV.
+
+        The output format is inferred from the file extension. Supported extensions:
+        - ``.json``: writes a JSON array of record dictionaries.
+        - ``.csv``: writes a CSV with columns
+          ``episode_index,seed,environment,scenario,return,episode_length,success,collision``.
+        """
+        from pathlib import Path as _Path
+        import csv
+
+        target = _Path(output_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        # Normalise records to list of dicts
+        if all(isinstance(r, EpisodeEvaluationRecord) for r in records):
+            data = [r.to_dict() for r in records]
+        else:
+            data = [r if isinstance(r, dict) else dict(r) for r in records]
+
+        ext = target.suffix.lower()
+        if ext == ".json":
+            with open(target, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        elif ext == ".csv":
+            fieldnames = [
+                "episode_index",
+                "seed",
+                "environment",
+                "scenario",
+                "return",
+                "episode_length",
+                "success",
+                "collision",
+            ]
+            with open(target, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                for row in data:
+                    writer.writerow({k: row.get(k) for k in fieldnames})
+        else:
+            raise ValueError(f"Unsupported file extension for episode report: {ext}")
 
         return target
 

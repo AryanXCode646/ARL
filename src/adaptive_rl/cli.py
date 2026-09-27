@@ -486,6 +486,9 @@ def evaluate(
     output_report: Optional[Path] = typer.Option(
         None, "--output-report", "-o", help="Optional path to export JSON metrics report"
     ),
+    episode_report: Optional[Path] = typer.Option(
+        None, "--episode-report", "-er", help="Optional path to export per‑episode metrics (JSON or CSV)"
+    ),
 ) -> None:
     """Evaluate a trained agent over multiple benchmark episodes."""
     if config is None:
@@ -574,6 +577,12 @@ def evaluate(
         if output_report is not None:
             saved_path = evaluator.save_report(metrics, output_report)
             console.print(f"\n[bold green]Report saved to:[/bold green] {saved_path}")
+
+        if episode_report is not None:
+            saved_ep_path = evaluator.save_episode_report(
+                evaluator.last_episode_records, episode_report
+            )
+            console.print(f"\n[bold green]Episode report saved to:[/bold green] {saved_ep_path}")
 
         env.close()
     except Exception as err:
