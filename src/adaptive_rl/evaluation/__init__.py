@@ -1,6 +1,6 @@
 """Evaluation benchmarks, metrics, and scenario interfaces for AdaptiveRL."""
 
-from adaptive_rl.evaluation.evaluator import BaseEvaluator, Evaluator
+from adaptive_rl.evaluation.evaluator import BaseEvaluator, EpisodeEvaluationRecord, Evaluator
 from adaptive_rl.evaluation.generalization import (
     GeneralizationDistribution,
     GeneralizationEvaluator,
@@ -44,11 +44,12 @@ from adaptive_rl.metrics import (
 
 __all__ = [
     "BaseEvaluator",
-    "Evaluator",
-    "EvaluationMetrics",
-    "EvaluationScenario",
     "DistributionShiftBenchmarkSpec",
     "EpisodeBenchmarkRecord",
+    "EpisodeEvaluationRecord",
+    "EvaluationMetrics",
+    "EvaluationScenario",
+    "Evaluator",
     "GeneralizationDistribution",
     "GeneralizationEvaluator",
     "GeneralizationReport",
