@@ -9,8 +9,8 @@ The tests verify:
 * Scenario name propagation when using `evaluate_scenarios`.
 """
 
-import json
 import csv
+import json
 from pathlib import Path
 
 import pytest
@@ -43,14 +43,32 @@ def test_episode_export_formats(tmp_path: Path, fmt: str, ext: str):
         assert isinstance(data, list)
         assert len(data) == 3
         for rec in data:
-            for key in ["episode_index", "seed", "environment", "scenario", "return", "episode_length", "success", "collision"]:
+            for key in [
+                "episode_index",
+                "seed",
+                "environment",
+                "scenario",
+                "return",
+                "episode_length",
+                "success",
+                "collision",
+            ]:
                 assert key in rec
     else:
         with out_file.open(newline="") as f:
             reader = csv.DictReader(f)
             rows = list(reader)
         assert len(rows) == 3
-        expected_fields = ["episode_index", "seed", "environment", "scenario", "return", "episode_length", "success", "collision"]
+        expected_fields = [
+            "episode_index",
+            "seed",
+            "environment",
+            "scenario",
+            "return",
+            "episode_length",
+            "success",
+            "collision",
+        ]
         assert reader.fieldnames == expected_fields
 
     env.close()
@@ -74,11 +92,12 @@ def test_deterministic_seed_preservation(tmp_path: Path):
 
 def test_scenario_name_propagation(tmp_path: Path):
     from adaptive_rl.evaluation.scenarios import EvaluationScenario
+
     env = DummyTestEnv(step_limit=5)
     algo = PPOAlgorithm(env=env, n_steps=64, batch_size=32)
     evaluator = Evaluator(algorithm=algo, env=env)
     scenario = EvaluationScenario(name="test_scenario", seed=10, environment_overrides={})
-    results = evaluator.evaluate_scenarios([scenario], deterministic=True)
+    evaluator.evaluate_scenarios([scenario], deterministic=True)
     records = evaluator.last_episode_records
     assert len(records) == 1
     assert records[0].scenario == "test_scenario"

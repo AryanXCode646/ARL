@@ -6,6 +6,23 @@ import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import gymnasium as gym
+import numpy as np
+
+from adaptive_rl.algorithms.base import BaseAlgorithm
+from adaptive_rl.environments.registry import make_env
+from adaptive_rl.evaluation.metrics import EvaluationMetrics
+from adaptive_rl.evaluation.scenarios import EvaluationScenario
+from adaptive_rl.metrics import (
+    DefaultOutcomePolicy,
+    EpisodeMetrics,
+    EpisodeMetricsAccumulator,
+    OutcomePolicy,
+    TrafficOutcomePolicy,
+    compute_rate,
+)
 
 
 @dataclass(frozen=True)
@@ -37,24 +54,6 @@ class EpisodeEvaluationRecord:
             "success": self.success,
             "collision": self.collision,
         }
-
-from typing import Any, Dict, List, Optional
-
-import gymnasium as gym
-import numpy as np
-
-from adaptive_rl.algorithms.base import BaseAlgorithm
-from adaptive_rl.environments.registry import make_env
-from adaptive_rl.evaluation.metrics import EvaluationMetrics
-from adaptive_rl.evaluation.scenarios import EvaluationScenario
-from adaptive_rl.metrics import (
-    DefaultOutcomePolicy,
-    EpisodeMetrics,
-    EpisodeMetricsAccumulator,
-    OutcomePolicy,
-    TrafficOutcomePolicy,
-    compute_rate,
-)
 
 
 class BaseEvaluator(ABC):
@@ -407,17 +406,14 @@ class Evaluator(BaseEvaluator):
         - ``.csv``: writes a CSV with columns
           ``episode_index,seed,environment,scenario,return,episode_length,success,collision``.
         """
-        from pathlib import Path as _Path
         import csv
+        from pathlib import Path as _Path
 
         target = _Path(output_path)
         target.parent.mkdir(parents=True, exist_ok=True)
 
         # Normalise records to list of dicts
-        if all(isinstance(r, EpisodeEvaluationRecord) for r in records):
-            data = [r.to_dict() for r in records]
-        else:
-            data = [r if isinstance(r, dict) else dict(r) for r in records]
+        data = [r.to_dict() if isinstance(r, EpisodeEvaluationRecord) else r for r in records]
 
         ext = target.suffix.lower()
         if ext == ".json":
