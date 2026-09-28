@@ -466,7 +466,7 @@ def test_generalization_gap_calculation_normal() -> None:
     gap = compute_generalization_gap(train_m, test_m)
 
     assert gap.success_gap == pytest.approx(0.85 - 0.55)  # +0.30
-    assert gap.reward_gap == pytest.approx(80.0 - 30.0)    # +50.0
+    assert gap.reward_gap == pytest.approx(80.0 - 30.0)  # +50.0
     assert gap.collision_gap == pytest.approx(0.10 - 0.40)  # -0.30
 
 

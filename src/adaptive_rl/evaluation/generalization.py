@@ -28,7 +28,7 @@ TRAIN_SEED_START: int = 0
 TRAIN_SEED_END: int = 1000  # 1000 deterministic training seeds: 0..999
 
 TEST_SEED_START: int = 1000
-TEST_SEED_END: int = 1200   # 200 deterministic unseen test seeds: 1000..1199
+TEST_SEED_END: int = 1200  # 200 deterministic unseen test seeds: 1000..1199
 
 VALID_SPLITS: Tuple[str, ...] = ("train", "test")
 

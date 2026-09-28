@@ -415,6 +415,7 @@ class DroneNavigation3DEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
                 raise ValueError(f"Invalid split '{split}'. Expected one of: {VALID_SPLITS}")
             self.split = clean_split
 
+        self._active_split: Optional[str] = self.split
         self._split_episode_index: int = 0
         self._last_split_seed: Optional[int] = None
 
@@ -546,8 +547,9 @@ class DroneNavigation3DEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
             "min_obstacle_distance": min_obs_dist if self._obstacles else float("inf"),
             "altitude": float(self._position[2]),
         }
-        if self.split is not None:
-            info["split"] = self.split
+        current_split = self._active_split if self._active_split is not None else self.split
+        if current_split is not None:
+            info["split"] = current_split
             info["split_seed"] = self._last_split_seed
         return info
 
@@ -577,6 +579,7 @@ class DroneNavigation3DEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
                     f"Invalid split '{options['split']}'. Expected one of: {VALID_SPLITS}"
                 )
             active_split = clean_split
+        self._active_split = active_split
 
         effective_seed = seed
         if active_split is not None:

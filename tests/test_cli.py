@@ -317,4 +317,3 @@ log_dir: "{tmp_path / "logs"}"
     )
     assert missing_res.exit_code == 1
     assert "Model file does not exist" in missing_res.output
-
