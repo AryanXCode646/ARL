@@ -1,7 +1,11 @@
 """Benchmark simulation and inference throughput (steps/sec)."""
+
 import time
+
 import numpy as np
+
 from adaptive_rl.environments.drone import DroneNavigation3DEnv
+
 
 def main():
     env = DroneNavigation3DEnv()
@@ -18,6 +22,7 @@ def main():
 
     fps = num_steps / duration
     print(f"Simulation Throughput: {fps:.1f} steps/second ({num_steps} steps in {duration:.3f}s)")
+
 
 if __name__ == "__main__":
     main()
