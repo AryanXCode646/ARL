@@ -533,6 +533,16 @@ class DroneNavigation3DEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
             "altitude": float(self._position[2]),
         }
 
+    @property
+    def drone_state(self) -> DroneState3D:
+        """Convenience property exposing the underlying drone state."""
+        return self.kinematics.state
+
+    @property
+    def target(self) -> np.ndarray:
+        """Convenience property exposing the target waypoint."""
+        return self._goal
+
     def reset(
         self,
         *,
@@ -598,15 +608,18 @@ class DroneNavigation3DEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
         info["collision"] = is_collision
         info["collision_type"] = collision_type
         info["success"] = is_success
+        info["is_success"] = is_success
 
         if is_collision:
             reward = self.collision_reward
             info["success"] = False
+            info["is_success"] = False
             if self.terminate_on_collision:
                 terminated = True
         elif is_success:
             reward = self.goal_reward
             info["success"] = True
+            info["is_success"] = True
             terminated = True
         else:
             action_effort = float(np.sum(np.square(act_arr)))

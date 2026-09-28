@@ -1,8 +1,12 @@
 """Standalone script demonstrating trained PPO policy on DroneNavigation3DEnv."""
+
 import argparse
 from pathlib import Path
+
 from stable_baselines3 import PPO
+
 from adaptive_rl.environments.drone import DroneNavigation3DEnv
+
 
 def main():
     parser = argparse.ArgumentParser(description="Demonstrate trained drone policy.")
@@ -37,13 +41,20 @@ def main():
         pos = env.drone_state.position
         d_goal = float(info.get("distance_to_goal", 0.0))
         d_obs = float(info.get("min_obstacle_distance", 0.0))
-        print(f"Step {step:03d} | Pos: [{pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}] | d_goal: {d_goal:.2f}m | d_obs: {d_obs:.2f}m")
+        print(
+            f"Step {step:03d} | Pos: [{pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}] | d_goal: {d_goal:.2f}m | d_obs: {d_obs:.2f}m"
+        )
 
         if terminated or truncated:
-            reason = "SUCCESS: Reached target!" if info.get("is_success") else "FAILED: Collision or boundary violation"
+            reason = (
+                "SUCCESS: Reached target!"
+                if info.get("is_success")
+                else "FAILED: Collision or boundary violation"
+            )
             print(f"\nResult: {reason}")
             print(f"Total Steps: {step}, Total Reward: {total_reward:.2f}")
             break
+
 
 if __name__ == "__main__":
     main()
