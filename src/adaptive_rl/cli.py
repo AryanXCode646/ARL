@@ -416,7 +416,7 @@ def demo_drone(
         console.print("\n[bold green]SUCCESS[/bold green]")
     else:
         console.print("\n[bold red]FAILED / COLLISION[/bold red]")
-#dd
+
 
 if __name__ == "__main__":
     app()
