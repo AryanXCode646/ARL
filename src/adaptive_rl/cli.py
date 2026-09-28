@@ -427,6 +427,16 @@ def gui(
     import subprocess
     import sys
 
+    try:
+        import streamlit  # noqa: F401
+    except ImportError:
+        console.print(
+            "[bold red]Streamlit is not installed.[/bold red]\n\n"
+            "To launch the interactive GUI, install the GUI dependencies:\n"
+            '  [bold green]pip install -e ".[gui]"[/bold green]'
+        )
+        raise typer.Exit(code=1)
+
     app_path = Path(__file__).resolve().parent.parent.parent / "app.py"
     if not app_path.exists():
         app_path = Path("app.py").resolve()

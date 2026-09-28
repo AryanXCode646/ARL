@@ -3,6 +3,11 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
+
+pytest.importorskip("plotly")
+pytest.importorskip("streamlit")
+
 import plotly.graph_objects as go
 
 from adaptive_rl.environments.drone import DroneNavigation3DEnv, ObstacleSphere3D
