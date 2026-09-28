@@ -394,6 +394,7 @@ class DroneNavigation3DEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
         action_penalty_weight: float = 0.01,
         terminate_on_collision: bool = True,
         render_mode: Optional[str] = None,
+        split: Optional[str] = None,
     ) -> None:
         super().__init__()
         if any(b <= 0.0 for b in bounds):
@@ -404,6 +405,19 @@ class DroneNavigation3DEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
             raise ValueError(f"target_radius must be positive, got {target_radius}")
         if collision_radius <= 0.0:
             raise ValueError(f"collision_radius must be positive, got {collision_radius}")
+
+        self.split: Optional[str] = None
+        if split is not None:
+            clean_split = str(split).lower().strip()
+            from adaptive_rl.evaluation.generalization import VALID_SPLITS
+
+            if clean_split not in VALID_SPLITS:
+                raise ValueError(f"Invalid split '{split}'. Expected one of: {VALID_SPLITS}")
+            self.split = clean_split
+
+        self._active_split: Optional[str] = self.split
+        self._split_episode_index: int = 0
+        self._last_split_seed: Optional[int] = None
 
         self.bounds = (float(bounds[0]), float(bounds[1]), float(bounds[2]))
         self.default_start = (
@@ -520,11 +534,12 @@ class DroneNavigation3DEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
             if d < min_obs_dist:
                 min_obs_dist = d
 
-        return {
+        info = {
             "step": self._current_step,
             "max_steps": self.max_steps,
             "position": self._position.copy(),
             "velocity": self._velocity.copy(),
+            "acceleration": self.kinematics.state.acceleration.copy(),
             "speed": speed,
             "goal": self._goal.copy(),
             "distance_to_goal": dist,
@@ -532,6 +547,11 @@ class DroneNavigation3DEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
             "min_obstacle_distance": min_obs_dist if self._obstacles else float("inf"),
             "altitude": float(self._position[2]),
         }
+        current_split = self._active_split if self._active_split is not None else self.split
+        if current_split is not None:
+            info["split"] = current_split
+            info["split_seed"] = self._last_split_seed
+        return info
 
     @property
     def drone_state(self) -> DroneState3D:
@@ -549,7 +569,41 @@ class DroneNavigation3DEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
         seed: Optional[int] = None,
         options: Optional[Dict[str, Any]] = None,
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
-        super().reset(seed=seed, options=options)
+        active_split = self.split
+        if options and "split" in options and options["split"] is not None:
+            clean_split = str(options["split"]).lower().strip()
+            from adaptive_rl.evaluation.generalization import VALID_SPLITS
+
+            if clean_split not in VALID_SPLITS:
+                raise ValueError(
+                    f"Invalid split '{options['split']}'. Expected one of: {VALID_SPLITS}"
+                )
+            active_split = clean_split
+        self._active_split = active_split
+
+        effective_seed = seed
+        if active_split is not None:
+            from adaptive_rl.evaluation.generalization import (
+                TEST_SEED_END,
+                TEST_SEED_START,
+                TRAIN_SEED_END,
+                TRAIN_SEED_START,
+                validate_split_seed,
+            )
+
+            if effective_seed is not None:
+                validate_split_seed(effective_seed, active_split)
+            else:
+                if active_split == "train":
+                    capacity = TRAIN_SEED_END - TRAIN_SEED_START
+                    effective_seed = TRAIN_SEED_START + (self._split_episode_index % capacity)
+                else:
+                    capacity = TEST_SEED_END - TEST_SEED_START
+                    effective_seed = TEST_SEED_START + (self._split_episode_index % capacity)
+                self._split_episode_index += 1
+
+        self._last_split_seed = effective_seed
+        super().reset(seed=effective_seed, options=options)
         self._current_step = 0
 
         num_obs = self.num_obstacles

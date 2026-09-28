@@ -74,6 +74,7 @@ AdaptiveRL is an educational reinforcement-learning project in which a PPO agent
 - **Target Detection**: Automatic goal-arrival termination within a calibrated target radius.
 - **Reward Shaping**: Multi-component reward encouraging progress toward the goal while penalizing collisions and excessive step duration.
 - **Deterministic Evaluation**: Reusable evaluation pipeline with reproducible seed control.
+- **Trajectory & Safety Metrics**: Rigorous trajectory evaluation including path length, straight-line distance, path efficiency, obstacle surface clearance, maximum velocity/acceleration, and separated obstacle vs. boundary collisions.
 - **Untrained Random Policy Baseline**: Built-in non-learning baseline to scientifically validate policy improvement.
 - **Obstacle-Density Experiment**: Controlled testing across 4, 6, and 8 obstacles to demonstrate environmental difficulty scaling.
 - **PPO Learning-Curve Benchmark**: Train fresh PPO models across configurable timestep budgets and export evaluation metrics as JSON/CSV with optional plots.
@@ -427,11 +428,13 @@ adaptive-rl evaluate \
 
 This prints a formatted comparison table displaying:
 - **Success Rate (%)**: Percentage of episodes reaching within 1.5m of the target.
-- **Collision Rate (%)**: Percentage of episodes colliding with obstacles or arena walls.
+- **Collision Rate (%)**: Percentage of episodes colliding with obstacles or arena walls (with separate obstacle and boundary collision breakdown).
 - **Mean Reward**: Average cumulative episodic return ($\pm$ standard deviation).
 - **Mean Steps**: Average flight duration before termination or truncation.
+- **Trajectory Quality**: Path length (m), straight-line distance (m), and path efficiency.
+- **Safety & Dynamics**: Minimum obstacle surface clearance (m), maximum velocity (m/s), and maximum acceleration (m/s²).
 
-The evaluation report is saved to `artifacts/evaluation.json`.
+The evaluation report is saved to `artifacts/evaluation.json` (and optionally to CSV via `--output-csv`).
 
 View all evaluation options:
 ```bash
@@ -655,6 +658,50 @@ Instead of hand-coding navigation heuristics, the agent learns through trial and
 
 *Finding: As obstacle density increases from 4 to 8, the collision rate rises from 20% to 70% and mean return drops, demonstrating how environmental complexity restricts safe flight paths.*
 
+### 3. Unseen-Environment Generalization Benchmark
+
+To verify that the drone policy learns genuine spatial obstacle avoidance rather than memorizing fixed obstacle layouts, AdaptiveRL partitions random seeds into disjoint deterministic intervals:
+- **Training split (`train`)**: Seeds $[0, 1000)$ ($0 \le \text{seed} < 1000$, 1000 unique environments).
+- **Unseen test split (`test`)**: Seeds $[1000, 1200)$ ($1000 \le \text{seed} < 1200$, 200 unique held-out environments).
+
+#### Running the Benchmark
+```bash
+# 1. Train with the designated training split
+adaptive-rl train --config configs/drone_ppo.yaml --split train
+
+# 2. Evaluate specifically on held-out unseen test environments
+adaptive-rl evaluate --config configs/drone_ppo.yaml --model artifacts/models/drone_ppo_final.zip --split test
+
+# 3. Run the complete generalization benchmark (evaluates both splits, computes gaps, exports JSON)
+adaptive-rl evaluate-generalization --model artifacts/models/drone_ppo_final.zip
+```
+
+#### Generalization Gaps
+- **Success Gap**: $\Delta_{\text{success}} = \text{train\_success\_rate} - \text{test\_success\_rate}$
+- **Reward Gap**: $\Delta_{\text{reward}} = \text{train\_mean\_reward} - \text{test\_mean\_reward}$
+
+Benchmark results are automatically exported to `artifacts/generalization_benchmark.json`:
+```json
+{
+  "train": {
+    "seeds": [0, 1, 2, "..."],
+    "success_rate": 0.85,
+    "collision_rate": 0.10,
+    "mean_reward": 82.50
+  },
+  "test": {
+    "seeds": [1000, 1001, 1002, "..."],
+    "success_rate": 0.70,
+    "collision_rate": 0.25,
+    "mean_reward": 61.20
+  },
+  "generalization_gap": {
+    "success": 0.15,
+    "reward": 21.30
+  }
+}
+```
+
 ---
 
 ## Project Structure
@@ -690,6 +737,7 @@ ARL/
 │   │   └── registry.py         # Gymnasium environment factory registry
 │   ├── evaluation/
 │   │   ├── evaluator.py        # Evaluator, baseline comparison, and density experiment
+│   │   ├── generalization.py   # Unseen-environment generalization benchmark & seed partition protocol
 │   │   └── metrics.py          # EvaluationMetrics dataclass
 │   ├── gui/
 │   │   ├── __init__.py         # GUI exports

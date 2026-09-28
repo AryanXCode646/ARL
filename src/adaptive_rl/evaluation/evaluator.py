@@ -16,7 +16,11 @@ from adaptive_rl.algorithms.base import BaseAlgorithm
 from adaptive_rl.algorithms.random_policy import RandomPolicy
 from adaptive_rl.environments.drone import DroneNavigation3DEnv
 from adaptive_rl.environments.registry import make_env
-from adaptive_rl.evaluation.metrics import EvaluationMetrics
+from adaptive_rl.evaluation.metrics import (
+    EvaluationMetrics,
+    StandardizedExperimentMetrics,
+    compute_trajectory_metrics,
+)
 from adaptive_rl.evaluation.statistics import MetricStatistics, summarize_seed_values
 
 
@@ -31,11 +35,18 @@ class EpisodeEvaluationRecord:
     success: Optional[bool]
     collision: Optional[bool]
     truncated: bool
-    path_length: Optional[float] = None
     episode_seed: Optional[int] = None
+    collision_type: Optional[str] = None
+    path_length: Optional[float] = None
+    straight_line_distance: Optional[float] = None
+    path_efficiency: Optional[float] = None
+    min_obstacle_clearance: Optional[float] = None
+    max_velocity: Optional[float] = None
+    max_acceleration: Optional[float] = None
+    timeout: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        data: Dict[str, Any] = {
             "episode_index": self.episode_index,
             "seed": self.seed,
             "return": self.return_value,
@@ -43,9 +54,24 @@ class EpisodeEvaluationRecord:
             "success": self.success,
             "collision": self.collision,
             "truncated": self.truncated,
-            "path_length": self.path_length,
+            "timeout": self.timeout,
             "episode_seed": self.episode_seed,
         }
+        if self.collision_type is not None:
+            data["collision_type"] = self.collision_type
+        if self.path_length is not None:
+            data["path_length"] = self.path_length
+        if self.straight_line_distance is not None:
+            data["straight_line_distance"] = self.straight_line_distance
+        if self.path_efficiency is not None:
+            data["path_efficiency"] = self.path_efficiency
+        if self.min_obstacle_clearance is not None:
+            data["min_obstacle_clearance"] = self.min_obstacle_clearance
+        if self.max_velocity is not None:
+            data["max_velocity"] = self.max_velocity
+        if self.max_acceleration is not None:
+            data["max_acceleration"] = self.max_acceleration
+        return data
 
 
 @dataclass(frozen=True)
@@ -141,8 +167,32 @@ class Evaluator:
         num_episodes: int = 10,
         deterministic: bool = True,
         base_seed: Optional[int] = None,
+        seeds: Optional[Sequence[int]] = None,
+        split: Optional[str] = None,
     ) -> EvaluationMetrics:
-        """Execute evaluation rollouts and compute aggregated metrics."""
+        """Execute evaluation rollouts and compute aggregated metrics.
+
+        Args:
+            num_episodes: Number of episodes to run (overridden by len(seeds) if seeds is given).
+            deterministic: Whether to use deterministic policy actions.
+            base_seed: Starting seed for sequential seed generation (seed = base_seed + ep).
+            seeds: Explicit sequence of integer seeds to evaluate against.
+            split: Benchmark split ('train' or 'test'). When supplied without seeds,
+                seeds are deterministically derived from the split partition.
+        """
+        if split is not None:
+            from adaptive_rl.evaluation.generalization import get_split_seeds, validate_split_seed
+
+            if seeds is None:
+                seeds = get_split_seeds(split, num_episodes=num_episodes)
+            else:
+                for s in seeds:
+                    validate_split_seed(s, split)
+
+        if seeds is not None:
+            seeds = list(seeds)
+            num_episodes = len(seeds)
+
         if num_episodes <= 0:
             raise ValueError(f"num_episodes must be positive, got {num_episodes}")
 
@@ -152,10 +202,33 @@ class Evaluator:
         successes: List[Optional[bool]] = []
         collisions: List[Optional[bool]] = []
         truncations: List[bool] = []
+        obstacle_collisions: List[bool] = []
+        boundary_collisions: List[bool] = []
+        timeouts: List[bool] = []
+
+        path_lengths: List[float] = []
+        straight_line_dists: List[float] = []
+        path_efficiencies: List[float] = []
+        min_clearances: List[float] = []
+        max_velocities: List[float] = []
+        max_accelerations: List[float] = []
 
         for ep in range(num_episodes):
-            seed = (base_seed + ep) if base_seed is not None else None
-            obs, info = self.env.reset(seed=seed)
+            if seeds is not None:
+                seed = seeds[ep]
+            elif base_seed is not None:
+                seed = base_seed + ep
+            else:
+                seed = None
+
+            reset_options = {"split": split} if split is not None else None
+            if reset_options is not None:
+                try:
+                    obs, info = self.env.reset(seed=seed, options=reset_options)
+                except TypeError:
+                    obs, info = self.env.reset(seed=seed)
+            else:
+                obs, info = self.env.reset(seed=seed)
             ep_reward = 0.0
             ep_length = 0
             done = False
@@ -164,12 +237,39 @@ class Evaluator:
             previous_position = self._position_from_info(last_info)
             path_length = 0.0 if previous_position is not None else None
 
+            # Trajectory tracking for trajectory-quality and safety metrics
+            positions: List[np.ndarray] = []
+            velocities: List[np.ndarray] = []
+            accelerations: List[np.ndarray] = []
+
+            init_pos = last_info.get("position")
+            if init_pos is not None:
+                positions.append(np.asarray(init_pos, dtype=np.float64).copy())
+            init_vel = last_info.get("velocity")
+            if init_vel is not None:
+                velocities.append(np.asarray(init_vel, dtype=np.float64).copy())
+            init_acc = last_info.get("acceleration")
+            if init_acc is not None:
+                accelerations.append(np.asarray(init_acc, dtype=np.float64).copy())
+
+            goal = last_info.get("goal")
+            unwrapped_env = getattr(self.env, "unwrapped", self.env)
+            obstacles = getattr(unwrapped_env, "_obstacles", None)
+            if obstacles is None:
+                obstacles = getattr(unwrapped_env, "obstacles", None)
+
             while not done:
-                action, _ = self.algorithm.predict(obs, deterministic=deterministic)
+                if self.algorithm is not None:
+                    action, _ = self.algorithm.predict(obs, deterministic=deterministic)
+                elif hasattr(self.env, "action_space") and self.env.action_space is not None:
+                    action = self.env.action_space.sample()
+                else:
+                    action = np.zeros(3, dtype=np.float32)
+
                 obs, reward, terminated, truncated, step_info = self.env.step(action)
                 ep_reward += float(reward)
                 ep_length += 1
-                last_info = step_info
+                last_info = dict(step_info or {})
                 was_truncated = bool(truncated)
                 current_position = self._position_from_info(step_info)
                 if (
@@ -183,11 +283,26 @@ class Evaluator:
                     path_length = None
                 previous_position = current_position
                 done = terminated or truncated
+                step_pos = last_info.get("position")
+                if step_pos is not None:
+                    positions.append(np.asarray(step_pos, dtype=np.float64).copy())
+                step_vel = last_info.get("velocity")
+                if step_vel is not None:
+                    velocities.append(np.asarray(step_vel, dtype=np.float64).copy())
+                step_acc = last_info.get("acceleration")
+                if step_acc is not None:
+                    accelerations.append(np.asarray(step_acc, dtype=np.float64).copy())
+                elif hasattr(unwrapped_env, "kinematics"):
+                    accelerations.append(unwrapped_env.kinematics.state.acceleration.copy())
 
             success_value = last_info.get("success", last_info.get("is_success"))
             collision_value = last_info.get("collision")
             is_success = bool(success_value) if success_value is not None else None
             is_collision = bool(collision_value) if collision_value is not None else None
+            collision_type = str(last_info.get("collision_type", "none"))
+            is_obs_coll = bool(is_collision) and collision_type == "obstacle"
+            is_bound_coll = bool(is_collision) and collision_type.startswith("boundary")
+            is_timeout = was_truncated
 
             rewards.append(ep_reward)
             lengths.append(ep_length)
@@ -196,6 +311,37 @@ class Evaluator:
             truncations.append(was_truncated)
             if not math.isfinite(ep_reward):
                 raise ValueError(f"Episode {ep} produced a non-finite cumulative reward.")
+            obstacle_collisions.append(is_obs_coll)
+            boundary_collisions.append(is_bound_coll)
+            timeouts.append(is_timeout)
+
+            traj_metrics = compute_trajectory_metrics(
+                positions=positions,
+                velocities=velocities,
+                accelerations=accelerations,
+                goal=goal,
+                obstacles=obstacles,
+            )
+
+            ep_path_len = path_length
+            ep_straight_dist = traj_metrics["straight_line_distance"]
+            ep_path_eff = traj_metrics["path_efficiency"]
+            ep_min_clear = traj_metrics["min_obstacle_clearance"]
+            ep_max_vel = traj_metrics["max_velocity"]
+            ep_max_acc = traj_metrics["max_acceleration"]
+
+            if ep_path_len is not None:
+                path_lengths.append(ep_path_len)
+            if ep_straight_dist is not None:
+                straight_line_dists.append(ep_straight_dist)
+            if ep_path_eff is not None:
+                path_efficiencies.append(ep_path_eff)
+            if ep_min_clear is not None:
+                min_clearances.append(ep_min_clear)
+            if ep_max_vel is not None:
+                max_velocities.append(ep_max_vel)
+            if ep_max_acc is not None:
+                max_accelerations.append(ep_max_acc)
 
             self.last_episode_records.append(
                 EpisodeEvaluationRecord(
@@ -206,8 +352,15 @@ class Evaluator:
                     success=is_success,
                     collision=is_collision,
                     truncated=was_truncated,
-                    path_length=path_length,
                     episode_seed=seed,
+                    collision_type=collision_type if is_collision else None,
+                    path_length=ep_path_len,
+                    straight_line_distance=ep_straight_dist,
+                    path_efficiency=ep_path_eff,
+                    min_obstacle_clearance=ep_min_clear,
+                    max_velocity=ep_max_vel,
+                    max_acceleration=ep_max_acc,
+                    timeout=is_timeout,
                 )
             )
 
@@ -229,6 +382,21 @@ class Evaluator:
             else None
         )
         trunc_rate = float(sum(truncations) / num_episodes)
+        time_rate = float(sum(timeouts) / num_episodes)
+        mean_path_eff = float(np.mean(path_efficiencies)) if path_efficiencies else None
+
+        obs_coll_count = int(sum(obstacle_collisions))
+        bound_coll_count = int(sum(boundary_collisions))
+        obs_coll_rate = float(obs_coll_count / num_episodes)
+        bound_coll_rate = float(bound_coll_count / num_episodes)
+
+        mean_path_len = float(np.mean(path_lengths)) if path_lengths else None
+        std_path_len = float(np.std(path_lengths)) if path_lengths else None
+        mean_straight_dist = float(np.mean(straight_line_dists)) if straight_line_dists else None
+        mean_path_eff = float(np.mean(path_efficiencies)) if path_efficiencies else None
+        mean_min_clear = float(np.mean(min_clearances)) if min_clearances else None
+        mean_max_vel = float(np.mean(max_velocities)) if max_velocities else None
+        mean_max_acc = float(np.mean(max_accelerations)) if max_accelerations else None
 
         return EvaluationMetrics(
             episodes=num_episodes,
@@ -238,9 +406,21 @@ class Evaluator:
             max_reward=max_rew,
             success_rate=succ_rate,
             collision_rate=coll_rate,
-            truncation_rate=trunc_rate,
+            truncation_rate=time_rate,
+            timeout_rate=time_rate,
             mean_episode_length=mean_len,
             std_episode_length=std_len,
+            mean_path_length=mean_path_len,
+            std_path_length=std_path_len,
+            mean_straight_line_distance=mean_straight_dist,
+            mean_path_efficiency=mean_path_eff,
+            mean_min_obstacle_clearance=mean_min_clear,
+            mean_max_velocity=mean_max_vel,
+            mean_max_acceleration=mean_max_acc,
+            obstacle_collision_rate=obs_coll_rate,
+            boundary_collision_rate=bound_coll_rate,
+            obstacle_collision_count=obs_coll_count,
+            boundary_collision_count=bound_coll_count,
             additional_metrics={
                 "all_rewards": rewards,
                 "all_lengths": lengths,
@@ -249,6 +429,26 @@ class Evaluator:
                 "base_seed": base_seed,
                 "truncation_count": int(sum(truncations)),
                 "timeout_rate": trunc_rate,
+                "split": split,
+                "seeds": list(seeds) if seeds is not None else None,
+                "mean_path_length": mean_path_len,
+                "path_length": mean_path_len,
+                "std_path_length": std_path_len,
+                "straight_line_distance": mean_straight_dist,
+                "mean_straight_line_distance": mean_straight_dist,
+                "path_efficiency": mean_path_eff,
+                "mean_path_efficiency": mean_path_eff,
+                "min_obstacle_clearance": mean_min_clear,
+                "mean_min_obstacle_clearance": mean_min_clear,
+                "max_velocity": mean_max_vel,
+                "mean_max_velocity": mean_max_vel,
+                "max_acceleration": mean_max_acc,
+                "mean_max_acceleration": mean_max_acc,
+                "obstacle_collision_count": obs_coll_count,
+                "boundary_collision_count": bound_coll_count,
+                "obstacle_collision_rate": obs_coll_rate,
+                "boundary_collision_rate": bound_coll_rate,
+                "truncation_rate": time_rate,
             },
         )
 
@@ -418,12 +618,63 @@ class Evaluator:
             "truncation_rate": round(metrics.truncation_rate, 4)
             if metrics.truncation_rate is not None
             else None,
+            "timeout_rate": round(metrics.timeout_rate, 4)
+            if metrics.timeout_rate is not None
+            else None,
             "mean_episode_length": round(metrics.mean_episode_length, 2),
             "std_episode_length": round(metrics.std_episode_length, 2),
+            "mean_path_length": round(metrics.mean_path_length, 2)
+            if metrics.mean_path_length is not None
+            else None,
+            "std_path_length": round(metrics.std_path_length, 2)
+            if metrics.std_path_length is not None
+            else None,
+            "mean_straight_line_distance": round(metrics.mean_straight_line_distance, 2)
+            if metrics.mean_straight_line_distance is not None
+            else None,
+            "mean_path_efficiency": round(metrics.mean_path_efficiency, 4)
+            if metrics.mean_path_efficiency is not None
+            else None,
+            "mean_min_obstacle_clearance": round(metrics.mean_min_obstacle_clearance, 2)
+            if metrics.mean_min_obstacle_clearance is not None
+            else None,
+            "mean_max_velocity": round(metrics.mean_max_velocity, 2)
+            if metrics.mean_max_velocity is not None
+            else None,
+            "mean_max_acceleration": round(metrics.mean_max_acceleration, 2)
+            if metrics.mean_max_acceleration is not None
+            else None,
+            "obstacle_collision_rate": round(metrics.obstacle_collision_rate, 4)
+            if metrics.obstacle_collision_rate is not None
+            else None,
+            "boundary_collision_rate": round(metrics.boundary_collision_rate, 4)
+            if metrics.boundary_collision_rate is not None
+            else None,
+            "obstacle_collision_count": metrics.obstacle_collision_count,
+            "boundary_collision_count": metrics.boundary_collision_count,
         }
 
         with open(target, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+
+        return target
+
+    @staticmethod
+    def save_csv_report(
+        metrics: EvaluationMetrics,
+        output_path: str | Path,
+    ) -> Path:
+        """Serialize standardized evaluation metrics to CSV."""
+        target = Path(output_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        std_metrics = StandardizedExperimentMetrics.from_rl_metrics(metrics)
+        row = std_metrics.to_csv_dict()
+
+        with open(target, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+            writer.writeheader()
+            writer.writerow(row)
 
         return target
 
@@ -506,6 +757,7 @@ def compare_policies(
     env: Optional[gym.Env] = None,
     num_episodes: int = 20,
     base_seed: Optional[int] = 42,
+    split: Optional[str] = None,
 ) -> Dict[str, EvaluationMetrics]:
     """Execute head-to-head evaluation between trained PPO and Random baseline under identical seeds."""
     close_env = False
@@ -520,14 +772,16 @@ def compare_policies(
         ppo_metrics = ppo_eval.evaluate(
             num_episodes=num_episodes,
             deterministic=True,
-            base_seed=base_seed,
+            base_seed=base_seed if split is None else None,
+            split=split,
         )
 
         rand_eval = Evaluator(algorithm=random_policy, env=env)
         rand_metrics = rand_eval.evaluate(
             num_episodes=num_episodes,
             deterministic=False,
-            base_seed=base_seed,
+            base_seed=base_seed if split is None else None,
+            split=split,
         )
 
         return {
@@ -580,6 +834,13 @@ def run_obstacle_density_experiment(
     return results
 
 
+def run_reward_ablation_experiment(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+    """Convenience forwarder for reward-function ablation experiment."""
+    from adaptive_rl.benchmarking.ablation import run_reward_ablation_experiment as _run
+
+    return _run(*args, **kwargs)
+
+
 __all__ = [
     "EpisodeEvaluationRecord",
     "Evaluator",
@@ -587,4 +848,5 @@ __all__ = [
     "evaluate_ppo_policy",
     "evaluate_random_policy",
     "run_obstacle_density_experiment",
+    "run_reward_ablation_experiment",
 ]

@@ -174,27 +174,131 @@ adaptive-rl experiment-density --model artifacts/models/drone_ppo_demo_final.zip
 
 ---
 
+### Experiment 3: Unseen-Environment Generalization Benchmark
+
+#### Why Train/Test Separation Exists
+In standard reinforcement learning for continuous drone navigation, procedural obstacles are placed in `reset()` based on whatever random seed is active. Without strict partitioning between training and evaluation environments, an agent risks memorizing specific obstacle layouts and flight trajectories rather than mastering a generalized obstacle-avoidance policy.
+
+To scientifically evaluate out-of-distribution transfer and prevent test contamination, AdaptiveRL establishes a strict, reproducible seed-space partitioning protocol.
+
+#### Seed-Space Partitioning Protocol
+Random seed space is partitioned into two disjoint, non-overlapping deterministic intervals:
+- **Training Split (`train`)**: Seeds $[0, 1000)$ ($0 \le \text{seed} < 1000$, 1000 unique layouts).
+- **Unseen Test Split (`test`)**: Seeds $[1000, 1200)$ ($1000 \le \text{seed} < 1200$, 200 unique held-out layouts).
+
+The boundary is enforced at the environment level:
+- When initialized with `--split train`, the environment only ever draws episode seeds from $[0, 1000)$ and rejects any seed outside this partition with an immediate `ValueError`.
+- When evaluated with `--split test`, the environment only ever draws episode seeds from $[1000, 1200)$ and rejects training seeds.
+- Zero test configurations are ever encountered during training rollouts, guaranteeing zero data leakage.
+
+#### Metrics and Generalization Gaps
+The generalization benchmark runs the frozen policy on both distributions ($N=20$ episodes each) and computes:
+- **`train_success_rate` / `test_success_rate`**: Target reach rate on seen training vs unseen test distributions.
+- **`train_collision_rate` / `test_collision_rate`**: Obstacle or boundary collision rate on seen vs unseen layouts.
+- **`train_mean_reward` / `test_mean_reward`**: Mean cumulative episodic reward on seen vs unseen distributions.
+- **Success Generalization Gap**:
+  $$\Delta_{\text{success}} = \text{train\_success\_rate} - \text{test\_success\_rate}$$
+  A small gap indicates strong generalization to novel obstacle configurations; a large positive gap signals policy overfitting/memorization.
+- **Reward Generalization Gap**:
+  $$\Delta_{\text{reward}} = \text{train\_mean\_reward} - \text{test\_mean\_reward}$$
+
+---
+
 ## 7. Reproducibility Guarantee
 
-To independently reproduce the identical metrics on any student laptop:
+To independently reproduce the benchmark and empirical results:
 ```bash
 # 1. Clean environment install
 pip install -e ".[all]"
 
-# 2. Train with seed 42 (25k timesteps, ~25s on CPU)
-adaptive-rl train --config configs/drone_ppo_demo.yaml
+# 2. Train with the dedicated training split (seed-partitioned)
+adaptive-rl train --config configs/drone_ppo.yaml --split train
 
-# 3. Evaluate PPO vs Random Baseline
+# 3. Evaluate exclusively on unseen held-out test environments
+adaptive-rl evaluate \
+  --config configs/drone_ppo.yaml \
+  --model artifacts/models/drone_ppo_final.zip \
+  --split test \
+  --episodes 20
+
+# 4. Run the full Unseen-Environment Generalization Benchmark
+adaptive-rl evaluate-generalization \
+  --model artifacts/models/drone_ppo_final.zip \
+  --episodes 20 \
+  --output-report artifacts/generalization_benchmark.json
+
+# 5. Evaluate PPO vs Random Baseline
 adaptive-rl evaluate \
   --config configs/drone_ppo_demo.yaml \
   --model artifacts/models/drone_ppo_demo_final.zip \
   --episodes 20 \
   --compare-random
 
-# 4. Run Obstacle-Density Experiment
+# 6. Run Obstacle-Density Experiment
 adaptive-rl experiment-density \
   --model artifacts/models/drone_ppo_demo_final.zip \
   --episodes 10 \
   --seed 42
 ```
-All outputs are saved directly to `artifacts/evaluation.json` and `artifacts/obstacle_density_experiment.json`.
+All benchmark results and metrics are exported directly to structured JSON in `artifacts/`:
+- `artifacts/generalization_benchmark.json`: Train/test distributions, episode seeds, performance metrics, and computed $\Delta_{\text{success}}$ and $\Delta_{\text{reward}}$.
+- `artifacts/evaluation.json`: Single-run evaluation telemetry.
+- `artifacts/obstacle_density_experiment.json`: Multi-density progression results.
+
+---
+
+## 6. Reward-Function Ablation Study
+
+### Rationale
+In continuous 3D drone navigation, reward shaping balances progress incentive against collision aversion, flight time, and control effort. Without structured empirical ablations, multi-term reward formulations remain unvalidated heuristics that can inadvertently induce suboptimal failure modes (e.g. hovering defensively to avoid effort penalties, or rushing blindly into obstacles due to excessive step penalties).
+
+The reward-function ablation study isolates the contribution of each reward component under strictly controlled conditions.
+
+### The Five Reward Terms
+The continuous 3D navigation reward function comprises five distinct terms:
+1. **$w_{\text{progress}} \times (d_{t-1} - d_t)$**: Distance-progress reward attracting the drone toward the target waypoint ($w_{\text{progress}} = 2.0$).
+2. **$\text{goal\_reward}$**: Sparse terminal bonus granted upon reaching the goal within target radius ($+100.0$).
+3. **$\text{collision\_reward}$**: Terminal penalty assessed upon collision with obstacles or arena boundary ($-100.0$).
+4. **$\text{step\_penalty}$**: Constant time penalty incurred at each step to incentivize efficient paths ($-0.05$).
+5. **$-w_{\text{effort}} \times \|\mathbf{a}_t\|_2^2$**: Smoothness/effort penalty minimizing excessive actuator chatter ($w_{\text{effort}} = 0.01$).
+
+### The Four Controlled Variants
+The study evaluates an exact four-variant progression:
+
+| Variant | Variant Name | Progress Weight ($w_{\text{prog}}$) | Goal Reward | Collision Penalty | Step Penalty ($c_{\text{step}}$) | Action Effort Weight ($w_{\text{effort}}$) | Description |
+|---|---|---|---|---|---|---|---|
+| **A** | **Progress Only** | 2.0 | +100.0 | 0.0 | 0.0 | 0.0 | Pure progress delta; no step, effort, or collision penalties. |
+| **B** | **Progress + Collision** | 2.0 | +100.0 | -100.0 | 0.0 | 0.0 | Adds terminal collision avoidance incentive. |
+| **C** | **Progress + Collision + Step** | 2.0 | +100.0 | -100.0 | -0.05 | 0.0 | Adds step time penalty to encourage rapid goal-seeking. |
+| **D** | **Full Baseline** | 2.0 | +100.0 | -100.0 | -0.05 | 0.01 | Full standard formulation (matches default environment). |
+
+### Experimental Controls & Methodology
+To ensure rigorous empirical comparison:
+- **Identical Training Budget**: Each variant is trained for exactly the same number of timesteps (default 25,000 steps).
+- **Identical PPO Hyperparameters**: Policy network architecture (`MlpPolicy`), learning rate ($3 \times 10^{-4}$), discount factor ($\gamma = 0.99$), batch size (64), rollout steps ($n_{\text{steps}} = 1024$), and clip range ($0.2$) are held strictly constant.
+- **Identical Random Initialization**: Each variant begins from the identical base seed (default `42`), enforcing identical initial neural network weight states and identical environment procedural generation sequences.
+- **Identical Held-Out Evaluation**: All four trained policies are evaluated on the identical held-out test seed distribution (`eval_seed = base_seed + 1000`) over a fixed evaluation episode count (default 20 episodes).
+- **Identical Environment Geometry**: Flight arena bounds ($30\text{ m} \times 30\text{ m} \times 15\text{ m}$), obstacle count (4), start/goal coordinates, and kinematics remain identical.
+
+### Metric Definitions
+- **Success Rate**: Fraction of evaluation episodes terminating inside the calibrated target radius ($\le 1.5\text{ m}$).
+- **Collision Rate**: Fraction of evaluation episodes terminating due to contact with spherical obstacles or boundary walls.
+- **Timeout Rate**: Fraction of evaluation episodes truncated by reaching the maximum step limit ($max\_steps = 200$) without arrival or collision.
+- **Mean Reward**: Average cumulative return per episode on the standardized held-out benchmark.
+- **Mean Path Efficiency**: Ratio of straight-line distance ($D_0 = \|\mathbf{g} - \mathbf{p}_0\|$) to actual path length ($L = \sum_t \|\mathbf{p}_{t+1} - \mathbf{p}_t\|$), clamped to $[0.0, 1.0]$.
+- **Convergence Speed**: The first training timestep at which the intermediate held-out evaluation success rate strictly exceeds $70\%$ ($> 0.70$). If the $70\%$ threshold is never reached during training, convergence speed is recorded as `null` (`not reached`).
+
+### How to Run the Experiment
+Run the ablation study via the command line:
+
+```bash
+# Standard 25,000-timestep research benchmark across all 4 variants
+adaptive-rl experiment-ablation --timesteps 25000 --episodes 20 --seed 42
+
+# Fast verification run (e.g. for testing)
+adaptive-rl experiment-ablation --timesteps 500 --episodes 5 --seed 42
+```
+
+Outputs are automatically exported to:
+- `artifacts/benchmarks/reward_ablation.json` (detailed per-variant results and configuration metadata)
+- `artifacts/benchmarks/reward_ablation.csv` (tabular benchmark data for analysis)
