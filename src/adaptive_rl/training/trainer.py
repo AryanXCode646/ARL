@@ -7,6 +7,7 @@ import math
 import random
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -147,6 +148,7 @@ class PPOTrainer:
             "final_model_path": str(final_model_path),
             "duration_seconds": round(duration, 2),
             "training_time_seconds": training_time_seconds,
+            "created_at": datetime.fromtimestamp(finished_at, tz=timezone.utc).isoformat(),
             "episode_rewards": [round(float(r), 2) for r in self.metric_logger.episode_rewards],
             "episode_lengths": [int(length) for length in self.metric_logger.episode_lengths],
             "version": adaptive_rl.__version__,
