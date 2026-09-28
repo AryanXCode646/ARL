@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
+import json
 import logging
 import platform
 import subprocess
@@ -15,18 +16,27 @@ from typing import Any, Callable, Optional, Sequence
 
 import gymnasium as gym
 import numpy as np
+import torch
 
 from adaptive_rl.algorithms.adaptation import (
     PPOAdaptationAdapter,
     SACAdaptationAdapter,
     run_adaptation_update,
 )
-from adaptive_rl.benchmarking.adaptation_artifacts import write_adaptation_artifacts
+from adaptive_rl.benchmarking.adaptation_artifacts import (
+    write_adaptation_artifacts,
+    write_adaptive_vs_fixed_artifacts,
+    write_study_manifest,
+)
 from adaptive_rl.benchmarking.adaptation_runtime import EpisodeRecord, evaluate_episode
 from adaptive_rl.benchmarking.adaptation_statistics import analyze_primary_cells
 from adaptive_rl.config import ExperimentConfig, compute_config_sha256
 from adaptive_rl.environments.registry import make_env
-from adaptive_rl.protocol.adaptation import build_update_batch, validate_block_sequence
+from adaptive_rl.protocol.adaptation import (
+    AdaptationAdapter,
+    build_update_batch,
+    validate_block_sequence,
+)
 from adaptive_rl.protocol.constants import K_PRE, N_POST, PRIMARY_CELLS, TRAINING_SEEDS
 from adaptive_rl.protocol.fork import fork_adaptive_and_fixed, model_fingerprint
 from adaptive_rl.protocol.recovery import compute_recovery
@@ -41,6 +51,8 @@ TrainerFactory = Callable[..., Any]
 
 
 def _repository_metadata() -> dict[str, Any]:
+    commit: str | None
+    dirty: bool | None
     try:
         commit = subprocess.check_output(
             ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
@@ -52,7 +64,10 @@ def _repository_metadata() -> dict[str, Any]:
         )
     except (OSError, subprocess.CalledProcessError):
         commit, dirty = None, None
-    versions = {"python": sys.version.split()[0], "platform": platform.platform()}
+    versions: dict[str, str | None] = {
+        "python": sys.version.split()[0],
+        "platform": platform.platform(),
+    }
     for distribution in ("adaptive-rl", "gymnasium", "stable-baselines3", "torch", "numpy"):
         try:
             versions[distribution] = importlib.metadata.version(distribution)
@@ -83,13 +98,14 @@ def _new_env(
     parameters = dict(config.environment.parameters)
     parameters["max_steps"] = int(max_steps or config.environment.max_steps)
     if shifted:
-        if config.adaptation_benchmark is None:
+        benchmark = config.adaptation_benchmark
+        if benchmark is None:
             raise ValueError("configuration does not declare the Issue #265 adaptation cell")
-        parameters.update(config.adaptation_benchmark.shift_parameters)
+        parameters.update(benchmark.shift_parameters)
     return environment_factory(config.environment.name, **parameters)
 
 
-def _adapter_for(algorithm_name: str):
+def _adapter_for(algorithm_name: str) -> AdaptationAdapter:
     if algorithm_name == "ppo":
         return PPOAdaptationAdapter()
     if algorithm_name == "sac":
@@ -113,6 +129,9 @@ def _train_once(
     training_dir.mkdir(parents=True)
 
     effective = config.model_copy(deep=True)
+    training = effective.training
+    if training is None:
+        raise ValueError("Issue #265 requires a training configuration")
     effective.seed = int(training_seed)
     effective.name = f"{config.name}_seed_{training_seed}"
     effective.output_dir = training_dir
@@ -123,7 +142,7 @@ def _train_once(
     algorithm_parameters = dict(algorithm_config.parameters)
     algorithm_parameters["seed"] = int(training_seed)
     if smoke:
-        effective.training.total_timesteps = 32
+        training.total_timesteps = 32
         if algorithm_config.name.lower() == "ppo":
             algorithm_parameters.update({"n_steps": 16, "n_epochs": 1})
             algorithm_config.batch_size = min(8, algorithm_config.batch_size)
@@ -157,7 +176,7 @@ def _train_once(
         trainer.close()
     return algorithm, {
         "training_seed": training_seed,
-        "total_timesteps_requested": effective.training.total_timesteps,
+        "total_timesteps_requested": training.total_timesteps,
         "total_timesteps_completed": int(getattr(algorithm, "num_timesteps", 0)),
         "training_time_seconds": training_seconds,
         "model_path": str(result.final_model_path),
@@ -216,6 +235,77 @@ def _recover(pre: Sequence[EpisodeRecord], post: Sequence[EpisodeRecord]) -> dic
     return output
 
 
+def _return_vector_fingerprint(episodes: Sequence[dict[str, Any]]) -> str:
+    payload = json.dumps([float(item["reward"]) for item in episodes], separators=(",", ":"))
+    return hashlib.sha256(payload.encode("ascii")).hexdigest()
+
+
+def _enable_study_determinism() -> dict[str, Any]:
+    """Enable deterministic Torch behavior where supported and report limits."""
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    return {
+        "torch_deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+        "torch_deterministic_warn_only": True,
+        "cudnn_deterministic": bool(torch.backends.cudnn.deterministic),
+        "cudnn_benchmark": bool(torch.backends.cudnn.benchmark),
+        "limitations": [
+            "warn-only Torch operations may remain nondeterministic",
+            "cross-hardware and cross-library-version bitwise identity is not claimed",
+            "training and update RNGs are reseeded from the recorded protocol seeds",
+        ],
+    }
+
+
+def _audit_replicate_invariants(
+    replicate: dict[str, Any], schedule: dict[int, dict[str, list[int]]]
+) -> dict[str, Any]:
+    """Recompute the execution invariants from one serialized replicate record."""
+    blocks = replicate["update_blocks"]
+    arms = replicate["arm_input_fingerprints"]
+    pre_hash = _return_vector_fingerprint(replicate["shared_pre_shift_episodes"])
+    shock_hash = _return_vector_fingerprint(replicate["shared_shock_episodes"])
+    checks = {
+        "pre_shift_shared_once": len(replicate["shared_pre_shift_episodes"]) == K_PRE,
+        "pre_shift_identical_across_arms": (
+            arms["adaptive"]["pre"] == pre_hash == arms["fixed"]["pre"]
+        ),
+        "shock_shared_once": len(replicate["shared_shock_episodes"]) == 5,
+        "shock_returns_identical_across_arms": (
+            arms["adaptive"]["shock"] == shock_hash == arms["fixed"]["shock"]
+        ),
+        "fixed_zero_updates": replicate["fixed_weight_update_count"] == 0,
+        "fixed_l2_delta_zero": replicate["fixed_parameter_delta_l2"] == 0.0,
+        "fixed_fingerprint_unchanged": (
+            replicate["fixed_final_fingerprint"] == replicate["frozen_fingerprint"]
+            and all(
+                episode["policy_fingerprint_start"] == replicate["frozen_fingerprint"]
+                and episode["policy_fingerprint_end"] == replicate["frozen_fingerprint"]
+                for episode in replicate["fixed_episodes"]
+            )
+        ),
+        "adaptive_exactly_ten_blocks": len(blocks) == 10,
+        "adaptive_block_schedule": [b["block_episode"] for b in blocks] == list(range(5, 15)),
+        "no_future_data": all(
+            list(b["visible_episode_indices"]) == list(range(1, b["block_episode"] + 1))
+            for b in blocks
+        ),
+        "adaptive_update_seeds_match_schedule": [b["update_seed"] for b in blocks]
+        == replicate["seeds"]["update"],
+        "adaptive_blocks_have_loss_metrics": all(b["loss_metrics"] for b in blocks),
+        "adaptive_updates_between_episodes": [
+            episode["update_block"] for episode in replicate["adaptive_episodes"]
+        ]
+        == list(range(5, 15)),
+        "fork_fingerprint_identical": replicate["fork_fingerprint"]
+        == replicate["frozen_fingerprint"],
+        "all_seeds_match_schedule": replicate["seeds"]
+        == {phase: list(values) for phase, values in schedule[replicate["training_seed"]].items()},
+    }
+    return {"all_passed": all(checks.values()), **checks}
+
+
 @dataclass
 class ReplicateResult:
     training_seed: int
@@ -223,6 +313,7 @@ class ReplicateResult:
     schedule_fingerprint: Optional[str] = None
     training_provenance: dict[str, Any] = field(default_factory=dict)
     frozen_fingerprint: Optional[str] = None
+    fork_fingerprint: Optional[str] = None
     fixed_final_fingerprint: Optional[str] = None
     pre_shift_performance: Optional[float] = None
     shock_performance: Optional[float] = None
@@ -234,6 +325,9 @@ class ReplicateResult:
     adaptive_recovery: Optional[dict[str, Any]] = None
     fixed_recovery: Optional[dict[str, Any]] = None
     seeds: dict[str, list[int]] = field(default_factory=dict)
+    arm_input_fingerprints: dict[str, dict[str, str]] = field(default_factory=dict)
+    fixed_weight_update_count: int = 0
+    fixed_parameter_delta_l2: float = 0.0
     effective_nominal_parameters: dict[str, Any] = field(default_factory=dict)
     effective_shift_parameters: dict[str, Any] = field(default_factory=dict)
     failure_reason: Optional[str] = None
@@ -254,6 +348,9 @@ def _run_replicate(
 ) -> ReplicateResult:
     result = ReplicateResult(training_seed=training_seed, status="failed")
     try:
+        benchmark = config.adaptation_benchmark
+        if benchmark is None:
+            raise ValueError("configuration lacks an Issue #265 adaptation cell")
         result.schedule_fingerprint = schedule_fingerprint(schedule)
         algorithm, training_provenance = _train_once(
             config,
@@ -271,7 +368,7 @@ def _run_replicate(
         nominal_params = dict(config.environment.parameters)
         nominal_params["max_steps"] = 8 if smoke else config.environment.max_steps
         shifted_params = dict(nominal_params)
-        shifted_params.update(config.adaptation_benchmark.shift_parameters)
+        shifted_params.update(benchmark.shift_parameters)
         result.effective_nominal_parameters = dict(nominal_params)
         result.effective_shift_parameters = dict(shifted_params)
         result.seeds = {phase: list(values) for phase, values in schedule[training_seed].items()}
@@ -314,7 +411,7 @@ def _run_replicate(
         try:
             get_effective = getattr(shock_env, "get_effective_parameters", None)
             effective = dict(get_effective()) if callable(get_effective) else shifted_params
-            for key, expected in config.adaptation_benchmark.shift_parameters.items():
+            for key, expected in benchmark.shift_parameters.items():
                 if effective.get(key) != expected:
                     raise RuntimeError(
                         f"TEST-B parameter {key!r} did not apply: expected {expected!r}, "
@@ -342,6 +439,7 @@ def _run_replicate(
         )
 
         adaptive, fixed, fork_fingerprint = fork_adaptive_and_fixed(algorithm)
+        result.fork_fingerprint = fork_fingerprint
         if fork_fingerprint != frozen_fingerprint:
             raise RuntimeError("Adaptive/Fixed forks did not originate at the frozen fingerprint")
         adapter = _adapter_for(config.algorithm.name.lower())
@@ -406,6 +504,15 @@ def _run_replicate(
         fixed_post = result.shared_shock_episodes + result.fixed_episodes
         result.adaptive_recovery = _recover(result.shared_pre_shift_episodes, adaptive_post)
         result.fixed_recovery = _recover(result.shared_pre_shift_episodes, fixed_post)
+        pre_hash = _return_vector_fingerprint(
+            [{"reward": episode.reward} for episode in result.shared_pre_shift_episodes]
+        )
+        shock_hash = _return_vector_fingerprint(
+            [{"reward": episode.reward} for episode in result.shared_shock_episodes]
+        )
+        result.arm_input_fingerprints = {
+            arm: {"pre": pre_hash, "shock": shock_hash} for arm in ("adaptive", "fixed")
+        }
         result.status = "completed"
     except Exception as exc:
         result.failure_reason = f"{type(exc).__name__}: {exc}"
@@ -422,6 +529,7 @@ def run_adaptation_benchmark(
     trainer_factory: TrainerFactory = get_trainer,
     environment_factory: EnvironmentFactory = make_env,
     config_path: str | Path | None = None,
+    study_run_id: str | None = None,
 ) -> dict[str, Any]:
     """Run the selected preregistered replicates and write JSON/CSV artifacts.
 
@@ -431,6 +539,7 @@ def run_adaptation_benchmark(
     """
     if config.adaptation_benchmark is None:
         raise ValueError("configuration must include the Issue #265 adaptation_benchmark section")
+    benchmark = config.adaptation_benchmark
     if config.algorithm.name.strip().lower() not in {"ppo", "sac"}:
         raise ValueError("Issue #265 supports only PPO and SAC")
     if config.training is None:
@@ -447,6 +556,26 @@ def run_adaptation_benchmark(
         raise ValueError("all selected training seeds must come from TRAINING_SEEDS")
     if smoke and len(selected_seeds) != 1:
         raise ValueError("smoke mode runs exactly one preregistered training seed")
+    if study_run_id is not None:
+        if not study_run_id or Path(study_run_id).name != study_run_id:
+            raise ValueError("study_run_id must be a non-empty filename-safe component")
+        if smoke or selected_seeds != list(TRAINING_SEEDS):
+            raise ValueError("prereg-v1 requires one non-smoke attempt of all ten seeds in order")
+        if output_dir is not None and Path(output_dir).is_absolute():
+            raise ValueError("prereg-v1 artifact output_dir must be relative to the repository")
+        try:
+            dirty = subprocess.check_output(
+                ["git", "status", "--porcelain"], text=True, stderr=subprocess.DEVNULL
+            ).strip()
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise RuntimeError(
+                "cannot verify clean working tree before prereg-v1 execution"
+            ) from exc
+        if dirty:
+            raise RuntimeError("prereg-v1 execution requires a clean, committed working tree")
+        determinism = _enable_study_determinism()
+    else:
+        determinism = None
 
     card = _card_path()
     if not card.is_file():
@@ -456,8 +585,12 @@ def run_adaptation_benchmark(
     config_file_sha = _sha256_file(config_file) if config_file is not None else None
 
     target_dir = Path(output_dir) if output_dir is not None else Path(config.output_dir)
+    if study_run_id is not None:
+        target_dir = target_dir / study_run_id
     target_dir.mkdir(parents=True, exist_ok=True)
-    for suffix in ("adaptation.json", "adaptation.csv"):
+    stem = "adaptive_vs_fixed" if study_run_id is not None else "adaptation"
+    suffixes = (f"{stem}.json", f"{stem}.csv")
+    for suffix in (*suffixes, "manifest.json"):
         if (target_dir / suffix).exists():
             raise FileExistsError(f"refusing to overwrite existing artifact: {target_dir / suffix}")
     training_root = target_dir / "training"
@@ -489,26 +622,71 @@ def run_adaptation_benchmark(
         if replicate.status != "completed":
             continue
         position = TRAINING_SEEDS.index(replicate.training_seed)
+        assert replicate.fixed_recovery is not None
+        assert replicate.adaptive_recovery is not None
         fixed_vector[position] = float(replicate.fixed_recovery["truncated_recovery_time"])
         adaptive_vector[position] = float(replicate.adaptive_recovery["truncated_recovery_time"])
-    paired = analyze_primary_cells(vectors)
+    analysis_vectors: dict[str, tuple[Sequence[Optional[float]], Sequence[Optional[float]]]] = {
+        cell: (fixed, adaptive) for cell, (fixed, adaptive) in vectors.items()
+    }
+    paired = analyze_primary_cells(analysis_vectors)
     family_decision = decide_family(
         {cell: analysis.primary_p_value for cell, analysis in paired.items()}
     )
 
     provenance = _repository_metadata()
-    artifact = {
+    run_status = "PARTIAL" if any(rep.status != "completed" for rep in results) else "COMPLETE"
+
+    def outcome_count(arm: str, status: str) -> int:
+        count = 0
+        for replicate_result in results:
+            if replicate_result.status != "completed":
+                continue
+            recovery = (
+                replicate_result.adaptive_recovery
+                if arm == "adaptive"
+                else replicate_result.fixed_recovery
+            )
+            if recovery is not None and recovery.get("status") == status:
+                count += 1
+        return count
+
+    outcome_summary = {
+        arm: {
+            **{
+                status: outcome_count(arm, status)
+                for status in (
+                    "recovered",
+                    "right_censored",
+                    "no_degradation",
+                    "degradation_below_resolution",
+                )
+            },
+            "failed_replicates": sum(rep.status != "completed" for rep in results),
+        }
+        for arm in ("adaptive", "fixed")
+    }
+    artifact: dict[str, Any] = {
         "schema_version": "1.0",
-        "protocol_version": config.adaptation_benchmark.protocol_version,
-        "issue": "265",
-        "run_type": "smoke" if smoke else "full_or_selected_research_run",
+        "run_id": study_run_id,
+        "run_status": run_status if study_run_id is not None else None,
+        "protocol_version": benchmark.protocol_version,
+        "issue": "271" if study_run_id is not None else "265",
+        "run_type": (
+            "smoke"
+            if smoke
+            else "prereg-v1"
+            if study_run_id is not None
+            else "full_or_selected_research_run"
+        ),
+        "determinism": determinism,
         "treatment_card_sha256": card_sha,
         "schedule_fingerprint": schedule_fp,
         "experiment": {
             "name": config.name,
             "algorithm": config.algorithm.name.strip().lower(),
             "environment": config.environment.name,
-            "scenario": config.adaptation_benchmark.scenario,
+            "scenario": benchmark.scenario,
             "planned_replicates": len(TRAINING_SEEDS),
             "selected_training_seeds": selected_seeds,
             "config_sha256": compute_config_sha256(config),
@@ -526,6 +704,7 @@ def run_adaptation_benchmark(
             "completed_replicates": sum(rep.status == "completed" for rep in results),
             "valid_pairs": {cell: result.valid_n for cell, result in paired.items()},
         },
+        "outcome_summary": outcome_summary,
         "provenance": {
             **provenance,
             "treatment_card_path": str(card),
@@ -534,8 +713,59 @@ def run_adaptation_benchmark(
         },
         "scientific_claim": "Harness execution alone does not establish empirical superiority.",
     }
-    json_path, csv_path = write_adaptation_artifacts(artifact, target_dir)
-    artifact["artifact_paths"] = {"json": str(json_path), "csv": str(csv_path)}
+    for replicate in artifact["replicates"]:
+        if replicate["status"] != "completed":
+            replicate["invariants"] = {"all_passed": False, "failed_replicate": True}
+            continue
+        replicate["invariants"] = _audit_replicate_invariants(replicate, schedule)
+        if not replicate["invariants"]["all_passed"]:
+            raise RuntimeError(
+                f"runtime invariant failed for seed {replicate['training_seed']}: "
+                f"{replicate['invariants']}"
+            )
+    artifact["run_status"] = (
+        "PARTIAL"
+        if study_run_id is not None
+        and any(rep["status"] != "completed" for rep in artifact["replicates"])
+        else run_status
+    )
+    if study_run_id is not None:
+        artifact["artifact_paths"] = {
+            "json": f"{stem}.json",
+            "csv": f"{stem}.csv",
+            "manifest": "manifest.json",
+        }
+    if study_run_id is not None:
+        json_path, csv_path = write_adaptive_vs_fixed_artifacts(artifact, target_dir)
+    else:
+        json_path, csv_path = write_adaptation_artifacts(artifact, target_dir, stem=stem)
+    artifact["artifact_paths"] = {
+        "json": str(json_path),
+        "csv": str(csv_path),
+        **({"manifest": str(target_dir / "manifest.json")} if study_run_id else {}),
+    }
+    if study_run_id is not None:
+        config_arg = (
+            Path(config_path).as_posix()
+            if config_path is not None
+            else "configs/drone_distribution_shift.yaml"
+        )
+        if Path(config_arg).is_absolute():
+            raise ValueError("prereg-v1 config path must be repository-relative")
+        output_arg = f"--output-dir {Path(output_dir)} " if output_dir is not None else ""
+        command = (
+            "adaptive-rl benchmark adaptation "
+            f"--config {config_arg} {output_arg}"
+            f"--study prereg-v1 --run-id {study_run_id}"
+        )
+        manifest = write_study_manifest(
+            json_path,
+            csv_path,
+            target_dir / "manifest.json",
+            run_id=study_run_id,
+            command=command,
+        )
+        artifact["manifest"] = manifest
     return artifact
 
 

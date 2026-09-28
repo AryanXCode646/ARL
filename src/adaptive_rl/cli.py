@@ -400,6 +400,12 @@ def benchmark_adaptation(
     output_dir: Optional[Path] = typer.Option(
         None, "--output-dir", help="Directory for Issue #265 JSON/CSV and training artifacts"
     ),
+    study: Optional[str] = typer.Option(
+        None, "--study", help="Run the immutable full protocol study (currently prereg-v1)"
+    ),
+    run_id: Optional[str] = typer.Option(
+        None, "--run-id", help="Unique immutable output directory name required with --study"
+    ),
     deterministic: Optional[bool] = typer.Option(
         None, "--deterministic/--stochastic", help="Override action selection for all evaluations"
     ),
@@ -455,12 +461,18 @@ def benchmark_adaptation(
 
         from adaptive_rl.benchmarking.adaptation_runner import run_adaptation_benchmark
 
+        if study not in {None, "prereg-v1"}:
+            raise ValueError("--study currently supports only prereg-v1")
+        if (study is None) != (run_id is None):
+            raise ValueError("--study and --run-id must be supplied together")
+
         artifact = run_adaptation_benchmark(
             exp_config,
             output_dir=output_dir,
             training_seeds=selected_seeds,
             smoke=smoke,
             config_path=config,
+            study_run_id=run_id if study is not None else None,
         )
     except Exception as err:
         console.print(f"[bold red]Issue #265 benchmark failed:[/bold red] {err}")
@@ -475,8 +487,8 @@ def benchmark_adaptation(
             f"• [bold]Algorithm:[/bold] {artifact['experiment']['algorithm']}\n"
             f"• [bold]Completed replicates:[/bold] {completed}\n"
             f"• [bold]Failed replicates:[/bold] {len(failed)}\n"
-            f"• [bold]JSON:[/bold] {Path(output_dir or exp_config.output_dir) / 'adaptation.json'}\n"
-            f"• [bold]CSV:[/bold] {Path(output_dir or exp_config.output_dir) / 'adaptation.csv'}\n"
+            f"• [bold]JSON:[/bold] {Path(output_dir or exp_config.output_dir) / ('adaptive_vs_fixed.json' if study else 'adaptation.json')}\n"
+            f"• [bold]CSV:[/bold] {Path(output_dir or exp_config.output_dir) / ('adaptive_vs_fixed.csv' if study else 'adaptation.csv')}\n"
             f"• [bold]Scientific result:[/bold] not established by harness execution",
             title="Online Adaptation Benchmark",
             border_style="yellow" if smoke or failed else "green",

@@ -64,6 +64,9 @@ def _logger_ready(model: Any) -> Iterator[None]:
 class PPOAdaptationAdapter:
     """Use Stable-Baselines3 PPO's native clipped objective on stored rollouts."""
 
+    def __init__(self) -> None:
+        self.last_loss_metrics: dict[str, float] = {}
+
     def update(self, algorithm: Any, batch: UpdateBatch) -> None:
         model = _model(algorithm)
         if not hasattr(model, "rollout_buffer") or not hasattr(model, "n_epochs"):
@@ -103,6 +106,7 @@ class PPOAdaptationAdapter:
             action = np.asarray(transition.action)
             reward = float(transition.reward)
             if transition.truncated and not transition.terminated:
+                assert transition.behavior_next_value is not None
                 reward += model.gamma * float(transition.behavior_next_value)
             observations.append(observation)
             model.rollout_buffer.add(
@@ -129,6 +133,7 @@ class PPOAdaptationAdapter:
         )
         with _logger_ready(model), _seeded_update(batch.seed):
             model.train()
+            self.last_loss_metrics = _loss_metrics(model)
         model.policy.set_training_mode(False)
 
 
@@ -139,6 +144,9 @@ def _previous_done(transitions: tuple[Any, ...], previous_index: int) -> bool:
 
 class SACAdaptationAdapter:
     """Train SAC from a fresh replay buffer containing only the visible batch."""
+
+    def __init__(self) -> None:
+        self.last_loss_metrics: dict[str, float] = {}
 
     def update(self, algorithm: Any, batch: UpdateBatch) -> None:
         model = _model(algorithm)
@@ -190,6 +198,7 @@ class SACAdaptationAdapter:
                 model.train(
                     gradient_steps=int(model.gradient_steps), batch_size=int(model.batch_size)
                 )
+                self.last_loss_metrics = _loss_metrics(model)
         finally:
             model.replay_buffer = prior_buffer
             model.policy.set_training_mode(False)
@@ -205,9 +214,25 @@ class AdaptationUpdateLog:
     fingerprint_after: str
     parameter_delta_l2: float
     status: str
+    loss_metrics: dict[str, float]
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def _loss_metrics(model: Any) -> dict[str, float]:
+    logger = getattr(model, "logger", None)
+    recorded = getattr(logger, "name_to_value", {}) if logger is not None else {}
+    metrics = {
+        str(name): float(value)
+        for name, value in recorded.items()
+        if "loss" in str(name).lower()
+        and isinstance(value, (int, float, np.number))
+        and np.isfinite(value)
+    }
+    if not metrics:
+        raise RuntimeError("adaptation update produced no finite loss metrics")
+    return metrics
 
 
 def _parameters(model_or_wrapper: Any) -> dict[str, torch.Tensor]:
@@ -308,6 +333,7 @@ def run_adaptation_update(
         fingerprint_after=after_fingerprint,
         parameter_delta_l2=delta,
         status="updated" if delta > 0.0 else "no_parameter_change",
+        loss_metrics=dict(getattr(adapter, "last_loss_metrics", {})),
     )
 
 

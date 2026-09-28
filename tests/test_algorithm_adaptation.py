@@ -99,6 +99,7 @@ def test_ppo_native_update_uses_recorded_rollout_without_environment_steps() -> 
         assert model is not None
         before = model_fingerprint(algorithm)
         log = run_adaptation_update(algorithm, PPOAdaptationAdapter(), batch)
+        assert log.loss_metrics
         assert log.block_episode == 5
         assert log.transition_count == 15
         assert log.visible_episode_indices == (1, 2, 3, 4, 5)
@@ -129,6 +130,7 @@ def test_sac_native_update_uses_fresh_post_only_replay_buffer() -> None:
         original_buffer = model.replay_buffer
         before = model_fingerprint(algorithm)
         log = run_adaptation_update(algorithm, SACAdaptationAdapter(), batch)
+        assert log.loss_metrics
         assert log.block_episode == 5
         assert log.transition_count == 15
         assert log.visible_episode_indices == (1, 2, 3, 4, 5)

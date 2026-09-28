@@ -28,6 +28,9 @@ class PairedRecoveryAnalysis:
     differences: list[Optional[float]]
     mean_difference: Optional[float]
     standard_deviation: Optional[float]
+    standard_error: Optional[float]
+    t_statistic: Optional[float]
+    degrees_of_freedom: Optional[int]
     primary_p_value: Optional[float]
     holm_adjusted_p_value: Optional[float]
     interval_95: Optional[list[float]]
@@ -78,6 +81,9 @@ def analyze_paired_recovery(
             differences=differences,
             mean_difference=None,
             standard_deviation=None,
+            standard_error=None,
+            t_statistic=None,
+            degrees_of_freedom=None,
             primary_p_value=None,
             holm_adjusted_p_value=None,
             interval_95=None,
@@ -98,6 +104,9 @@ def analyze_paired_recovery(
         differences=differences,
         mean_difference=primary.mean,
         standard_deviation=primary.std_dev,
+        standard_error=primary.standard_error,
+        t_statistic=primary.t_statistic,
+        degrees_of_freedom=primary.degrees_of_freedom,
         primary_p_value=primary.p_value,
         holm_adjusted_p_value=None,
         interval_95=list(paired_t_interval(paired, min_valid_n=min_valid_n)),
@@ -122,12 +131,11 @@ def analyze_primary_cells(
     if set(outcomes) != set(PRIMARY_CELLS):
         raise ValueError("outcomes must contain exactly the preregistered PRIMARY_CELLS")
     results = {cell: analyze_paired_recovery(*outcomes[cell]) for cell in PRIMARY_CELLS}
-    adjusted = holm_adjust(
-        [
-            results[cell].primary_p_value if results[cell].primary_p_value is not None else 1.0
-            for cell in PRIMARY_CELLS
-        ]
-    )
+    p_values: list[float] = []
+    for cell in PRIMARY_CELLS:
+        p_value = results[cell].primary_p_value
+        p_values.append(p_value if p_value is not None else 1.0)
+    adjusted = holm_adjust(p_values)
     return {
         cell: replace(results[cell], holm_adjusted_p_value=adjusted[index])
         if results[cell].primary_p_value is not None

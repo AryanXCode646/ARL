@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import csv
 import dataclasses
+import hashlib
+import importlib.metadata
 import json
 import os
+import platform
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -35,6 +39,23 @@ CSV_FIELDS = (
     "parameter_delta_l2",
 )
 
+STUDY_CSV_FIELDS = (
+    "training_seed",
+    "arm",
+    "replicate_status",
+    "recovery_status",
+    "T_H",
+    "pre_returns",
+    "shock_returns",
+    "post_returns",
+    "pre_seeds",
+    "shock_seeds",
+    "post_seeds",
+    "update_seeds",
+    "failure_reason",
+    "json_trajectory_reference",
+)
+
 
 def _plain(value: Any) -> Any:
     """Convert supported scientific data values into strict JSON primitives."""
@@ -52,6 +73,12 @@ def _plain(value: Any) -> Any:
         return {str(key): _plain(nested) for key, nested in value.items()}
     if isinstance(value, (list, tuple)):
         return [_plain(nested) for nested in value]
+    if isinstance(value, str) and value.startswith("/"):
+        candidate = Path(value)
+        try:
+            return candidate.resolve().relative_to(Path.cwd().resolve()).as_posix()
+        except (OSError, ValueError):
+            return candidate.name
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     raise TypeError(f"unsupported artifact value type: {type(value).__name__}")
@@ -73,7 +100,7 @@ def _episode_rows(artifact: Mapping[str, Any]) -> Iterable[dict[str, Any]]:
         )
         for key, phase, arm in segments:
             for episode in replicate.get(key, []):
-                row = {field: None for field in CSV_FIELDS}
+                row: dict[str, Any] = {field: None for field in CSV_FIELDS}
                 row.update(common)
                 row.update(
                     arm=arm,
@@ -144,10 +171,221 @@ def write_adaptation_artifacts(
     return json_path, csv_path
 
 
+def write_adaptive_vs_fixed_artifacts(
+    artifact: Mapping[str, Any], output_dir: str | Path
+) -> tuple[Path, Path]:
+    """Write study JSON plus the preregistered one-row-per-arm CSV."""
+    target_dir = Path(output_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    json_path = target_dir / "adaptive_vs_fixed.json"
+    csv_path = target_dir / "adaptive_vs_fixed.csv"
+    plain = _plain(artifact)
+    temp_paths: list[Path] = []
+    try:
+        for suffix, writer in (
+            (".json", lambda handle: json.dump(plain, handle, indent=2, allow_nan=False)),
+            (".csv", lambda handle: _write_study_csv(handle, plain)),
+        ):
+            fd, temp_name = tempfile.mkstemp(
+                prefix=".adaptive-vs-fixed-", suffix=suffix, dir=target_dir
+            )
+            temp_path = Path(temp_name)
+            temp_paths.append(temp_path)
+            with os.fdopen(fd, "w", newline="", encoding="utf-8") as handle:
+                writer(handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+        os.link(temp_paths[0], json_path)
+        try:
+            os.link(temp_paths[1], csv_path)
+        except BaseException:
+            json_path.unlink()
+            raise
+    finally:
+        for temp_path in temp_paths:
+            temp_path.unlink(missing_ok=True)
+    return json_path, csv_path
+
+
+def _study_rows(artifact: Mapping[str, Any]) -> Iterable[dict[str, Any]]:
+    for replicate in artifact.get("replicates", []):
+        for arm in ("adaptive", "fixed"):
+            failed = replicate.get("status") != "completed"
+            recovery = replicate.get(f"{arm}_recovery") or {}
+            post = replicate.get("shared_shock_episodes", []) + replicate.get(f"{arm}_episodes", [])
+            seed_map = replicate.get("seeds", {})
+            values = {
+                "training_seed": replicate.get("training_seed"),
+                "arm": arm,
+                "replicate_status": replicate.get("status"),
+                "recovery_status": None if failed else recovery.get("status"),
+                "T_H": None if failed else recovery.get("T_H"),
+                "pre_returns": _json_cell(
+                    [item.get("reward") for item in replicate.get("shared_pre_shift_episodes", [])]
+                ),
+                "shock_returns": _json_cell(
+                    [item.get("reward") for item in replicate.get("shared_shock_episodes", [])]
+                ),
+                "post_returns": _json_cell([item.get("reward") for item in post]),
+                "pre_seeds": _json_cell(seed_map.get("pre", [])),
+                "shock_seeds": _json_cell(seed_map.get("post", [])[:5]),
+                "post_seeds": _json_cell(seed_map.get("post", [])),
+                "update_seeds": _json_cell(seed_map.get("update", [])),
+                "failure_reason": replicate.get("failure_reason"),
+                "json_trajectory_reference": (
+                    f"replicates[training_seed={replicate.get('training_seed')}].{arm}_episodes"
+                ),
+            }
+            yield values
+
+
+def _json_cell(value: Any) -> str:
+    return json.dumps(_plain(value), separators=(",", ":"), allow_nan=False)
+
+
+def _write_study_csv(handle: Any, artifact: Mapping[str, Any]) -> None:
+    writer = csv.DictWriter(handle, fieldnames=STUDY_CSV_FIELDS, extrasaction="raise")
+    writer.writeheader()
+    writer.writerows(_study_rows(artifact))
+
+
+def sha256_file(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def write_study_manifest(
+    artifact_path: str | Path,
+    csv_path: str | Path,
+    manifest_path: str | Path,
+    *,
+    run_id: str,
+    command: str,
+) -> dict[str, Any]:
+    """Write an immutable provenance manifest for a completed study attempt."""
+    artifact_path = Path(artifact_path)
+    csv_path = Path(csv_path)
+    manifest_path = Path(manifest_path)
+    if manifest_path.exists():
+        raise FileExistsError(f"refusing to overwrite manifest: {manifest_path}")
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+        dirty = bool(
+            subprocess.check_output(
+                ["git", "status", "--porcelain"], text=True, stderr=subprocess.DEVNULL
+            ).strip()
+        )
+        diff_hash = None
+        if dirty:
+            diff = subprocess.check_output(["git", "diff", "HEAD", "--binary"])
+            diff_hash = hashlib.sha256(diff).hexdigest()
+    except (OSError, subprocess.CalledProcessError):
+        commit, dirty, diff_hash = None, None, None
+    manifest = {
+        "schema_version": "1.0",
+        "study": "adaptive-vs-fixed/prereg-v1",
+        "run_id": run_id,
+        "commit_sha": commit,
+        "working_tree_dirty": dirty,
+        "dirty_diff_sha256": diff_hash,
+        "execution_command": command,
+        "hardware": {
+            "python": platform.python_version(),
+            "platform": platform.platform(),
+            "machine": platform.machine(),
+            "processor": platform.processor() or None,
+            "cpu_count": os.cpu_count(),
+        },
+        "package_versions": {
+            name: _distribution_version(name)
+            for name in ("adaptive-rl", "gymnasium", "stable-baselines3", "torch", "numpy")
+        },
+        "determinism": {
+            "pythonhashseed_env_recorded": False,
+            "torch_deterministic_algorithms": _torch_deterministic_algorithms(),
+            "torch_cudnn_deterministic": _torch_cudnn_deterministic(),
+            "protocol_seed_schedule": "SHA-256 derived seeds; see adaptive_vs_fixed.json",
+        },
+        "artifacts": {
+            str(path.relative_to(manifest_path.parent).as_posix()): sha256_file(path)
+            for path in sorted(manifest_path.parent.rglob("*"))
+            if path.is_file() and path != manifest_path
+        },
+    }
+    plain = _plain(manifest)
+    encoded = json.dumps(plain, indent=2, allow_nan=False) + "\n"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=".manifest-", dir=manifest_path.parent)
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(temp_path, manifest_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    return dict(plain)
+
+
+def validate_study_manifest(manifest_path: str | Path) -> None:
+    """Raise when a listed immutable run artifact is missing or has changed."""
+    manifest_path = Path(manifest_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, dict) or not artifacts:
+        raise ValueError("manifest must list at least one artifact checksum")
+    for relative_path, expected in artifacts.items():
+        path = manifest_path.parent / relative_path
+        if not path.is_file():
+            raise ValueError(f"manifest artifact is missing: {relative_path}")
+        actual = sha256_file(path)
+        if actual != expected:
+            raise ValueError(f"manifest checksum mismatch: {relative_path}")
+
+
+def _distribution_version(name: str) -> str | None:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _torch_deterministic_algorithms() -> bool | None:
+    try:
+        import torch
+
+        return bool(torch.are_deterministic_algorithms_enabled())
+    except ImportError:
+        return None
+
+
+def _torch_cudnn_deterministic() -> bool | None:
+    try:
+        import torch
+
+        return bool(torch.backends.cudnn.deterministic)
+    except ImportError:
+        return None
+
+
 def _write_csv(handle: Any, artifact: Mapping[str, Any]) -> None:
     writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS, extrasaction="raise")
     writer.writeheader()
     writer.writerows(_episode_rows(artifact))
 
 
-__all__ = ["CSV_FIELDS", "write_adaptation_artifacts"]
+__all__ = [
+    "CSV_FIELDS",
+    "STUDY_CSV_FIELDS",
+    "sha256_file",
+    "validate_study_manifest",
+    "write_adaptation_artifacts",
+    "write_adaptive_vs_fixed_artifacts",
+    "write_study_manifest",
+]

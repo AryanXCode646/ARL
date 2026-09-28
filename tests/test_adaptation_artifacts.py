@@ -8,7 +8,13 @@ import json
 import numpy as np
 import pytest
 
-from adaptive_rl.benchmarking.adaptation_artifacts import write_adaptation_artifacts
+from adaptive_rl.benchmarking.adaptation_artifacts import (
+    sha256_file,
+    validate_study_manifest,
+    write_adaptation_artifacts,
+    write_adaptive_vs_fixed_artifacts,
+    write_study_manifest,
+)
 
 
 def _artifact():
@@ -70,3 +76,66 @@ def test_nonfinite_values_are_rejected_for_strict_json(tmp_path) -> None:
     data["value"] = float("nan")
     with pytest.raises(ValueError, match="JSON compliant"):
         write_adaptation_artifacts(data, tmp_path)
+
+
+def test_manifest_hashes_all_artifacts_and_detects_tampering(tmp_path) -> None:
+    json_path, csv_path = write_adaptation_artifacts(
+        _artifact(), tmp_path, stem="adaptive_vs_fixed"
+    )
+    training_artifact = tmp_path / "training" / "seed_31001" / "weights.zip"
+    training_artifact.parent.mkdir(parents=True)
+    training_artifact.write_bytes(b"real-artifact-bytes")
+    manifest_path = tmp_path / "manifest.json"
+    manifest = write_study_manifest(
+        json_path,
+        csv_path,
+        manifest_path,
+        run_id="test-run",
+        command="adaptive-rl benchmark adaptation --study prereg-v1 --run-id test-run",
+    )
+    assert manifest["artifacts"][json_path.name] == sha256_file(json_path)
+    assert manifest["artifacts"][csv_path.name] == sha256_file(csv_path)
+    assert manifest["artifacts"]["training/seed_31001/weights.zip"] == sha256_file(
+        training_artifact
+    )
+    validate_study_manifest(manifest_path)
+    with pytest.raises(FileExistsError):
+        write_study_manifest(
+            json_path,
+            csv_path,
+            manifest_path,
+            run_id="test-run",
+            command="adaptive-rl benchmark adaptation --study prereg-v1 --run-id test-run",
+        )
+    training_artifact.write_bytes(b"tampered")
+    assert manifest["artifacts"]["training/seed_31001/weights.zip"] != sha256_file(
+        training_artifact
+    )
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        validate_study_manifest(manifest_path)
+
+
+def test_study_csv_has_one_row_per_arm_and_preserves_finite_censoring(tmp_path) -> None:
+    data = {
+        "replicates": [
+            {
+                "training_seed": 31001,
+                "status": "completed",
+                "shared_pre_shift_episodes": [{"reward": 10.0}],
+                "shared_shock_episodes": [{"reward": 2.0}],
+                "adaptive_episodes": [{"reward": 3.0}],
+                "fixed_episodes": [{"reward": 2.5}],
+                "adaptive_recovery": {"status": "right_censored", "T_H": 15},
+                "fixed_recovery": {"status": "right_censored", "T_H": 15},
+                "seeds": {"pre": [11], "post": [12, 13], "update": [14]},
+            }
+        ]
+    }
+    _, csv_path = write_adaptive_vs_fixed_artifacts(data, tmp_path)
+    with csv_path.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 2
+    assert {row["arm"] for row in rows} == {"adaptive", "fixed"}
+    assert [row["T_H"] for row in rows] == ["15", "15"]
+    assert [row["recovery_status"] for row in rows] == ["right_censored"] * 2
+    assert json.loads(rows[0]["post_returns"]) == [2.0, 3.0]

@@ -44,7 +44,9 @@ def _seed_episode(seed: int) -> Iterator[None]:
             torch.cuda.set_rng_state_all(cuda_states)
 
 
-def _action_and_behavior(algorithm: Any, observation: Any, deterministic: bool):
+def _action_and_behavior(
+    algorithm: Any, observation: Any, deterministic: bool
+) -> tuple[np.ndarray, np.ndarray, float | None, float | None]:
     model = getattr(algorithm, "model", None)
     policy = getattr(model, "policy", None) if model is not None else None
     if policy is None:
@@ -52,6 +54,7 @@ def _action_and_behavior(algorithm: Any, observation: Any, deterministic: bool):
         environment_action = np.asarray(environment_action)
         return environment_action, environment_action, None, None
     if hasattr(model, "rollout_buffer"):
+        assert model is not None
         obs_tensor, _ = policy.obs_to_tensor(observation)
         with torch.no_grad():
             native_action, value, log_prob = policy(obs_tensor, deterministic=deterministic)
