@@ -194,6 +194,12 @@ class EvaluationMetrics(BaseModel):
     truncation_rate: Optional[float] = Field(
         None, ge=0.0, le=1.0, description="Fraction of episodes reaching max step limit"
     )
+    timeout_rate: Optional[float] = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="Fraction of episodes ending in timeout (None if unavailable)",
+    )
     recovery_time: Optional[float] = Field(
         None,
         ge=0.0,
@@ -317,6 +323,9 @@ class StandardizedExperimentMetrics(BaseModel):
     truncation_rate: Optional[float] = Field(
         None, ge=0.0, le=1.0, description="Fraction of episodes truncated by max step limit"
     )
+    timeout_rate: Optional[float] = Field(
+        None, ge=0.0, le=1.0, description="Fraction of episodes ending in timeout"
+    )
     episode_length: Optional[float] = Field(None, ge=0.0, description="Mean step count per episode")
     path_length: Optional[float] = Field(
         None,
@@ -426,6 +435,16 @@ class StandardizedExperimentMetrics(BaseModel):
         cum_del = _first_not_none(extra.get("cumulative_delay"), extra.get("mean_cumulative_delay"))
         overflow_r = _first_not_none(eval_metrics.overflow_rate, extra.get("overflow_rate"))
         truncation_r = _first_not_none(eval_metrics.truncation_rate, extra.get("truncation_rate"))
+        timeout_r = _first_not_none(
+            eval_metrics.timeout_rate,
+            extra.get("timeout_rate"),
+            truncation_r,
+        )
+        path_eff = _first_not_none(
+            eval_metrics.mean_path_efficiency,
+            extra.get("mean_path_efficiency"),
+            extra.get("path_efficiency"),
+        )
 
         handled_keys = {
             "mean_path_length",
@@ -466,6 +485,7 @@ class StandardizedExperimentMetrics(BaseModel):
             "mean_cumulative_delay",
             "overflow_rate",
             "truncation_rate",
+            "timeout_rate",
         }
 
         path_len = _first_not_none(
@@ -522,6 +542,7 @@ class StandardizedExperimentMetrics(BaseModel):
             collision_rate=eval_metrics.collision_rate,
             overflow_rate=overflow_r,
             truncation_rate=truncation_r,
+            timeout_rate=timeout_r,
             episode_length=eval_metrics.mean_episode_length,
             path_length=path_len,
             path_efficiency=path_eff,

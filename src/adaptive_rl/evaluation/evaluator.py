@@ -39,6 +39,7 @@ class EpisodeEvaluationRecord:
     min_obstacle_clearance: Optional[float] = None
     max_velocity: Optional[float] = None
     max_acceleration: Optional[float] = None
+    timeout: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {
@@ -48,6 +49,7 @@ class EpisodeEvaluationRecord:
             "episode_length": self.episode_length,
             "success": self.success,
             "collision": self.collision,
+            "timeout": self.timeout,
         }
         if self.collision_type is not None:
             data["collision_type"] = self.collision_type
@@ -104,6 +106,7 @@ class Evaluator:
         collisions: List[bool] = []
         obstacle_collisions: List[bool] = []
         boundary_collisions: List[bool] = []
+        timeouts: List[bool] = []
 
         path_lengths: List[float] = []
         straight_line_dists: List[float] = []
@@ -174,6 +177,11 @@ class Evaluator:
 
             is_obs_coll = is_collision and (collision_type == "obstacle")
             is_bound_coll = is_collision and collision_type.startswith("boundary")
+            is_timeout = bool(truncated) or (
+                not is_success
+                and not is_collision
+                and ep_length >= getattr(self.env, "max_steps", 200)
+            )
 
             rewards.append(ep_reward)
             lengths.append(ep_length)
@@ -181,6 +189,7 @@ class Evaluator:
             collisions.append(is_collision)
             obstacle_collisions.append(is_obs_coll)
             boundary_collisions.append(is_bound_coll)
+            timeouts.append(is_timeout)
 
             traj_metrics = compute_trajectory_metrics(
                 positions=positions,
@@ -225,6 +234,7 @@ class Evaluator:
                     min_obstacle_clearance=ep_min_clear,
                     max_velocity=ep_max_vel,
                     max_acceleration=ep_max_acc,
+                    timeout=is_timeout,
                 )
             )
 
@@ -237,6 +247,8 @@ class Evaluator:
 
         succ_rate = float(sum(successes) / num_episodes)
         coll_rate = float(sum(collisions) / num_episodes)
+        time_rate = float(sum(timeouts) / num_episodes)
+        mean_path_eff = float(np.mean(path_efficiencies)) if path_efficiencies else None
 
         obs_coll_count = int(sum(obstacle_collisions))
         bound_coll_count = int(sum(boundary_collisions))
@@ -259,6 +271,8 @@ class Evaluator:
             max_reward=max_rew,
             success_rate=succ_rate,
             collision_rate=coll_rate,
+            truncation_rate=time_rate,
+            timeout_rate=time_rate,
             mean_episode_length=mean_len,
             std_episode_length=std_len,
             mean_path_length=mean_path_len,
@@ -294,6 +308,8 @@ class Evaluator:
                 "boundary_collision_count": bound_coll_count,
                 "obstacle_collision_rate": obs_coll_rate,
                 "boundary_collision_rate": bound_coll_rate,
+                "timeout_rate": time_rate,
+                "truncation_rate": time_rate,
             },
         )
 
@@ -317,6 +333,12 @@ class Evaluator:
             else None,
             "collision_rate": round(metrics.collision_rate, 4)
             if metrics.collision_rate is not None
+            else None,
+            "truncation_rate": round(metrics.truncation_rate, 4)
+            if metrics.truncation_rate is not None
+            else None,
+            "timeout_rate": round(metrics.timeout_rate, 4)
+            if metrics.timeout_rate is not None
             else None,
             "mean_episode_length": round(metrics.mean_episode_length, 2),
             "std_episode_length": round(metrics.std_episode_length, 2),
@@ -528,6 +550,13 @@ def run_obstacle_density_experiment(
     return results
 
 
+def run_reward_ablation_experiment(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+    """Convenience forwarder for reward-function ablation experiment."""
+    from adaptive_rl.benchmarking.ablation import run_reward_ablation_experiment as _run
+
+    return _run(*args, **kwargs)
+
+
 __all__ = [
     "EpisodeEvaluationRecord",
     "Evaluator",
@@ -535,4 +564,5 @@ __all__ = [
     "evaluate_ppo_policy",
     "evaluate_random_policy",
     "run_obstacle_density_experiment",
+    "run_reward_ablation_experiment",
 ]

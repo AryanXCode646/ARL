@@ -20,6 +20,7 @@ def test_cli_help() -> None:
     assert "demo-drone" in result.output
     assert "gui" in result.output
     assert "experiment-density" in result.output
+    assert "experiment-ablation" in result.output
     assert "config" in result.output
     assert "env" in result.output
 
@@ -42,6 +43,18 @@ def test_cli_experiment_density_help() -> None:
     assert "--model" in clean_output
     assert "--episodes" in clean_output
     assert "--seed" in clean_output
+
+
+def test_cli_experiment_ablation_help() -> None:
+    """Verify adaptive-rl experiment-ablation --help displays options."""
+    result = runner.invoke(app, ["experiment-ablation", "--help"])
+    assert result.exit_code == 0
+    clean_output = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", result.output)
+    assert "--timesteps" in clean_output
+    assert "--episodes" in clean_output
+    assert "--seed" in clean_output
+    assert "--output-report" in clean_output
+    assert "--output-csv" in clean_output
 
 
 def test_cli_version() -> None:
@@ -185,3 +198,31 @@ log_dir: "{tmp_path / "logs"}"
     )
     assert demo_res.exit_code == 0
     assert ("SUCCESS" in demo_res.output) or ("FAILED" in demo_res.output)
+
+
+def test_cli_experiment_ablation_smoke(tmp_path: Path) -> None:
+    """Verify adaptive-rl experiment-ablation executes end-to-end and outputs results."""
+    json_rep = tmp_path / "ablation.json"
+    csv_rep = tmp_path / "ablation.csv"
+    res = runner.invoke(
+        app,
+        [
+            "experiment-ablation",
+            "--timesteps",
+            "64",
+            "--episodes",
+            "1",
+            "--seed",
+            "42",
+            "--eval-freq",
+            "32",
+            "--output-report",
+            str(json_rep),
+            "--output-csv",
+            str(csv_rep),
+        ],
+    )
+    assert res.exit_code == 0
+    assert "Reward-Function Ablation Benchmark Results" in res.output
+    assert json_rep.exists()
+    assert csv_rep.exists()
