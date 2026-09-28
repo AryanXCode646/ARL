@@ -42,7 +42,7 @@ git clone https://github.com/StellarResearch/ARL.git
 cd ARL
 python3.12 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[rl,dev]"
+pip install -e ".[rl,dev,gui]"
 ```
 
 Verify the installation:
@@ -52,6 +52,22 @@ pytest
 adaptive-rl --help
 adaptive-rl env inspect drone
 ```
+
+## Interactive 3D Web Flight Deck (College Demo)
+
+Launch the interactive Streamlit + Plotly 3D presentation deck with one command:
+
+```bash
+streamlit run app.py
+# or via CLI
+adaptive-rl gui
+```
+
+The browser UI provides 4 dedicated panels:
+1. **Live Flight Demo**: Real-time 3D arena visualizing the drone, obstacles, goal, full 3D trajectory, velocity vectors, step-by-step playback scrubber, and 16-ray spherical LiDAR beams computed from actual simulation state.
+2. **PPO Training**: Interactive hyperparameter controls (timesteps, learning rate, seed) executing real CPU-friendly training runs with progress tracking and model checkpointing.
+3. **Benchmark Evaluation**: Multi-episode deterministic testing against saved checkpoints, return distribution bar charts, and exportable JSON reports (`artifacts/evaluation.json`).
+4. **Architecture & Mathematics**: Complete system breakdown, continuous 3-DOF kinematic state equations, 22-dimensional observation space specification, and honest educational limitations.
 
 ## Train
 

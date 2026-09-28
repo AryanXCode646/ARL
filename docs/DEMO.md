@@ -76,3 +76,32 @@ Expected output:
   - Cumulative Reward
 - Final banner indicating outcome:
   - `SUCCESS: Reached target coordinate!` or `FAILED: Collided with obstacle!`
+
+---
+
+## 5. Browser 3D Flight Deck GUI (Presentation Mode)
+
+For college project evaluation, presentations, or live committee review, launch the browser GUI:
+
+```bash
+streamlit run app.py
+# or
+adaptive-rl gui
+```
+
+### Presentation Walkthrough:
+1. **Live Flight Demo**:
+   - Select model checkpoint `drone_ppo_demo_final.zip`.
+   - Set test seed `42` and max steps `100`.
+   - Click **Run Flight Simulation**.
+   - Use the **Step Scrubber** to inspect the drone navigating around obstacle spheres towards the green target diamond.
+   - Toggle **LiDAR sensor beams** to show real-time 16-ray geometric distance ray-casts.
+2. **Training Panel**:
+   - Show how PPO hyperparameters (learning rate, timesteps, seed) can be tuned.
+   - Run a short demo training loop directly inside the browser.
+3. **Evaluation Panel**:
+   - Run 10-20 deterministic evaluation episodes.
+   - Inspect the interactive return distribution chart and metrics summary.
+4. **Architecture Panel**:
+   - Walk evaluators through the 3D kinematic equations, 22-dimensional observation vector, and reward formulation.
+
