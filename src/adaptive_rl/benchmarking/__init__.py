@@ -17,13 +17,13 @@ from adaptive_rl.benchmarking.learning_curve import (
     run_learning_curve_benchmark,
     validate_budgets,
 )
-from adaptive_rl.benchmarking.comparison import (
-    export_comparison_csv,
-    export_comparison_json,
-    get_default_algorithm_config,
-    run_algorithm_comparison,
-)
 
+_COMPARISON_EXPORTS = {
+    "export_comparison_csv",
+    "export_comparison_json",
+    "get_default_algorithm_config",
+    "run_algorithm_comparison",
+}
 _ABLATION_EXPORTS = {
     "REWARD_ABLATION_VARIANTS",
     "ConvergenceEvaluationCallback",
@@ -36,6 +36,8 @@ _ABLATION_EXPORTS = {
 
 
 def __getattr__(name: str) -> Any:
+    if name in _COMPARISON_EXPORTS:
+        return getattr(import_module(".comparison", __name__), name)
     if name in _ABLATION_EXPORTS:
         return getattr(import_module(".ablation", __name__), name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

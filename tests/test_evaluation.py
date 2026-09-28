@@ -14,6 +14,7 @@ from adaptive_rl.environments.drone import DroneNavigation3DEnv, ObstacleSphere3
 from adaptive_rl.evaluation.evaluator import (
     Evaluator,
     compare_policies,
+    derive_episode_reset_seed,
     evaluate_random_policy,
     run_obstacle_density_experiment,
 )
@@ -135,6 +136,11 @@ def test_student_t_statistics_match_analytical_values() -> None:
     assert student_t_critical_value(0.95, 9) == pytest.approx(2.2621571627, rel=1e-9)
     assert student_t_critical_value(0.95, 10) == pytest.approx(2.2281388520, rel=1e-9)
     assert student_t_critical_value(0.95, 30) == pytest.approx(2.0422724563, rel=1e-9)
+    assert student_t_critical_value(0.99, 5) == pytest.approx(4.0321429836, rel=1e-9)
+    assert student_t_critical_value(0.95, 100) == pytest.approx(1.9839715184, rel=1e-9)
+    assert student_t_critical_value(0.95, 1000) == pytest.approx(1.9623390808, rel=1e-9)
+    assert student_t_critical_value(0.99, 5) > student_t_critical_value(0.95, 5)
+    assert student_t_critical_value(0.95, 5) > student_t_critical_value(0.95, 100)
 
     stats = summarize_seed_values([1.0, 2.0, 3.0])
     margin = 4.3026527297 / math.sqrt(3.0)
@@ -184,18 +190,18 @@ def test_evaluate_seeds_preserves_per_seed_records_and_metrics(tmp_path: Path) -
         (20, 0),
         (20, 1),
     ]
-    assert [record.episode_seed for record in result.episodes] == [20, 21, 40, 41]
+    assert [record.episode_seed for record in result.episodes] == [55, 67, 210, 232]
     assert all(record.path_length == 1.0 for record in result.episodes)
     assert [summary.seed for summary in result.per_seed] == requested_seeds
     assert [summary.episodes for summary in result.per_seed] == [2, 2]
-    assert [summary.mean_reward for summary in result.per_seed] == [20.5, 40.5]
-    assert result.per_seed[0].success_rate == pytest.approx(0.5)
-    assert result.per_seed[0].collision_rate == pytest.approx(0.0)
-    assert result.per_seed[0].truncation_rate == pytest.approx(0.5)
+    assert [summary.mean_reward for summary in result.per_seed] == [61.0, 221.0]
+    assert result.per_seed[0].success_rate == pytest.approx(0.0)
+    assert result.per_seed[0].collision_rate == pytest.approx(1.0)
+    assert result.per_seed[0].truncation_rate == pytest.approx(0.0)
     assert result.per_seed[0].mean_episode_length == 1.0
     assert result.per_seed[0].path_length == 1.0
-    assert result.aggregate["mean_reward"].mean == pytest.approx(30.5)
-    assert result.aggregate["mean_reward"].std == pytest.approx(math.sqrt(200.0))
+    assert result.aggregate["mean_reward"].mean == pytest.approx(141.0)
+    assert result.aggregate["mean_reward"].std == pytest.approx(math.sqrt(12800.0))
 
     json_path = tmp_path / "evaluation_multiseed.json"
     csv_path = tmp_path / "evaluation_multiseed.csv"
@@ -212,6 +218,13 @@ def test_evaluate_seeds_preserves_per_seed_records_and_metrics(tmp_path: Path) -
             "seeds are evaluation group seeds (the statistical grouping unit); "
             "episodes within a group use derived episode_reset_seed values"
         ),
+        "episode_reset_seed_mapping": (
+            "custom: Cantor pairing ((group_seed + episode_index) * "
+            "(group_seed + episode_index + 1)) // 2 + episode_index; "
+            "configured split: SHA-256 of "
+            "'adaptive-rl-evaluation-reset-v1:<split>:<group_seed>:<episode_index>' "
+            "reduced into the finite split interval"
+        ),
         "episodes_per_seed": 2,
         "total_episodes": 4,
         "deterministic": True,
@@ -225,7 +238,7 @@ def test_evaluate_seeds_preserves_per_seed_records_and_metrics(tmp_path: Path) -
     assert len(document["episodes"]) == 4
     assert len(document["per_seed"]) == 2
     assert document["aggregate"]["mean_reward"]["sample_count"] == 2
-    assert document["episodes"][0]["episode_seed"] == 20
+    assert document["episodes"][0]["episode_seed"] == 55
     assert document["episodes"][0]["path_length"] == 1.0
 
     expected_headers = [
@@ -245,7 +258,7 @@ def test_evaluate_seeds_preserves_per_seed_records_and_metrics(tmp_path: Path) -
         assert reader.fieldnames == expected_headers
     assert len(rows) == len(result.aggregate)
     assert rows[0]["metric"] == "mean_reward"
-    assert float(rows[0]["mean"]) == pytest.approx(30.5)
+    assert float(rows[0]["mean"]) == pytest.approx(141.0)
     assert rows[0]["seed_count"] == "2"
     assert rows[0]["episodes_per_seed"] == "2"
     assert rows[0]["total_episodes"] == "4"
@@ -268,6 +281,60 @@ def test_evaluate_seeds_is_deterministic_and_rejects_invalid_inputs() -> None:
     with pytest.raises(ValueError, match="non-negative"):
         evaluator.evaluate_seeds([-1], episodes_per_seed=1)
     evaluator.close()
+
+
+def test_evaluation_group_reset_seeds_are_independent_of_episode_count() -> None:
+    observed: dict[int, dict[int, list[int]]] = {}
+    for episodes_per_seed in (1, 5, 20, 100):
+        env = _SeedOutcomeEnv()
+        reset_seeds: list[int] = []
+        original_reset = env.reset
+
+        def record_reset(*, seed: int | None = None, options: dict | None = None):
+            reset_seeds.append(seed if seed is not None else -1)
+            return original_reset(seed=seed, options=options)
+
+        env.reset = record_reset  # type: ignore[method-assign]
+        evaluator = Evaluator(algorithm=_ZeroPolicy(), env=env)  # type: ignore[arg-type]
+        result = evaluator.evaluate_seeds([11, 13], episodes_per_seed=episodes_per_seed)
+        observed[episodes_per_seed] = {
+            group_seed: reset_seeds[index * episodes_per_seed : (index + 1) * episodes_per_seed]
+            for index, group_seed in enumerate((11, 13))
+        }
+
+        group_11_records = {
+            record.episode_index: record
+            for record in result.episodes
+            if record.evaluation_group_seed == 11
+        }
+        assert group_11_records[0].episode_reset_seed == derive_episode_reset_seed(11, 0)
+        if episodes_per_seed > 1:
+            assert group_11_records[1].episode_reset_seed == derive_episode_reset_seed(11, 1)
+        assert len(result.episodes) == 2 * episodes_per_seed
+        evaluator.close()
+
+    for group_seed in (11, 13):
+        reference = observed[100][group_seed]
+        for episode_count in observed:
+            assert (
+                observed[episode_count][group_seed][: min(episode_count, 5)]
+                == reference[: min(episode_count, 5)]
+            )
+    assert observed[1][11][0] == observed[5][11][0] == observed[20][11][0] == 66
+    assert observed[1][13][0] == observed[5][13][0] == observed[20][13][0]
+    assert observed[5][11][1] == observed[20][11][1] == observed[100][11][1] == 79
+
+    seeds_group_11 = {derive_episode_reset_seed(11, index) for index in range(100)}
+    seeds_group_13 = {derive_episode_reset_seed(13, index) for index in range(100)}
+    assert seeds_group_11.isdisjoint(seeds_group_13)
+
+
+def test_split_seed_mapping_is_stable_and_respects_partition() -> None:
+    train_seed = derive_episode_reset_seed(11, 3, split="train")
+    test_seed = derive_episode_reset_seed(1001, 3, split="test")
+    assert train_seed == derive_episode_reset_seed(11, 3, split="train")
+    assert 0 <= train_seed < 1000
+    assert 1000 <= test_seed < 1200
 
 
 def test_evaluate_seeds_preserves_unavailable_optional_metrics() -> None:
@@ -862,6 +929,12 @@ def test_student_t_critical_value_validates_inputs() -> None:
     for degrees_of_freedom in (0, -3):
         with pytest.raises(ValueError, match="degrees of freedom must be positive"):
             student_t_critical_value(0.95, degrees_of_freedom)
+    for confidence in (float("nan"), float("inf"), True):
+        with pytest.raises(ValueError):
+            student_t_critical_value(confidence, 5)
+    for degrees_of_freedom in (True, 1.5):
+        with pytest.raises(ValueError, match="degrees of freedom must be an integer"):
+            student_t_critical_value(0.95, degrees_of_freedom)  # type: ignore[arg-type]
 
 
 def test_summarize_descriptive_episodes_pools_every_episode() -> None:
@@ -903,6 +976,22 @@ def test_summarize_descriptive_episodes_validates_inputs() -> None:
     for bad_reward in (float("nan"), float("inf"), float("-inf")):
         with pytest.raises(ValueError, match="finite"):
             summarize_descriptive_episodes([bad_reward], [1.0], [True], [False], [False])
+    for bad_length in (-1.0, float("nan"), float("inf"), "1"):
+        with pytest.raises(ValueError, match="Episode lengths"):
+            summarize_descriptive_episodes([1.0], [bad_length], [True], [False], [False])  # type: ignore[list-item]
+    for bad_flag in (1, "false"):
+        with pytest.raises(ValueError, match="successes values"):
+            summarize_descriptive_episodes([1.0], [1.0], [bad_flag], [False], [False])  # type: ignore[list-item]
+        with pytest.raises(ValueError, match="collisions values"):
+            summarize_descriptive_episodes([1.0], [1.0], [True], [bad_flag], [False])  # type: ignore[list-item]
+        with pytest.raises(ValueError, match="Truncation values"):
+            summarize_descriptive_episodes([1.0], [1.0], [True], [False], [bad_flag])  # type: ignore[list-item]
+    with pytest.raises(ValueError, match="real numbers"):
+        summarize_descriptive_episodes([True], [1.0], [True], [False], [False])  # type: ignore[list-item]
+    with pytest.raises(ValueError, match="real numbers"):
+        summarize_seed_values(["not-a-number"])  # type: ignore[list-item]
+    with pytest.raises(ValueError, match="real numbers"):
+        summarize_seed_values([True])
 
 
 def test_pooled_and_seed_level_statistics_use_different_sample_units() -> None:
@@ -947,17 +1036,17 @@ def test_episode_records_expose_group_and_reset_seed_naming(tmp_path: Path) -> N
     records = result.episodes
 
     assert [record.evaluation_group_seed for record in records] == [10, 10, 20, 20]
-    assert [record.episode_reset_seed for record in records] == [20, 21, 40, 41]
+    assert [record.episode_reset_seed for record in records] == [55, 67, 210, 232]
     # Legacy names keep their documented meanings: seed is the group seed and
     # episode_seed is the per-episode reset seed.
     assert [record.seed for record in records] == [10, 10, 20, 20]
-    assert [record.episode_seed for record in records] == [20, 21, 40, 41]
+    assert [record.episode_seed for record in records] == [55, 67, 210, 232]
 
     payload = records[0].to_dict()
     assert payload["evaluation_group_seed"] == 10
-    assert payload["episode_reset_seed"] == 20
+    assert payload["episode_reset_seed"] == 55
     assert payload["seed"] == 10
-    assert payload["episode_seed"] == 20
+    assert payload["episode_seed"] == 55
 
     assert [summary.evaluation_group_seed for summary in result.per_seed] == [10, 20]
     assert [summary.seed for summary in result.per_seed] == [10, 20]
@@ -974,7 +1063,7 @@ def test_episode_records_expose_group_and_reset_seed_naming(tmp_path: Path) -> N
     exported = json.loads(saved_json.read_text(encoding="utf-8"))
     json.dumps(exported, allow_nan=False)
     assert exported["episodes"][0]["evaluation_group_seed"] == 10
-    assert exported["episodes"][0]["episode_reset_seed"] == 20
+    assert exported["episodes"][0]["episode_reset_seed"] == 55
     assert saved_csv.is_file()
     evaluator.close()
 

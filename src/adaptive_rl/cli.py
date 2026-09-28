@@ -271,6 +271,11 @@ def benchmark_budgets(
         "--plot-x-axis",
         help="Plot x-axis semantics: 'trained' (actual timesteps) or 'requested' (budget)",
     ),
+    evaluation_split: Optional[str] = typer.Option(
+        None,
+        "--evaluation-split",
+        help="Evaluation distribution: custom, train, or held-out test",
+    ),
 ) -> None:
     """Run the PPO learning-curve benchmark across training budgets (PPO only)."""
     if config is None:
@@ -297,6 +302,14 @@ def benchmark_budgets(
             "Expected 'trained' or 'requested'."
         )
         raise typer.Exit(code=1)
+    if evaluation_split is not None:
+        evaluation_split = evaluation_split.strip().lower()
+        if evaluation_split not in ("custom", "train", "test"):
+            console.print(
+                f"[bold red]Invalid --evaluation-split:[/bold red] {evaluation_split!r}. "
+                "Expected 'custom', 'train', or 'test'."
+            )
+            raise typer.Exit(code=1)
 
     try:
         from adaptive_rl.benchmarking import (
@@ -335,6 +348,7 @@ def benchmark_budgets(
             output_dir=output_dir,
             plot=plot,
             plot_x_axis=cast(Literal["trained", "requested"], x_axis),
+            evaluation_split=cast(Literal["custom", "train", "test"] | None, evaluation_split),
         )
     except BenchmarkRunError as err:
         partial = err.result
