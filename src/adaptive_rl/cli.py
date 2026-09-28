@@ -28,7 +28,7 @@ app = typer.Typer(
 
 benchmark_app = typer.Typer(
     name="benchmark",
-    help="PPO learning-curve benchmark commands (PPO only).",
+    help="Benchmark commands for learning curves and online adaptation.",
     no_args_is_help=True,
 )
 app.add_typer(benchmark_app, name="benchmark")
@@ -378,6 +378,111 @@ def benchmark_budgets(
         console.print(
             "[bold red]Plot generation failed; JSON/CSV artifacts were preserved.[/bold red]"
         )
+        raise typer.Exit(code=1)
+
+
+@benchmark_app.command(name="adaptation")
+def benchmark_adaptation(
+    config: Path = typer.Option(
+        Path("configs/drone_distribution_shift.yaml"),
+        "--config",
+        "-c",
+        help="Issue #265 nominal training and TEST-B configuration",
+    ),
+    algorithm: Optional[str] = typer.Option(
+        None, "--algorithm", help="Algorithm cell: ppo or sac (defaults to config value)"
+    ),
+    training_seeds: Optional[str] = typer.Option(
+        None,
+        "--training-seeds",
+        help="Comma-separated preregistered training seeds; defaults to all ten",
+    ),
+    output_dir: Optional[Path] = typer.Option(
+        None, "--output-dir", help="Directory for Issue #265 JSON/CSV and training artifacts"
+    ),
+    deterministic: Optional[bool] = typer.Option(
+        None, "--deterministic/--stochastic", help="Override action selection for all evaluations"
+    ),
+    smoke: bool = typer.Option(
+        False,
+        "--smoke",
+        help="Run one explicitly labeled, reduced-size machinery check (not research data)",
+    ),
+) -> None:
+    """Run the preregistered train-once, forked Adaptive-vs-Fixed experiment."""
+    try:
+        exp_config = load_config(config)
+        if algorithm is not None:
+            selected_algorithm = algorithm.strip().lower()
+            if selected_algorithm not in {"ppo", "sac"}:
+                raise ValueError("--algorithm must be 'ppo' or 'sac'")
+            algorithm_config = exp_config.algorithm.model_copy(deep=True)
+            if selected_algorithm != algorithm_config.name.strip().lower():
+                algorithm_config.name = selected_algorithm
+                if selected_algorithm == "sac":
+                    algorithm_config.parameters = {
+                        "buffer_size": 100_000,
+                        "learning_starts": 100,
+                        "train_freq": 1,
+                        "gradient_steps": 1,
+                        "tau": 0.005,
+                        "ent_coef": "auto",
+                    }
+                else:
+                    algorithm_config.parameters = {
+                        "n_steps": 1024,
+                        "n_epochs": 10,
+                        "clip_range": 0.2,
+                        "ent_coef": 0.01,
+                    }
+                exp_config = exp_config.model_copy(
+                    update={"algorithm": algorithm_config}, deep=True
+                )
+        if deterministic is not None:
+            evaluation_config = exp_config.evaluation.model_copy(deep=True)
+            evaluation_config.deterministic = deterministic
+            exp_config = exp_config.model_copy(update={"evaluation": evaluation_config}, deep=True)
+
+        selected_seeds = None
+        if training_seeds is not None:
+            tokens = [token.strip() for token in training_seeds.split(",")]
+            if not tokens or any(not token for token in tokens):
+                raise ValueError("--training-seeds expects comma-separated integers")
+            try:
+                selected_seeds = [int(token) for token in tokens]
+            except ValueError as exc:
+                raise ValueError("--training-seeds expects comma-separated integers") from exc
+
+        from adaptive_rl.benchmarking.adaptation_runner import run_adaptation_benchmark
+
+        artifact = run_adaptation_benchmark(
+            exp_config,
+            output_dir=output_dir,
+            training_seeds=selected_seeds,
+            smoke=smoke,
+            config_path=config,
+        )
+    except Exception as err:
+        console.print(f"[bold red]Issue #265 benchmark failed:[/bold red] {err}")
+        raise typer.Exit(code=1)
+
+    failed = artifact["failure_summary"]["failed_replicates"]
+    completed = artifact["failure_summary"]["completed_replicates"]
+    console.print(
+        Panel.fit(
+            f"[bold]{'Smoke check' if smoke else 'Issue #265 benchmark'} finished[/bold]\n\n"
+            f"• [bold]Run type:[/bold] {artifact['run_type']}\n"
+            f"• [bold]Algorithm:[/bold] {artifact['experiment']['algorithm']}\n"
+            f"• [bold]Completed replicates:[/bold] {completed}\n"
+            f"• [bold]Failed replicates:[/bold] {len(failed)}\n"
+            f"• [bold]JSON:[/bold] {Path(output_dir or exp_config.output_dir) / 'adaptation.json'}\n"
+            f"• [bold]CSV:[/bold] {Path(output_dir or exp_config.output_dir) / 'adaptation.csv'}\n"
+            f"• [bold]Scientific result:[/bold] not established by harness execution",
+            title="Online Adaptation Benchmark",
+            border_style="yellow" if smoke or failed else "green",
+        )
+    )
+    if failed:
         raise typer.Exit(code=1)
 
 

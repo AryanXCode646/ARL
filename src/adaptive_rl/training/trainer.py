@@ -17,6 +17,7 @@ import numpy as np
 import torch
 
 from adaptive_rl.algorithms.ppo import PPOAlgorithm
+from adaptive_rl.algorithms.sac import SACAlgorithm
 from adaptive_rl.config import ExperimentConfig
 from adaptive_rl.environments.registry import make_env
 from adaptive_rl.training.callbacks import (
@@ -55,8 +56,8 @@ class TrainingResult:
     training_time_seconds: float = 0.0
 
 
-class PPOTrainer:
-    """Trainer orchestrating PPO policy learning on the drone navigation environment."""
+class AlgorithmTrainer:
+    """Trainer orchestrating supported Stable-Baselines3 algorithm learning."""
 
     def __init__(
         self,
@@ -93,7 +94,11 @@ class PPOTrainer:
         gamma = algo_params.pop("gamma", self.config.algorithm.gamma)
         batch_size = algo_params.pop("batch_size", self.config.algorithm.batch_size)
         seed = algo_params.pop("seed", self.config.seed)
-        self.algorithm = PPOAlgorithm(
+        algorithm_name = self.config.algorithm.name.strip().lower()
+        algorithm_types = {"ppo": PPOAlgorithm, "sac": SACAlgorithm}
+        if algorithm_name not in algorithm_types:
+            raise ValueError(f"Unsupported training algorithm: {self.config.algorithm.name!r}")
+        self.algorithm = algorithm_types[algorithm_name](
             env=self.env,
             learning_rate=lr,
             gamma=gamma,
@@ -203,10 +208,22 @@ class PPOTrainer:
             )
 
 
+class PPOTrainer(AlgorithmTrainer):
+    """Trainer for PPO; retained as the explicit PPO-facing public class."""
+
+
+class SACTrainer(AlgorithmTrainer):
+    """Trainer for SAC using the same callbacks and artifact lifecycle."""
+
+
 def get_trainer(
     config: ExperimentConfig,
     env: Optional[gym.Env] = None,
     callbacks: Optional[List[BaseCallback]] = None,
-) -> PPOTrainer:
-    """Factory returning the trainer based on configuration."""
-    return PPOTrainer(config=config, env=env, callbacks=callbacks)
+) -> AlgorithmTrainer:
+    """Factory for the configured PPO or SAC algorithm trainer."""
+    trainer_types = {"ppo": PPOTrainer, "sac": SACTrainer}
+    algorithm_name = config.algorithm.name.strip().lower()
+    if algorithm_name not in trainer_types:
+        raise ValueError(f"Unsupported training algorithm: {config.algorithm.name!r}")
+    return trainer_types[algorithm_name](config=config, env=env, callbacks=callbacks)
