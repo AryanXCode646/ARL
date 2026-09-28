@@ -668,6 +668,126 @@ def experiment_density(
         dummy_env.close()
 
 
+@app.command(name="experiment-ablation")
+def experiment_ablation(
+    timesteps: int = typer.Option(
+        25000,
+        "--timesteps",
+        "-t",
+        help="Training timesteps budget per variant",
+    ),
+    episodes: int = typer.Option(
+        20,
+        "--episodes",
+        "-e",
+        help="Number of held-out evaluation episodes per variant",
+    ),
+    seed: int = typer.Option(
+        42,
+        "--seed",
+        "-s",
+        help="Deterministic base seed for training and evaluation",
+    ),
+    output_report: Optional[Path] = typer.Option(
+        None,
+        "--output-report",
+        "-o",
+        help="Optional path to export JSON benchmark report",
+    ),
+    output_csv: Optional[Path] = typer.Option(
+        None,
+        "--output-csv",
+        help="Optional path to export CSV benchmark report",
+    ),
+    eval_freq: Optional[int] = typer.Option(
+        None,
+        "--eval-freq",
+        help="Frequency of intermediate evaluations for convergence tracking",
+    ),
+) -> None:
+    """Run controlled reward-function ablation experiments across Variants A-D."""
+    console.print(
+        Panel.fit(
+            f"[bold cyan]Running Reward-Function Ablation Study[/bold cyan]\n\n"
+            f"• [bold]Variants:[/bold] A (Progress Only), B (+Collision), C (+Step), D (Full Baseline)\n"
+            f"• [bold]Training Budget:[/bold] {timesteps:,} steps/variant\n"
+            f"• [bold]Evaluation Episodes:[/bold] {episodes}\n"
+            f"• [bold]Base Seed:[/bold] {seed}\n\n"
+            f"[dim]Hypothesis: Explicit collision and step penalties improve safe goal-directed flight.[/dim]",
+            title="Reward Ablation Benchmark",
+            border_style="cyan",
+        )
+    )
+
+    from adaptive_rl.benchmarking.ablation import run_reward_ablation_experiment
+
+    try:
+        report_json = output_report or Path("artifacts/benchmarks/reward_ablation.json")
+        report_csv = output_csv or Path("artifacts/benchmarks/reward_ablation.csv")
+
+        data = run_reward_ablation_experiment(
+            timesteps=timesteps,
+            eval_episodes=episodes,
+            seed=seed,
+            eval_freq=eval_freq,
+            output_json=report_json,
+            output_csv=report_csv,
+        )
+
+        results = data.get("results", [])
+
+        table = Table(title="Reward-Function Ablation Benchmark Results")
+        table.add_column("Variant", style="bold cyan")
+        table.add_column("Success", justify="right")
+        table.add_column("Collision", justify="right")
+        table.add_column("Timeout", justify="right")
+        table.add_column("Mean Reward", justify="right")
+        table.add_column("Path Efficiency", justify="right")
+        table.add_column("Convergence", justify="right")
+
+        for r in results:
+            succ_str = (
+                f"{r['success_rate'] * 100:.1f}%" if r.get("success_rate") is not None else "N/A"
+            )
+            coll_str = (
+                f"{r['collision_rate'] * 100:.1f}%"
+                if r.get("collision_rate") is not None
+                else "N/A"
+            )
+            time_str = (
+                f"{r['timeout_rate'] * 100:.1f}%" if r.get("timeout_rate") is not None else "N/A"
+            )
+            rew_str = f"{r['mean_reward']:.2f}" if r.get("mean_reward") is not None else "N/A"
+            eff_str = (
+                f"{r['mean_path_efficiency'] * 100:.1f}%"
+                if r.get("mean_path_efficiency") is not None
+                else "N/A"
+            )
+            conv_speed = r.get("convergence_speed")
+            conv_str = (
+                f"{conv_speed:,} steps" if conv_speed is not None else "[dim]not reached[/dim]"
+            )
+
+            table.add_row(
+                r["variant"],
+                succ_str,
+                coll_str,
+                time_str,
+                rew_str,
+                eff_str,
+                conv_str,
+            )
+
+        console.print("\n")
+        console.print(table)
+        console.print(f"\n[bold green]JSON report saved to:[/bold green] {report_json}")
+        console.print(f"[bold green]CSV report saved to:[/bold green] {report_csv}")
+
+    except Exception as err:
+        console.print(f"[bold red]Ablation experiment failed with error:[/bold red] {err}")
+        raise typer.Exit(code=1)
+
+
 @app.command(name="demo-drone")
 def demo_drone(
     model: Path = typer.Option(..., "--model", "-m", help="Path to trained model artifact (.zip)"),
