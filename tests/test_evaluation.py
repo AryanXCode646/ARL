@@ -1,7 +1,11 @@
+"""Tests for agent evaluation and JSON report generation."""
+
 import csv
 import json
+import math
 from pathlib import Path
 
+import gymnasium as gym
 import numpy as np
 import pytest
 
@@ -14,6 +18,56 @@ from adaptive_rl.evaluation.evaluator import (
     run_obstacle_density_experiment,
 )
 from adaptive_rl.evaluation.metrics import compute_trajectory_metrics
+from adaptive_rl.evaluation.statistics import (
+    student_t_critical_value,
+    summarize_seed_values,
+)
+
+
+class _SeedOutcomeEnv(gym.Env):
+    observation_space = gym.spaces.Box(-1000.0, 1000.0, shape=(1,), dtype=np.float32)
+    action_space = gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32)
+
+    def __init__(self, *, include_outcomes: bool = True) -> None:
+        super().__init__()
+        self.include_outcomes = include_outcomes
+        self.current_seed = 0
+        self.position = np.zeros(2, dtype=np.float64)
+
+    def reset(
+        self, *, seed: int | None = None, options: dict | None = None
+    ) -> tuple[np.ndarray, dict]:
+        super().reset(seed=seed)
+        self.current_seed = 0 if seed is None else seed
+        self.position = np.array([float(self.current_seed), 0.0])
+        return np.zeros(1, dtype=np.float32), {"position": self.position.copy()}
+
+    def step(self, action: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict]:
+        self.position = self.position + np.array([1.0, 0.0])
+        info = {"position": self.position.copy()}
+        if self.include_outcomes:
+            outcome = self.current_seed % 3
+            info.update(
+                {
+                    "success": outcome == 0,
+                    "collision": outcome == 1,
+                }
+            )
+            return (
+                np.zeros(1, dtype=np.float32),
+                float(self.current_seed),
+                outcome != 2,
+                outcome == 2,
+                info,
+            )
+        return np.zeros(1, dtype=np.float32), float(self.current_seed), True, False, info
+
+
+class _ZeroPolicy:
+    def predict(
+        self, observation: np.ndarray, deterministic: bool = True
+    ) -> tuple[np.ndarray, None]:
+        return np.zeros(1, dtype=np.float32), None
 
 
 def test_evaluator_deterministic_evaluation(tmp_path: Path) -> None:
@@ -62,6 +116,183 @@ def test_evaluator_episode_records() -> None:
     assert isinstance(rec.success, bool)
     assert isinstance(rec.collision, bool)
     env.close()
+
+
+def test_student_t_statistics_match_analytical_values() -> None:
+    assert student_t_critical_value(0.95, 1) == pytest.approx(12.7062047364, rel=1e-9)
+    assert student_t_critical_value(0.95, 2) == pytest.approx(4.3026527297, rel=1e-9)
+    assert student_t_critical_value(0.95, 5) == pytest.approx(2.5705818356, rel=1e-9)
+    assert student_t_critical_value(0.95, 9) == pytest.approx(2.2621571627, rel=1e-9)
+    assert student_t_critical_value(0.95, 10) == pytest.approx(2.2281388520, rel=1e-9)
+    assert student_t_critical_value(0.95, 30) == pytest.approx(2.0422724563, rel=1e-9)
+
+    stats = summarize_seed_values([1.0, 2.0, 3.0])
+    margin = 4.3026527297 / math.sqrt(3.0)
+    assert stats.mean == pytest.approx(2.0)
+    assert stats.std == pytest.approx(1.0)
+    assert stats.ci95_lower == pytest.approx(2.0 - margin)
+    assert stats.ci95_upper == pytest.approx(2.0 + margin)
+    assert stats.sample_count == 3
+
+
+def test_student_t_statistics_handle_small_and_constant_samples() -> None:
+    one = summarize_seed_values([7.0])
+    assert one.mean == 7.0
+    assert one.std is None
+    assert one.ci95_lower is None
+    assert one.ci95_upper is None
+
+    two = summarize_seed_values([0.0, 2.0])
+    assert two.mean == 1.0
+    assert two.std == pytest.approx(math.sqrt(2.0))
+    assert two.ci95_lower is not None and math.isfinite(two.ci95_lower)
+    assert two.ci95_upper is not None and math.isfinite(two.ci95_upper)
+
+    constant = summarize_seed_values([3.0, 3.0, 3.0])
+    assert constant.mean == 3.0
+    assert constant.std == 0.0
+    assert constant.ci95_lower == 3.0
+    assert constant.ci95_upper == 3.0
+
+    assert summarize_seed_values([None, None]).mean is None
+    with pytest.raises(ValueError, match="finite"):
+        summarize_seed_values([1.0, float("nan")])
+
+
+def test_evaluate_seeds_preserves_per_seed_records_and_metrics(tmp_path: Path) -> None:
+    env = _SeedOutcomeEnv()
+    evaluator = Evaluator(algorithm=_ZeroPolicy(), env=env)  # type: ignore[arg-type]
+    requested_seeds = [10, 20]
+    result = evaluator.evaluate_seeds(requested_seeds, episodes_per_seed=2)
+
+    assert result.seeds == [10, 20]
+    assert requested_seeds == [10, 20]
+    assert result.total_episodes == 4
+    assert [(record.seed, record.episode_index) for record in result.episodes] == [
+        (10, 0),
+        (10, 1),
+        (20, 0),
+        (20, 1),
+    ]
+    assert [record.episode_seed for record in result.episodes] == [20, 21, 40, 41]
+    assert all(record.path_length == 1.0 for record in result.episodes)
+    assert [summary.seed for summary in result.per_seed] == requested_seeds
+    assert [summary.episodes for summary in result.per_seed] == [2, 2]
+    assert [summary.mean_reward for summary in result.per_seed] == [20.5, 40.5]
+    assert result.per_seed[0].success_rate == pytest.approx(0.5)
+    assert result.per_seed[0].collision_rate == pytest.approx(0.0)
+    assert result.per_seed[0].truncation_rate == pytest.approx(0.5)
+    assert result.per_seed[0].mean_episode_length == 1.0
+    assert result.per_seed[0].path_length == 1.0
+    assert result.aggregate["mean_reward"].mean == pytest.approx(30.5)
+    assert result.aggregate["mean_reward"].std == pytest.approx(math.sqrt(200.0))
+
+    json_path = tmp_path / "evaluation_multiseed.json"
+    csv_path = tmp_path / "evaluation_multiseed.csv"
+    saved_json, saved_csv = evaluator.save_multiseed_report(result, json_path, csv_path)
+    assert saved_json.is_file()
+    assert saved_csv.is_file()
+    document = json.loads(saved_json.read_text(encoding="utf-8"))
+    json.dumps(document, allow_nan=False)
+    assert document["metadata"] == {
+        "seeds": [10, 20],
+        "seed_count": 2,
+        "episodes_per_seed": 2,
+        "total_episodes": 4,
+        "deterministic": True,
+        "environment": "drone",
+        "confidence_interval": (
+            "two-sided 95% Student's t interval across seed summaries; "
+            "sample standard deviation; unavailable when fewer than two values exist"
+        ),
+        "duplicate_seed_policy": "rejected",
+    }
+    assert len(document["episodes"]) == 4
+    assert len(document["per_seed"]) == 2
+    assert document["aggregate"]["mean_reward"]["sample_count"] == 2
+    assert document["episodes"][0]["episode_seed"] == 20
+    assert document["episodes"][0]["path_length"] == 1.0
+
+    expected_headers = [
+        "metric",
+        "mean",
+        "std",
+        "ci95_lower",
+        "ci95_upper",
+        "sample_count",
+        "seed_count",
+        "episodes_per_seed",
+        "total_episodes",
+    ]
+    with saved_csv.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        rows = list(reader)
+        assert reader.fieldnames == expected_headers
+    assert len(rows) == len(result.aggregate)
+    assert rows[0]["metric"] == "mean_reward"
+    assert float(rows[0]["mean"]) == pytest.approx(30.5)
+    assert rows[0]["seed_count"] == "2"
+    assert rows[0]["episodes_per_seed"] == "2"
+    assert rows[0]["total_episodes"] == "4"
+    evaluator.close()
+
+
+def test_evaluate_seeds_is_deterministic_and_rejects_invalid_inputs() -> None:
+    evaluator = Evaluator(algorithm=_ZeroPolicy(), env=_SeedOutcomeEnv())  # type: ignore[arg-type]
+    first = evaluator.evaluate_seeds([7, 13], episodes_per_seed=2, deterministic=True)
+    first_data = first.to_dict()
+    second = evaluator.evaluate_seeds([7, 13], episodes_per_seed=2, deterministic=True)
+    assert second.to_dict() == first_data
+
+    with pytest.raises(ValueError, match="must not be empty"):
+        evaluator.evaluate_seeds([], episodes_per_seed=1)
+    with pytest.raises(ValueError, match="unique"):
+        evaluator.evaluate_seeds([7, 7], episodes_per_seed=1)
+    with pytest.raises(ValueError, match="positive"):
+        evaluator.evaluate_seeds([7], episodes_per_seed=0)
+    with pytest.raises(ValueError, match="non-negative"):
+        evaluator.evaluate_seeds([-1], episodes_per_seed=1)
+    evaluator.close()
+
+
+def test_evaluate_seeds_preserves_unavailable_optional_metrics() -> None:
+    evaluator = Evaluator(
+        algorithm=_ZeroPolicy(),
+        env=_SeedOutcomeEnv(include_outcomes=False),  # type: ignore[arg-type]
+    )
+    result = evaluator.evaluate_seeds([2, 5], episodes_per_seed=1)
+    assert all(summary.success_rate is None for summary in result.per_seed)
+    assert all(summary.collision_rate is None for summary in result.per_seed)
+    assert result.aggregate["success_rate"].mean is None
+    evaluator.close()
+
+
+def test_evaluator_uses_truncated_signal_for_timeout_metrics() -> None:
+    terminating_env = _SeedOutcomeEnv(include_outcomes=False)
+    terminating_env.max_steps = 1
+    evaluator = Evaluator(
+        algorithm=_ZeroPolicy(),
+        env=terminating_env,  # type: ignore[arg-type]
+    )
+
+    terminated = evaluator.evaluate(num_episodes=1, base_seed=7)
+    assert terminated.timeout_rate == 0.0
+    assert terminated.truncation_rate == 0.0
+    assert evaluator.last_episode_records[0].truncated is False
+    assert evaluator.last_episode_records[0].timeout is False
+    evaluator.close()
+
+    truncating_env = _SeedOutcomeEnv(include_outcomes=True)
+    evaluator = Evaluator(
+        algorithm=_ZeroPolicy(),
+        env=truncating_env,  # type: ignore[arg-type]
+    )
+    truncated = evaluator.evaluate(num_episodes=1, base_seed=11)
+    assert truncated.timeout_rate == 1.0
+    assert truncated.truncation_rate == 1.0
+    assert evaluator.last_episode_records[0].truncated is True
+    assert evaluator.last_episode_records[0].timeout is True
+    evaluator.close()
 
 
 def test_evaluate_random_policy() -> None:

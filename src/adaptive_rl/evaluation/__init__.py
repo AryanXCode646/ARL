@@ -3,6 +3,8 @@
 from adaptive_rl.evaluation.evaluator import (
     EpisodeEvaluationRecord,
     Evaluator,
+    MultiSeedEvaluationResult,
+    SeedEvaluationSummary,
     compare_policies,
     evaluate_ppo_policy,
     evaluate_random_policy,
@@ -23,11 +25,15 @@ from adaptive_rl.evaluation.generalization import (
     validate_split_seed,
 )
 from adaptive_rl.evaluation.metrics import EvaluationMetrics
+from adaptive_rl.evaluation.statistics import MetricStatistics, student_t_critical_value
 
 __all__ = [
     "EpisodeEvaluationRecord",
     "EvaluationMetrics",
     "Evaluator",
+    "MetricStatistics",
+    "MultiSeedEvaluationResult",
+    "SeedEvaluationSummary",
     "GeneralizationBenchmarkResult",
     "GeneralizationGap",
     "TEST_SEED_END",
@@ -43,5 +49,6 @@ __all__ = [
     "get_split_seeds",
     "is_seed_in_split",
     "run_obstacle_density_experiment",
+    "student_t_critical_value",
     "validate_split_seed",
 ]

@@ -77,10 +77,11 @@ AdaptiveRL is an educational reinforcement-learning project in which a PPO agent
 - **Trajectory & Safety Metrics**: Rigorous trajectory evaluation including path length, straight-line distance, path efficiency, obstacle surface clearance, maximum velocity/acceleration, and separated obstacle vs. boundary collisions.
 - **Untrained Random Policy Baseline**: Built-in non-learning baseline to scientifically validate policy improvement.
 - **Obstacle-Density Experiment**: Controlled testing across 4, 6, and 8 obstacles to demonstrate environmental difficulty scaling.
-- **Command-Line Interface (CLI)**: Typer-based CLI for training, evaluation, environment inspection, and trajectory demonstration.
+- **PPO Learning-Curve Benchmark**: Train fresh PPO models across configurable timestep budgets and export evaluation metrics as JSON/CSV with optional plots.
+- **Command-Line Interface (CLI)**: Typer-based CLI for training, evaluation, learning-curve benchmarking, environment inspection, and trajectory demonstration.
 - **Streamlit + Plotly 3D GUI**: Interactive browser-based presentation flight deck with a trajectory playback scrubber and live sensor visualization.
 - **Training Checkpoints**: Automatic model weight checkpointing (`.zip`) and JSON metadata export.
-- **Automated Test Suite**: 49 unit and integration tests verifying kinematics, environment spaces, training lifecycle, and GUI charts.
+- **Automated Test Suite**: Unit and integration tests verify kinematics, environment spaces, training lifecycle, benchmark outputs, and GUI charts.
 
 ---
 
@@ -354,7 +355,7 @@ For detailed per-test execution traces:
 python -m pytest -v
 ```
 
-The repository includes **49 automated unit and integration tests** verifying:
+The repository includes automated unit and integration tests verifying:
 - 3D kinematics equations and aerodynamic drag
 - 29-dimensional observation space bounds
 - Analytical 16-ray LiDAR raycasts and obstacle clearance
@@ -397,7 +398,7 @@ When a training run completes, artifacts are automatically written to disk:
   *(e.g., `artifacts/models/drone_ppo_demo_final.zip`)*
 - **Training Metadata & Loss/Reward Log**:  
   `artifacts/metadata/{experiment_name}_training.json`  
-  *(contains total timesteps, duration in seconds, mean reward, and per-episode return lists)*
+  *(contains total timesteps, `training_time_seconds` for PPO optimization only, broader `duration_seconds` through model serialization, mean reward, and per-episode return lists)*
 - **Periodic Checkpoints** (if configured):  
   `artifacts/checkpoints/{experiment_name}/`
 
@@ -724,6 +725,8 @@ ARL/
 │   ├── __init__.py             # Package version declaration
 │   ├── cli.py                  # Typer CLI implementation
 │   ├── config.py               # Pydantic configuration schemas and YAML loader
+│   ├── benchmarking/
+│   │   └── learning_curve.py   # PPO budget sweep, evaluation, and JSON/CSV/plot exports
 │   ├── algorithms/
 │   │   ├── base.py             # BaseAlgorithm abstract interface
 │   │   ├── ppo.py              # Stable-Baselines3 PPO wrapper
@@ -742,12 +745,13 @@ ARL/
 │   └── training/
 │       ├── callbacks.py        # Episode metric logging and checkpoint callbacks
 │       └── trainer.py          # PPOTrainer training orchestrator
-└── tests/                      # 49 automated unit and integration tests
+└── tests/                      # Automated unit and integration tests
     ├── test_cli.py
     ├── test_configuration.py
     ├── test_drone.py
     ├── test_evaluation.py
     ├── test_gui.py
+    ├── test_learning_curve_benchmark.py
     └── test_training.py
 ```
 

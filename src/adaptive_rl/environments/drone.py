@@ -684,6 +684,10 @@ class DroneNavigation3DEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
         if self._current_step >= self.max_steps and not terminated:
             truncated = True
 
+        info["terminated"] = terminated
+        info["truncated"] = truncated
+        info["TimeLimit.truncated"] = truncated
+
         if self.render_mode == "human":
             print(self.render())
 
