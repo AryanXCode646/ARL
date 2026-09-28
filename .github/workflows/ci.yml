@@ -90,6 +90,7 @@ jobs:
           adaptive-rl --help
           adaptive-rl version
           adaptive-rl env inspect drone
+          adaptive-rl config validate configs/drone_ppo_demo.yaml
           adaptive-rl gui --help
 
       # Trains on configs/ci_smoke.yaml (512 steps), then verifies checkpoints, reload,
