@@ -86,7 +86,35 @@ The committed demo config uses `n_steps: 1024`, so those tiny budgets would be r
 
 ---
 
-## 4. Expected Results (Hypothesized Prior to Testing)
+## 4. Multi-Seed Evaluation and Confidence Intervals
+
+Evaluation over several independent environment seeds helps show how policy performance varies with randomized starts and obstacles, instead of depending on one seed sequence. `--episodes` is the number of episodes run for each listed seed. Each requested seed owns a disjoint block of actual environment reset seeds (`seed * episodes_per_seed + episode_index`), avoiding overlap between adjacent requested seed groups; the requested seed and actual per-episode reset seed are both recorded. Duplicate requested seeds are rejected to avoid overweighting a repeated condition.
+
+```bash
+adaptive-rl evaluate \
+  --config configs/drone_ppo.yaml \
+  --model artifacts/models/drone_ppo_final.zip \
+  --seeds 0 1 2 3 4 \
+  --episodes 10 \
+  --deterministic
+```
+
+The existing invocation remains single-seed and uses the configuration seed unless overridden with `--seed`:
+
+```bash
+adaptive-rl evaluate --config configs/drone_ppo.yaml --episodes 10
+adaptive-rl evaluate --config configs/drone_ppo.yaml --seed 7 --episodes 10
+```
+
+`--seed` and `--seeds` are mutually exclusive. In multi-seed mode, `--episodes` is per seed, and `--compare-random` is not supported. The command writes `artifacts/evaluation_multiseed.json` and `artifacts/evaluation_multiseed.csv` by default; `--output-report` and `--output-csv` can select alternate destinations.
+
+The JSON retains raw episode records (requested seed, episode index, actual reset seed, return, episode length, outcomes, truncation, and path length when the environment reports positions), per-seed summaries, aggregate metrics, and evaluation metadata. The CSV is a stable, aggregate-only table with one row per metric and columns `metric`, `mean`, `std`, `ci95_lower`, `ci95_upper`, `sample_count`, `seed_count`, `episodes_per_seed`, and `total_episodes`.
+
+Cross-seed means and confidence intervals are calculated from the per-seed summaries, not pooled episodes. The standard deviation is the sample standard deviation (`ddof=1`); two-sided 95% confidence intervals use Student's t critical values and `mean ± t * s / sqrt(n)`. Missing values are excluded per metric. With fewer than two valid seeds, sample standard deviation and CI bounds are `null`/unavailable; they are not replaced with zero. The interval describes uncertainty in the estimated mean across the evaluated seeds under the independent, representative-seed and approximate t-model assumptions. It is not proof that one policy is superior. Identical seeds and deterministic actions reproduce equivalent episode results when the policy and environment implementation are unchanged.
+
+---
+
+## 5. Expected Results (Hypothesized Prior to Testing)
 
 1. **Random Action Baseline**:
    - Success Rate: $0.0\%$ (probability of randomly stumbling into a $1.5\text{ m}$ sphere across a $13,500\text{ m}^3$ arena without striking walls is practically zero).
@@ -103,7 +131,7 @@ The committed demo config uses `n_steps: 1024`, so those tiny budgets would be r
 
 ---
 
-## 5. Actual Measured Results (Empirical Verification)
+## 6. Actual Measured Results (Empirical Verification)
 
 All results below were generated through genuine Python 3.12 CPU execution using the canonical project commands:
 ```bash
@@ -140,7 +168,7 @@ adaptive-rl experiment-density --model artifacts/models/drone_ppo_demo_final.zip
 
 ---
 
-## 6. Reproducibility Guarantee
+## 7. Reproducibility Guarantee
 
 To independently reproduce the identical metrics on any student laptop:
 ```bash
