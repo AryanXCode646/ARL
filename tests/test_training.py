@@ -1,9 +1,11 @@
 """Tests for PPO training pipeline and model persistence."""
 
 import json
+import logging
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from adaptive_rl.algorithms.ppo import PPOAlgorithm
 from adaptive_rl.config import (
@@ -134,3 +136,82 @@ def test_training_duration_excludes_model_serialization(tmp_path: Path, monkeypa
     assert metadata["training_time_seconds"] == 2.5
     assert result.final_model_path.is_file()
     trainer.close()
+
+
+def test_trainer_close_logs_environment_teardown_failures(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cleanup failures are logged with context instead of being swallowed."""
+    from adaptive_rl.training import trainer as trainer_module
+
+    class BrokenEnv:
+        def close(self) -> None:
+            raise RuntimeError("teardown exploded")
+
+    monkeypatch.setattr(trainer_module, "PPOAlgorithm", lambda **kwargs: object())
+
+    config = ExperimentConfig(
+        name="close_logging",
+        seed=7,
+        output_dir=tmp_path / "artifacts",
+        log_dir=tmp_path / "logs",
+        algorithm=AlgorithmConfig(
+            name="ppo",
+            parameters={"n_steps": 64, "batch_size": 32},
+        ),
+        environment=EnvironmentConfig(name="drone"),
+        training=TrainingConfig(total_timesteps=64, checkpoint_freq=0),
+        evaluation=EvaluationConfig(eval_episodes=1),
+    )
+
+    trainer = PPOTrainer(config=config, env=BrokenEnv())  # type: ignore[arg-type]
+    with caplog.at_level(logging.ERROR, logger="adaptive_rl.training.trainer"):
+        trainer.close()  # must not raise
+
+    records = [record for record in caplog.records if record.name == "adaptive_rl.training.trainer"]
+    assert records, "expected an ERROR record from the trainer logger"
+    record = records[-1]
+    message = record.getMessage()
+    assert "BrokenEnv" in message
+    assert "close_logging" in message
+    assert record.exc_info is not None
+    assert "teardown exploded" in str(record.exc_info[1])
+
+
+def test_trainer_close_succeeds_for_well_behaved_environments(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from adaptive_rl.training import trainer as trainer_module
+
+    class QuietEnv:
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(trainer_module, "PPOAlgorithm", lambda **kwargs: object())
+
+    config = ExperimentConfig(
+        name="quiet_close",
+        seed=7,
+        output_dir=tmp_path / "artifacts",
+        log_dir=tmp_path / "logs",
+        algorithm=AlgorithmConfig(
+            name="ppo",
+            parameters={"n_steps": 64, "batch_size": 32},
+        ),
+        environment=EnvironmentConfig(name="drone"),
+        training=TrainingConfig(total_timesteps=64, checkpoint_freq=0),
+        evaluation=EvaluationConfig(eval_episodes=1),
+    )
+
+    trainer = PPOTrainer(config=config, env=QuietEnv())  # type: ignore[arg-type]
+    with caplog.at_level(logging.ERROR, logger="adaptive_rl.training.trainer"):
+        trainer.close()
+    assert not [
+        record
+        for record in caplog.records
+        if record.levelno >= logging.ERROR and record.name == "adaptive_rl.training.trainer"
+    ]

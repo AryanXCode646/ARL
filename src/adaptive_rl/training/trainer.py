@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import random
 import time
@@ -26,10 +27,19 @@ from adaptive_rl.training.callbacks import (
 )
 from adaptive_rl.training.checkpointing import CheckpointManager
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class TrainingResult:
-    """Structured summary and artifacts resulting from a training run."""
+    """Structured summary and artifacts resulting from a training run.
+
+    ``training_time_seconds`` is the monotonic (``time.perf_counter``) elapsed
+    time of the ``algorithm.train(...)`` call only: it excludes model
+    serialization, metadata writing, and any evaluation. The legacy
+    ``duration_seconds`` value written into the training metadata JSON covers
+    the whole ``fit()`` lifecycle and is a different quantity.
+    """
 
     experiment_name: str
     total_timesteps: int
@@ -172,12 +182,25 @@ class PPOTrainer:
         )
 
     def close(self) -> None:
-        """Clean up trainer resources."""
-        if hasattr(self, "env") and self.env is not None:
-            try:
-                self.env.close()
-            except Exception:
-                pass
+        """Release trainer resources without hiding cleanup failures.
+
+        Environments occasionally raise on close (for example when a render
+        backend is already gone). Those failures are logged at ERROR level
+        with context instead of being swallowed silently, and they do not
+        replace an in-flight exception from :meth:`fit`.
+        """
+        env = getattr(self, "env", None)
+        if env is None:
+            return
+        experiment_name = getattr(getattr(self, "config", None), "name", None)
+        try:
+            env.close()
+        except Exception:
+            logger.exception(
+                "Failed to close training environment %s for experiment %r",
+                type(env).__name__,
+                experiment_name,
+            )
 
 
 def get_trainer(
