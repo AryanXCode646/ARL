@@ -17,6 +17,7 @@ def test_cli_help() -> None:
     assert "AdaptiveRL" in result.output
     assert "train" in result.output
     assert "evaluate" in result.output
+    assert "benchmark" in result.output
     assert "demo-drone" in result.output
     assert "gui" in result.output
     assert "experiment-density" in result.output

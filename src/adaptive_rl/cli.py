@@ -26,6 +26,13 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
+benchmark_app = typer.Typer(
+    name="benchmark",
+    help="Benchmarking commands for training-budget learning curves.",
+    no_args_is_help=True,
+)
+app.add_typer(benchmark_app, name="benchmark")
+
 config_app = typer.Typer(
     name="config",
     help="Configuration inspection and validation commands.",
@@ -205,6 +212,97 @@ def train(
     except Exception as err:
         console.print(f"[bold red]Training failed with error:[/bold red] {err}")
         raise typer.Exit(code=1)
+
+
+@benchmark_app.command(name="budgets")
+def benchmark_budgets(
+    config: Optional[Path] = typer.Option(
+        None, "--config", "-c", help="Path to experiment configuration YAML"
+    ),
+    budgets: Optional[str] = typer.Option(
+        None, "--budgets", help="Comma-separated training budgets (for example: 5000,10000,25000)"
+    ),
+    training_seed: Optional[int] = typer.Option(
+        None, "--training-seed", help="Override the training seed used across budgets"
+    ),
+    eval_seeds: Optional[str] = typer.Option(
+        None, "--eval-seeds", help="Comma-separated evaluation seeds (for example: 42,43,44)"
+    ),
+    episodes: Optional[int] = typer.Option(
+        None, "--episodes", help="Override evaluation episodes per seed"
+    ),
+    deterministic: Optional[bool] = typer.Option(
+        None, "--deterministic/--stochastic", help="Use deterministic actions during evaluation"
+    ),
+    output_dir: Optional[Path] = typer.Option(
+        None, "--output-dir", help="Directory for benchmark JSON/CSV/plot artifacts"
+    ),
+    plot: bool = typer.Option(False, "--plot/--no-plot", help="Render a learning-curve plot"),
+) -> None:
+    """Train and evaluate PPO across a set of training budgets."""
+    if config is None:
+        for candidate in [Path("configs/drone_ppo.yaml"), Path("configs/drone_ppo_demo.yaml")]:
+            if candidate.exists():
+                config = candidate
+                break
+        if config is None:
+            console.print(
+                "[bold red]No configuration file provided.[/bold red] Specify --config <path>"
+            )
+            raise typer.Exit(code=1)
+
+    try:
+        exp_config = load_config(config)
+    except ConfigError as err:
+        console.print(f"[bold red]Configuration error:[/bold red] {err}")
+        raise typer.Exit(code=1)
+
+    try:
+        from adaptive_rl.benchmarking import run_learning_curve_benchmark, validate_budgets
+
+        budget_values = validate_budgets(budgets) if budgets is not None else None
+        if eval_seeds is not None:
+            seed_tokens = [part.strip() for part in eval_seeds.split(",")]
+            if not seed_tokens or any(not token for token in seed_tokens):
+                raise ValueError(
+                    "Malformed evaluation seed list: expected comma-separated integers."
+                )
+            parsed_eval_seeds = []
+            for token in seed_tokens:
+                try:
+                    parsed_eval_seeds.append(int(token))
+                except ValueError as err:
+                    raise ValueError(f"Malformed evaluation seed value: {token!r}") from err
+        else:
+            parsed_eval_seeds = None
+
+        result = run_learning_curve_benchmark(
+            exp_config,
+            budgets=budget_values,
+            training_seed=training_seed,
+            evaluation_seeds=parsed_eval_seeds,
+            evaluation_episodes=episodes,
+            deterministic=deterministic,
+            output_dir=output_dir,
+            plot=plot,
+        )
+    except Exception as err:
+        console.print(f"[bold red]Benchmark failed with error:[/bold red] {err}")
+        raise typer.Exit(code=1)
+
+    console.print(
+        Panel.fit(
+            f"[bold green]PPO learning-curve benchmark complete[/bold green]\n\n"
+            f"• [bold]Budgets:[/bold] {', '.join(str(b) for b in result.budgets)}\n"
+            f"• [bold]Training seed:[/bold] {result.training_seed}\n"
+            f"• [bold]Evaluation seeds:[/bold] {result.evaluation_seeds}\n"
+            f"• [bold]JSON:[/bold] {result.json_path}\n"
+            f"• [bold]CSV:[/bold] {result.csv_path}\n"
+            f"• [bold]Plot:[/bold] {result.plot_path if result.plot_path else 'not generated'}",
+            title="Learning Curve Benchmark",
+            border_style="green",
+        )
+    )
 
 
 @app.command()

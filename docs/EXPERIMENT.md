@@ -33,7 +33,60 @@ This document details the experimental methodology, hypotheses, benchmark variab
 
 ---
 
-## 3. Expected Results (Hypothesized Prior to Testing)
+## 3. PPO Learning-Curve Benchmark
+
+The budget benchmark trains a fresh PPO model from the same base configuration at each requested training budget. Every model is evaluated with the same ordered evaluation seeds, episode count per seed, and deterministic-action setting; evaluation uses the saved model and a separate fresh environment.
+
+```bash
+adaptive-rl benchmark budgets \
+  --config configs/drone_ppo.yaml \
+  --budgets 5000,10000,25000,50000 \
+  --training-seed 42 \
+  --eval-seeds 42,43,44,45,46 \
+  --episodes 20 \
+  --deterministic
+```
+
+The command reports the budget list and output locations when complete. By default, machine-readable artifacts are written beneath `artifacts/benchmarks/`:
+
+```text
+Learning Curve Benchmark
+PPO learning-curve benchmark complete
+Budgets: 5,000, 10,000, 25,000, 50,000
+Training seed: 42
+Evaluation seeds: [42, 43, 44, 45, 46]
+JSON: artifacts/benchmarks/learning_curve_budget.json
+CSV: artifacts/benchmarks/learning_curve_budget.csv
+Plot: not generated
+
+artifacts/benchmarks/
+├── learning_curve_budget.json
+├── learning_curve_budget.csv
+└── learning_curve/
+    ├── budget_5000/models/ppo_budget_5000_final.zip
+    ├── budget_10000/models/ppo_budget_10000_final.zip
+    └── ...
+```
+
+JSON contains benchmark settings, one result object per requested budget, and plot-ready series. CSV contains the same per-budget performance values. Pass `--plot` to additionally render `learning_curve_budget.png`; Matplotlib must be installed for that optional output.
+
+`budget_timesteps` records the requested budget, while `trained_timesteps` records the actual environment interactions reported by Stable-Baselines3. PPO collects complete rollouts, so a requested budget that is not a multiple of its configured `n_steps` can be exceeded up to the next rollout boundary. Compare results using `trained_timesteps` when budgets are not aligned to rollout sizes. Training duration is informational and should not be interpreted as a hardware-independent performance metric.
+
+Interpret the curves jointly: rising success rate and mean reward with a falling collision or timeout rate suggest improvement; flat metrics may indicate a plateau. A timeout is counted only when Gymnasium returns `truncated=True`, not merely because an episode has a particular length. The same seeds make evaluation conditions comparable, but do not remove variation from training or guarantee bit-for-bit results across hardware, PyTorch versions, or CUDA kernels.
+
+For a CI-sized run, copy the experiment YAML and set PPO `n_steps: 64` and `batch_size: 32` in that copy. Then run a short evaluation:
+
+```bash
+cp configs/drone_ppo_demo.yaml /tmp/drone_ppo_ci.yaml
+# Edit /tmp/drone_ppo_ci.yaml: set n_steps to 64 and batch_size to 32.
+adaptive-rl benchmark budgets --config /tmp/drone_ppo_ci.yaml --budgets 64,128 --episodes 1
+```
+
+The committed demo config uses `n_steps: 1024`, so those tiny budgets would be rounded up to its rollout boundary; keep the shipped training hyperparameters unchanged and use the copied config only for this CI-sized run.
+
+---
+
+## 4. Expected Results (Hypothesized Prior to Testing)
 
 1. **Random Action Baseline**:
    - Success Rate: $0.0\%$ (probability of randomly stumbling into a $1.5\text{ m}$ sphere across a $13,500\text{ m}^3$ arena without striking walls is practically zero).
@@ -50,7 +103,7 @@ This document details the experimental methodology, hypotheses, benchmark variab
 
 ---
 
-## 4. Actual Measured Results (Empirical Verification)
+## 5. Actual Measured Results (Empirical Verification)
 
 All results below were generated through genuine Python 3.12 CPU execution using the canonical project commands:
 ```bash
@@ -87,7 +140,7 @@ adaptive-rl experiment-density --model artifacts/models/drone_ppo_demo_final.zip
 
 ---
 
-## 5. Reproducibility Guarantee
+## 6. Reproducibility Guarantee
 
 To independently reproduce the identical metrics on any student laptop:
 ```bash

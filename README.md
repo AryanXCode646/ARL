@@ -76,10 +76,11 @@ AdaptiveRL is an educational reinforcement-learning project in which a PPO agent
 - **Deterministic Evaluation**: Reusable evaluation pipeline with reproducible seed control.
 - **Untrained Random Policy Baseline**: Built-in non-learning baseline to scientifically validate policy improvement.
 - **Obstacle-Density Experiment**: Controlled testing across 4, 6, and 8 obstacles to demonstrate environmental difficulty scaling.
-- **Command-Line Interface (CLI)**: Typer-based CLI for training, evaluation, environment inspection, and trajectory demonstration.
+- **PPO Learning-Curve Benchmark**: Train fresh PPO models across configurable timestep budgets and export evaluation metrics as JSON/CSV with optional plots.
+- **Command-Line Interface (CLI)**: Typer-based CLI for training, evaluation, learning-curve benchmarking, environment inspection, and trajectory demonstration.
 - **Streamlit + Plotly 3D GUI**: Interactive browser-based presentation flight deck with a trajectory playback scrubber and live sensor visualization.
 - **Training Checkpoints**: Automatic model weight checkpointing (`.zip`) and JSON metadata export.
-- **Automated Test Suite**: 49 unit and integration tests verifying kinematics, environment spaces, training lifecycle, and GUI charts.
+- **Automated Test Suite**: Unit and integration tests verify kinematics, environment spaces, training lifecycle, benchmark outputs, and GUI charts.
 
 ---
 
@@ -677,6 +678,8 @@ ARL/
 │   ├── __init__.py             # Package version declaration
 │   ├── cli.py                  # Typer CLI implementation
 │   ├── config.py               # Pydantic configuration schemas and YAML loader
+│   ├── benchmarking/
+│   │   └── learning_curve.py   # PPO budget sweep, evaluation, and JSON/CSV/plot exports
 │   ├── algorithms/
 │   │   ├── base.py             # BaseAlgorithm abstract interface
 │   │   ├── ppo.py              # Stable-Baselines3 PPO wrapper
@@ -694,12 +697,13 @@ ARL/
 │   └── training/
 │       ├── callbacks.py        # Episode metric logging and checkpoint callbacks
 │       └── trainer.py          # PPOTrainer training orchestrator
-└── tests/                      # 49 automated unit and integration tests
+└── tests/                      # Automated unit and integration tests
     ├── test_cli.py
     ├── test_configuration.py
     ├── test_drone.py
     ├── test_evaluation.py
     ├── test_gui.py
+    ├── test_learning_curve_benchmark.py
     └── test_training.py
 ```
 

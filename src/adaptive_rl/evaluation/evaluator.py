@@ -25,8 +25,9 @@ class EpisodeEvaluationRecord:
     seed: Optional[int]
     return_value: float
     episode_length: int
-    success: bool
-    collision: bool
+    success: Optional[bool]
+    collision: Optional[bool]
+    truncated: bool
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -36,6 +37,7 @@ class EpisodeEvaluationRecord:
             "episode_length": self.episode_length,
             "success": self.success,
             "collision": self.collision,
+            "truncated": self.truncated,
         }
 
 
@@ -73,8 +75,9 @@ class Evaluator:
         self.last_episode_records = []
         rewards: List[float] = []
         lengths: List[int] = []
-        successes: List[bool] = []
-        collisions: List[bool] = []
+        successes: List[Optional[bool]] = []
+        collisions: List[Optional[bool]] = []
+        truncations: List[bool] = []
 
         for ep in range(num_episodes):
             seed = (base_seed + ep) if base_seed is not None else None
@@ -83,6 +86,7 @@ class Evaluator:
             ep_length = 0
             done = False
             last_info = dict(info or {})
+            was_truncated = False
 
             while not done:
                 action, _ = self.algorithm.predict(obs, deterministic=deterministic)
@@ -90,15 +94,19 @@ class Evaluator:
                 ep_reward += float(reward)
                 ep_length += 1
                 last_info = step_info
+                was_truncated = bool(truncated)
                 done = terminated or truncated
 
-            is_success = bool(last_info.get("success", False))
-            is_collision = bool(last_info.get("collision", False))
+            success_value = last_info.get("success", last_info.get("is_success"))
+            collision_value = last_info.get("collision")
+            is_success = bool(success_value) if success_value is not None else None
+            is_collision = bool(collision_value) if collision_value is not None else None
 
             rewards.append(ep_reward)
             lengths.append(ep_length)
             successes.append(is_success)
             collisions.append(is_collision)
+            truncations.append(was_truncated)
 
             self.last_episode_records.append(
                 EpisodeEvaluationRecord(
@@ -108,6 +116,7 @@ class Evaluator:
                     episode_length=ep_length,
                     success=is_success,
                     collision=is_collision,
+                    truncated=was_truncated,
                 )
             )
 
@@ -118,8 +127,17 @@ class Evaluator:
         mean_len = float(np.mean(lengths))
         std_len = float(np.std(lengths))
 
-        succ_rate = float(sum(successes) / num_episodes)
-        coll_rate = float(sum(collisions) / num_episodes)
+        observed_successes = [value for value in successes if value is not None]
+        observed_collisions = [value for value in collisions if value is not None]
+        succ_rate = (
+            float(sum(observed_successes) / len(observed_successes)) if observed_successes else None
+        )
+        coll_rate = (
+            float(sum(observed_collisions) / len(observed_collisions))
+            if observed_collisions
+            else None
+        )
+        trunc_rate = float(sum(truncations) / num_episodes)
 
         return EvaluationMetrics(
             episodes=num_episodes,
@@ -129,6 +147,7 @@ class Evaluator:
             max_reward=max_rew,
             success_rate=succ_rate,
             collision_rate=coll_rate,
+            truncation_rate=trunc_rate,
             mean_episode_length=mean_len,
             std_episode_length=std_len,
             additional_metrics={
@@ -136,6 +155,8 @@ class Evaluator:
                 "all_lengths": lengths,
                 "deterministic": deterministic,
                 "base_seed": base_seed,
+                "truncation_count": int(sum(truncations)),
+                "timeout_rate": trunc_rate,
             },
         )
 
@@ -159,6 +180,9 @@ class Evaluator:
             else None,
             "collision_rate": round(metrics.collision_rate, 4)
             if metrics.collision_rate is not None
+            else None,
+            "truncation_rate": round(metrics.truncation_rate, 4)
+            if metrics.truncation_rate is not None
             else None,
             "mean_episode_length": round(metrics.mean_episode_length, 2),
             "std_episode_length": round(metrics.std_episode_length, 2),
