@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "adaptive-rl"
 version = "0.1.0"
-description = "AdaptiveRL — Multi-Environment Reinforcement Learning Platform"
+description = "AdaptiveRL — Reinforcement Learning for Simulated 3D Drone Navigation"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
@@ -17,13 +17,12 @@ keywords = [
     "gymnasium",
     "stable-baselines3",
     "autonomous-agents",
-    "multi-environment",
     "drone-navigation"
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Education",
     "Intended Audience :: Science/Research",
-    "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
@@ -46,17 +45,26 @@ rl = [
     "stable-baselines3>=2.3.0",
     "torch>=2.2.0",
 ]
+gui = [
+    "streamlit>=1.30.0",
+    "plotly>=5.18.0",
+]
 dev = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
     "ruff>=0.1.0",
     "mypy>=1.6.0",
 ]
-studio = [
-    "PySide6>=6.7.0",
-]
 all = [
-    "adaptive-rl[rl,dev,studio]"
+    "gymnasium>=1.0.0",
+    "stable-baselines3>=2.3.0",
+    "torch>=2.2.0",
+    "streamlit>=1.30.0",
+    "plotly>=5.18.0",
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.1.0",
+    "mypy>=1.6.0",
 ]
 
 [project.scripts]
@@ -88,5 +96,3 @@ warn_unused_configs = true
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
 ignore_missing_imports = true
-
-

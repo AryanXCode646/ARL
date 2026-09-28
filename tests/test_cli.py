@@ -1,12 +1,11 @@
 """Tests verifying Typer CLI commands and execution."""
 
+import re
 from pathlib import Path
 
 from typer.testing import CliRunner
 
 from adaptive_rl.cli import app
-from adaptive_rl.environments.registry import register, registry
-from adaptive_rl.environments.testing import DummyTestEnv
 
 runner = CliRunner()
 
@@ -16,42 +15,45 @@ def test_cli_help() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
     assert "AdaptiveRL" in result.output
-    assert "config" in result.output
-    assert "env" in result.output
-    assert "curriculum" in result.output
     assert "train" in result.output
     assert "evaluate" in result.output
+    assert "demo-drone" in result.output
+    assert "gui" in result.output
+    assert "experiment-density" in result.output
+    assert "config" in result.output
+    assert "env" in result.output
+
+
+def test_cli_gui_help() -> None:
+    """Verify adaptive-rl gui --help displays options."""
+    result = runner.invoke(app, ["gui", "--help"])
+    assert result.exit_code == 0
+    clean_output = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", result.output)
+    assert "--port" in clean_output
+    assert "--host" in clean_output
+    assert "Streamlit" in clean_output
+
+
+def test_cli_experiment_density_help() -> None:
+    """Verify adaptive-rl experiment-density --help displays options."""
+    result = runner.invoke(app, ["experiment-density", "--help"])
+    assert result.exit_code == 0
+    clean_output = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", result.output)
+    assert "--model" in clean_output
+    assert "--episodes" in clean_output
+    assert "--seed" in clean_output
 
 
 def test_cli_version() -> None:
-    """Verify adaptive-rl version displays package version and phase."""
+    """Verify adaptive-rl version displays package version."""
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
     assert "AdaptiveRL" in result.output
-    assert "Phase" in result.output
-
-
-def test_cli_info() -> None:
-    """Verify adaptive-rl info displays the roadmap table with completed phases."""
-    result = runner.invoke(app, ["info"])
-    assert result.exit_code == 0
-    assert "Roadmap" in result.output
-    assert "Phase 1" in result.output
-    assert "Phase 2" in result.output
-    assert "Phase 3" in result.output
-    assert "Phase 4" in result.output
-    assert "Phase 5" in result.output
-    assert "Phase 6" in result.output
-    assert "Phase 7" in result.output
-    assert "Phase 8" in result.output
-    assert "Phase 9" in result.output
-    assert "Phase 10" in result.output
-    assert "Phase 11" in result.output
 
 
 def test_cli_config_validate_success() -> None:
     """Verify adaptive-rl config validate succeeds for valid YAML configuration."""
-    config_path = Path(__file__).resolve().parent.parent / "configs" / "ppo.yaml"
+    config_path = Path(__file__).resolve().parent.parent / "configs" / "drone_ppo.yaml"
     result = runner.invoke(app, ["config", "validate", str(config_path)])
     assert result.exit_code == 0
     assert "Configuration is valid" in result.output
@@ -66,40 +68,9 @@ def test_cli_config_validate_failure(tmp_path: Path) -> None:
     assert "Configuration validation error" in result.output
 
 
-def test_cli_env_list_empty() -> None:
-    """Verify adaptive-rl env list displays informative notice when empty."""
-    from adaptive_rl.environments import register_default_environments
-
-    registry.clear()
-    try:
-        result = runner.invoke(app, ["env", "list"])
-        assert result.exit_code == 0
-        assert "Gymnasium environments" in result.output
-    finally:
-        register_default_environments()
-
-
-def test_cli_env_list_with_registered_env() -> None:
-    """Verify adaptive-rl env list displays registered environment metadata."""
-    from adaptive_rl.environments import register_default_environments
-
-    registry.clear()
-    try:
-        register(
-            "cli_dummy",
-            lambda: DummyTestEnv(),
-            metadata={"observation_type": "box", "action_type": "discrete"},
-        )
-        result = runner.invoke(app, ["env", "list"])
-        assert result.exit_code == 0
-        assert "cli_dummy" in result.output
-    finally:
-        register_default_environments()
-
-
 def test_cli_env_inspect_success() -> None:
-    """Verify adaptive-rl env inspect inspects spaces for a standard Gymnasium environment."""
-    result = runner.invoke(app, ["env", "inspect", "CartPole-v1"])
+    """Verify adaptive-rl env inspect inspects spaces for the drone environment."""
+    result = runner.invoke(app, ["env", "inspect", "drone"])
     assert result.exit_code == 0
     assert "verified successfully" in result.output
     assert "Observation Space" in result.output
@@ -113,32 +84,12 @@ def test_cli_env_inspect_failure() -> None:
     assert "Environment inspection failed" in result.output
 
 
-def test_cli_env_run_gridworld() -> None:
-    """Verify adaptive-rl env run executes GridWorld rollouts and displays metrics."""
-    result = runner.invoke(app, ["env", "run", "gridworld", "--steps", "10", "--seed", "42"])
-    assert result.exit_code == 0
-    assert "Starting simulation for 'gridworld'" in result.output
-    assert "Simulation Summary" in result.output
-    assert "Total Steps:" in result.output
-    assert "Cumulative Reward:" in result.output
-
-
-def test_cli_env_run_navigation() -> None:
-    """Verify adaptive-rl env run executes continuous Navigation rollouts and ASCII rendering."""
-    result = runner.invoke(app, ["env", "run", "navigation", "--steps", "5", "--seed", "42"])
-    assert result.exit_code == 0
-    assert "Starting simulation for 'navigation'" in result.output
-    assert "Simulation Summary" in result.output
-    assert "Total Steps:" in result.output
-    assert "Cumulative Reward:" in result.output
-
-
-def test_cli_train_execution(tmp_path: Path) -> None:
-    """Verify adaptive-rl train executes PPO training with overridden timesteps."""
-    test_config = tmp_path / "test_ppo.yaml"
+def test_cli_train_and_evaluate_and_demo(tmp_path: Path) -> None:
+    """End-to-end CLI test: train -> evaluate -> demo-drone."""
+    test_config = tmp_path / "test_drone_cli.yaml"
     test_config.write_text(
         f"""
-name: "cli_test_run"
+name: "cli_drone_test"
 seed: 42
 algorithm:
   name: "ppo"
@@ -148,11 +99,10 @@ algorithm:
   parameters:
     n_steps: 64
 environment:
-  name: "gridworld"
+  name: "drone"
   max_steps: 20
   parameters:
-    width: 5
-    height: 5
+    bounds: [20.0, 20.0, 10.0]
     num_obstacles: 2
 training:
   total_timesteps: 64
@@ -160,38 +110,74 @@ training:
   log_interval: 10
 evaluation:
   eval_episodes: 2
-output_dir: "{tmp_path / "results"}"
+output_dir: "{tmp_path / "artifacts"}"
 log_dir: "{tmp_path / "logs"}"
 """,
         encoding="utf-8",
     )
-    result = runner.invoke(app, ["train", "--config", str(test_config), "--timesteps", "64"])
-    assert result.exit_code == 0
-    assert "Starting Training: cli_test_run" in result.output
-    assert "Training Completed Successfully!" in result.output
-    assert "Total Timesteps Trained: 64" in result.output
 
+    # 1. Train command
+    train_res = runner.invoke(app, ["train", "--config", str(test_config), "--timesteps", "64"])
+    assert train_res.exit_code == 0
+    assert "Training Completed Successfully!" in train_res.output
 
-def test_cli_evaluate_missing_model(tmp_path: Path) -> None:
-    """Verify adaptive-rl evaluate displays informative error when model file is missing."""
-    config_path = tmp_path / "eval_cfg.yaml"
-    config_path.write_text(
-        """
-name: "no_model_test"
-seed: 42
-algorithm:
-  name: "ppo"
-environment:
-  name: "gridworld"
-  max_steps: 10
-training:
-  total_timesteps: 64
-evaluation:
-  eval_episodes: 2
-output_dir: "non_existent_results_dir"
-""",
-        encoding="utf-8",
+    model_file = tmp_path / "artifacts" / "models" / "cli_drone_test_final.zip"
+    assert model_file.exists()
+
+    # 2. Evaluate command
+    eval_report = tmp_path / "eval_report.json"
+    eval_res = runner.invoke(
+        app,
+        [
+            "evaluate",
+            "--config",
+            str(test_config),
+            "--model",
+            str(model_file),
+            "--episodes",
+            "2",
+            "--output-report",
+            str(eval_report),
+            "--compare-random",
+        ],
     )
-    result = runner.invoke(app, ["evaluate", "--config", str(config_path)])
-    assert result.exit_code == 1
-    assert "No model weights provided" in result.output
+    assert eval_res.exit_code == 0
+    assert "## Evaluation" in eval_res.output
+    assert "Policy Comparison" in eval_res.output
+    assert eval_report.exists()
+
+    # 2b. Experiment-density command
+    density_report = tmp_path / "density_test.json"
+    dense_res = runner.invoke(
+        app,
+        [
+            "experiment-density",
+            "--model",
+            str(model_file),
+            "--episodes",
+            "1",
+            "--output-report",
+            str(density_report),
+        ],
+    )
+    assert dense_res.exit_code == 0
+    assert "Obstacle-Density Results" in dense_res.output
+    assert density_report.exists()
+
+    # 3. Demo-drone command
+    demo_res = runner.invoke(
+        app,
+        [
+            "demo-drone",
+            "--model",
+            str(model_file),
+            "--config",
+            str(test_config),
+            "--seed",
+            "42",
+            "--max-steps",
+            "10",
+        ],
+    )
+    assert demo_res.exit_code == 0
+    assert ("SUCCESS" in demo_res.output) or ("FAILED" in demo_res.output)

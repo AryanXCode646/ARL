@@ -1,702 +1,843 @@
-# AdaptiveRL — Multi-Environment Reinforcement Learning Platform
+# AdaptiveRL
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](pyproject.toml)
-[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
+AdaptiveRL is an educational reinforcement-learning project in which a Proximal Policy Optimization (PPO) agent learns to navigate a simulated 3D drone through an obstacle-filled environment toward a target coordinate.
 
-**AdaptiveRL** is a modular, multi-environment reinforcement learning framework designed to train, evaluate, and benchmark adaptive agents across diverse problem domains—eventually scaling to autonomous 3D drone navigation in complex, dynamic obstacle fields.
+🌐 **Project Website & Interactive Showcase:** [https://stellarresearch.github.io/ARL/](https://stellarresearch.github.io/ARL/)
 
 ---
 
-## 1. Project Goals
+## Table of Contents
 
-* **Domain-Agnostic Core:** Decouple reinforcement learning algorithms from environment specifics using standardized Farama Gymnasium interfaces.
-* **Algorithm Adapters:** Wrap battle-tested algorithms (such as Stable-Baselines3 PPO and SAC) behind unified agent interfaces rather than reinventing algorithms from scratch.
-* **Reproducibility First:** Enforce deterministic seeding and declarative YAML configuration schemas for every experiment.
-* **Progressive Benchmarking:** Progress through discrete GridWorld, continuous 2D navigation, traffic flow control, and autonomous 3D drone navigation.
-* **Contributor Friendly:** Modern Python packaging (`src/` layout, `pyproject.toml`), automated test suites, type checking, and clean development workflows.
+- [What Is AdaptiveRL?](#what-is-adaptiverl)
+- [Features](#features)
+- [System Architecture](#system-architecture)
+- [Linux Support](#linux-support)
+- [Prerequisites](#prerequisites)
+- [Step 1 — Install System Requirements](#step-1--install-system-requirements)
+- [Step 2 — Download ARL](#step-2--download-arl)
+- [Step 3 — Check Python](#step-3--check-python)
+- [Step 4 — Create a Virtual Environment](#step-4--create-a-virtual-environment)
+- [Step 5 — Upgrade Packaging Tools](#step-5--upgrade-packaging-tools)
+- [Step 6 — Install AdaptiveRL](#step-6--install-adaptiverl)
+- [Step 7 — Verify Installation](#step-7--verify-installation)
+- [Step 8 — Run Tests](#step-8--run-tests)
+- [Step 9 — Train the PPO Agent](#step-9--train-the-ppo-agent)
+- [Training Output & Artifacts](#training-output--artifacts)
+- [Step 10 — Evaluate the Trained Agent](#step-10--evaluate-the-trained-agent)
+- [Step 11 — Run the Command-Line Drone Demo](#step-11--run-the-command-line-drone-demo)
+- [Step 12 — Launch the 3D GUI](#step-12--launch-the-3d-gui)
+- [GUI Walkthrough](#gui-walkthrough)
+- [Quick Start](#quick-start)
+- [Technical Details](#technical-details)
+- [Reward Function](#reward-function)
+- [PPO Explanation](#ppo-explanation)
+- [Measured Benchmark Results](#measured-benchmark-results)
+- [Project Structure](#project-structure)
+- [Troubleshooting](#troubleshooting)
+- [Leaving the Environment](#leaving-the-environment)
+- [Updating an Existing Installation](#updating-an-existing-installation)
+- [Clean Reinstall](#clean-reinstall)
+- [Limitations](#limitations)
+- [Contributing](#contributing)
+- [License](#license)
 
 ---
 
-## 2. Current Platform
+## What Is AdaptiveRL?
 
-AdaptiveRL is a reusable Gymnasium-based RL platform with a drone-navigation
-flagship and reproducible scientific evaluation. It currently provides:
+AdaptiveRL is an educational reinforcement-learning project in which a PPO agent learns to navigate a simulated 3D drone through an obstacle-filled environment toward a target.
 
-* GridWorld, continuous 2D navigation, traffic control, Drone3D, and disturbed Drone3D environments.
-* PPO and SAC adapters backed by Stable-Baselines3.
-* A* and RRT* classical baselines for planner comparisons.
-* Curriculum learning, multi-seed benchmarking, and disjoint-distribution generalization tests.
-* Experiment manifests containing configuration, environment, seed, package, and Git provenance.
-* CLI workflows for inspection, training, evaluation, experiments, benchmarking, and reporting.
+> [!IMPORTANT]
+> **THIS IS A SIMULATION.**
+>
+> This project is an academic computer-science demonstration running a simplified 3-DOF kinematic point-mass simulation.
+>
+> It is **NOT**:
+> - a real drone autopilot
+> - a real-world flight controller
+> - PX4 Autopilot
+> - ArduPilot
+> - a realistic 6-DOF quadrotor aerodynamics simulator
+> - production hardware software
 
 ---
 
-## 3. Architecture at a Glance
+## Features
 
+- **Custom 3D Drone Navigation Environment**: Farama Gymnasium-compliant continuous 3D translation simulation with aerodynamic drag damping.
+- **PPO Reinforcement Learning**: On-policy actor-critic learning using Stable-Baselines3.
+- **Continuous 3D Acceleration Actions**: Commanded acceleration controls in X, Y, and Z axes ($[-1.0, 1.0]^3$).
+- **29-Dimensional Observation Space**: Normalized drone position, velocity, target position, relative target vector, target distance, and LiDAR range readings.
+- **16-Ray Simulated LiDAR**: Spherical rangefinder calculating analytical distances to obstacles and arena boundaries.
+- **Procedurally Generated Spherical Obstacles**: Placed with guaranteed clearance from launch and goal points.
+- **Collision Detection**: Analytical spherical and bounding plane boundary collision detection.
+- **Target Detection**: Automatic goal-arrival termination within a calibrated target radius.
+- **Reward Shaping**: Multi-component reward encouraging progress toward the goal while penalizing collisions and excessive step duration.
+- **Deterministic Evaluation**: Reusable evaluation pipeline with reproducible seed control.
+- **Untrained Random Policy Baseline**: Built-in non-learning baseline to scientifically validate policy improvement.
+- **Obstacle-Density Experiment**: Controlled testing across 4, 6, and 8 obstacles to demonstrate environmental difficulty scaling.
+- **Command-Line Interface (CLI)**: Typer-based CLI for training, evaluation, environment inspection, and trajectory demonstration.
+- **Streamlit + Plotly 3D GUI**: Interactive browser-based presentation flight deck with a trajectory playback scrubber and live sensor visualization.
+- **Training Checkpoints**: Automatic model weight checkpointing (`.zip`) and JSON metadata export.
+- **Automated Test Suite**: 49 unit and integration tests verifying kinematics, environment spaces, training lifecycle, and GUI charts.
+
+---
+
+## System Architecture
+
+```text
+                           User
+                            │
+                            ▼
+             ┌──────────────────────────────┐
+             │     CLI / Streamlit GUI      │
+             └──────────────┬───────────────┘
+                            │
+                            ▼
+             ┌──────────────────────────────┐
+             │   PPO Training / Evaluation  │
+             └──────────────┬───────────────┘
+                            │
+                            ▼
+             ┌──────────────────────────────┐
+             │     DroneNavigation3DEnv     │
+             └──────────────┬───────────────┘
+                            │
+                            ▼
+             ┌──────────────────────────────┐
+             │      3D Kinematic Drone      │
+             └──────────────┬───────────────┘
+                            │
+                            ▼
+             ┌──────────────────────────────┐
+             │  Sensors + Obstacles + Target│
+             └──────────────┬───────────────┘
+                            │
+                            ▼
+             ┌──────────────────────────────┐
+             │         Observation          │
+             │           (29-dim)           │
+             └──────────────┬───────────────┘
+                            │
+                            ▼
+             ┌──────────────────────────────┐
+             │          PPO Agent           │
+             └──────────────┬───────────────┘
+                            │
+                            ▼
+             ┌──────────────────────────────┐
+             │      Continuous Action       │
+             │       (3D Acceleration)      │
+             └──────────────┬───────────────┘
+                            │
+                            ▼
+             ┌──────────────────────────────┐
+             │         Environment          │
+             └──────────────────────────────┘
 ```
-adaptive-rl/
-├── configs/                   # Declarative YAML experiment configurations
-│   ├── ppo.yaml
-│   ├── sac.yaml
-│   ├── navigation.yaml
-│   ├── curriculum_navigation.yaml
-│   ├── curriculum_gridworld.yaml
-│   └── drone.yaml
-├── docs/                      # Architectural specifications and research design
-│   ├── ARCHITECTURE.md
-│   ├── RESEARCH.md
-│   └── EXPERIMENTS.md
-├── experiments/               # Experiment output directories (.gitignore tracked)
-│   ├── results/
-│   └── logs/
-├── src/
-│   └── adaptive_rl/           # Core platform package
-│       ├── algorithms/        # Base algorithm interfaces and SB3 adapters (PPO, SAC)
-│       ├── environments/      # Gymnasium contracts, registry, and environments
-│       ├── planners/          # Classical baselines (A*, RRT*, make_planner, PlannerAdapter)
-│       ├── benchmarking/      # Multi-seed benchmarking and ablation runner
-│       ├── curriculum/        # Staged curriculum managers, wrappers, and callbacks
-│       ├── rewards/           # Modular reward function base interfaces
-│       ├── training/          # Trainers, callbacks, and checkpoint managers
-│       ├── evaluation/        # Benchmark evaluators, metrics, and scenarios
-│       ├── models/            # Model artifact storage and metadata management
-│       ├── visualization/     # Renderers, plot generation, and terminal dashboard
-│       ├── experiments/       # Experiment orchestration manager and manifests
-│       ├── config.py          # Pydantic schema validation & YAML parser
-│       └── cli.py             # Typer command-line interface
-└── tests/                     # Automated pytest suite
-```
 
-For in-depth architectural principles, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+### The Reinforcement Learning Loop
+1. **Drone observes environment**: The drone receives a 29-dimensional continuous state vector containing its normalized coordinates, velocity, relative goal vector, distance ratio, and 16 LiDAR raycast readings.
+2. **PPO receives observation**: The observation vector is passed through the actor-critic neural network (`MlpPolicy`).
+3. **PPO chooses acceleration action**: The policy network outputs a continuous 3D acceleration vector $(a_x, a_y, a_z) \in [-1.0, 1.0]^3$.
+4. **Environment updates drone state**: The kinematic engine updates linear velocity with aerodynamic drag damping and computes the new 3D position over a time step of $\Delta t = 0.1\text{ s}$.
+5. **Reward is calculated**: The environment computes step reward based on Euclidean progress toward the target, step duration penalties, and terminal bonuses/penalties (+100 for goal arrival, -100 for collision).
+6. **PPO learns from repeated interaction**: The agent stores transitions in a rollout buffer and performs gradient updates using the PPO clipped surrogate objective.
 
 ---
 
-## 4. Installation & Setup
+## Linux Support
 
-### Prerequisites
-* Python 3.10, 3.11, or 3.12 (tested and validated in CI)
-* `git`
+AdaptiveRL is developed and tested primarily on Linux.
 
-### Quick Start
+The project uses standard Python packaging and should work on Linux distributions providing Python 3.10+. The commands below use the distribution's package manager only to install Python and virtual-environment support.
+
+Examples of compatible Linux distributions include:
+- Ubuntu (20.04 LTS, 22.04 LTS, 24.04 LTS)
+- Debian (11 Bullseye, 12 Bookworm)
+- Linux Mint (20.x, 21.x)
+- Fedora (38, 39, 40+)
+- Arch Linux / Manjaro
+- openSUSE (Leap, Tumbleweed)
+- Pop!_OS
+
+---
+
+## Prerequisites
+
+Before installing AdaptiveRL, make sure your system meets the following requirements:
+
+- **Operating System**: Linux (x86_64 or aarch64)
+- **Python**: Version 3.10, 3.11, or 3.12
+- **Package Manager**: `pip`
+- **Version Control**: `git`
+- **Virtual Environment**: `python3-venv` (or equivalent package for your distribution)
+- **Disk Space**: ~1 GB free space for Python dependencies (PyTorch, Stable-Baselines3, Plotly, Streamlit)
+- **Network**: Internet connection for initial dependency installation
+
+Check your current tools in a terminal:
 ```bash
-# 1. Clone the repository
-git clone https://github.com/ashishsinghbora/ARL.git
+python3 --version
+git --version
+python3 -m pip --version
+```
+
+---
+
+## Step 1 — Install System Requirements
+
+Use your distribution's package manager to install Python 3, pip, venv, and git.
+
+### Ubuntu / Debian / Linux Mint / Pop!_OS
+```bash
+sudo apt update
+sudo apt install -y python3 python3-pip python3-venv git
+```
+
+### Fedora
+```bash
+sudo dnf install -y python3 python3-pip git
+```
+
+### Arch Linux / Manjaro
+```bash
+sudo pacman -Syu
+sudo pacman -S --needed python python-pip git
+```
+
+### openSUSE
+```bash
+sudo zypper install python3 python3-pip git
+```
+
+### Generic Fallback
+If Python 3.10+ and Git are already installed on your system, you can skip this step and proceed to Step 2.
+
+---
+
+## Step 2 — Download ARL
+
+Clone the canonical repository using Git and navigate into the project directory:
+
+```bash
+git clone https://github.com/StellarResearch/ARL.git
+cd ARL
+```
+
+Verify that you are in the repository:
+```bash
+git status
+ls
+```
+
+You should see files and directories similar to:
+```text
+app.py  artifacts  configs  CONTRIBUTING.md  docs  LICENSE  Makefile  pyproject.toml  README.md  src  tests
+```
+
+---
+
+## Step 3 — Check Python
+
+Verify that your system `python3` meets the minimum version requirement (Python 3.10 or newer):
+
+```bash
+python3 --version
+```
+
+- If your version is **3.10, 3.11, or 3.12**, you are ready to proceed.
+- If your version is lower than 3.10, you will need to install a newer Python version through your distribution's package repositories or using a tool such as `pyenv`.
+- Do **not** attempt to overwrite or force-replace your operating system's default Python symlink, as this can break system utilities.
+
+---
+
+## Step 4 — Create a Virtual Environment
+
+Create an isolated Python virtual environment inside the repository directory:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+Verify that the virtual environment is active:
+```bash
+python --version
+pip --version
+```
+
+Seeing `(.venv)` at the beginning of your terminal prompt confirms that the virtual environment is active.
+
+---
+
+## Step 5 — Upgrade Packaging Tools
+
+Upgrade the core packaging tools (`pip`, `setuptools`, and `wheel`) inside your virtual environment to ensure trouble-free package resolution:
+
+```bash
+python -m pip install --upgrade pip setuptools wheel
+```
+
+---
+
+## Step 6 — Install AdaptiveRL
+
+Install AdaptiveRL in editable mode (`-e`) with all dependencies:
+
+```bash
+python -m pip install -e ".[all]"
+```
+
+- `-e` installs the repository in editable development mode, allowing local code modifications to take effect immediately without reinstallation.
+- `[all]` installs the complete stack: runtime requirements, reinforcement learning libraries (Gymnasium, PyTorch, Stable-Baselines3), GUI tools (Streamlit, Plotly), and developer utilities (pytest, ruff, mypy).
+
+### Smaller Installation Options
+
+If you only need specific components, smaller dependency sets are available:
+
+- **Core only** (CLI, YAML config parsing, kinematics):
+  ```bash
+  python -m pip install -e .
+  ```
+- **Reinforcement Learning** (Gymnasium, Stable-Baselines3, PyTorch):
+  ```bash
+  python -m pip install -e ".[rl]"
+  ```
+- **Browser GUI** (Streamlit, Plotly):
+  ```bash
+  python -m pip install -e ".[gui]"
+  ```
+- **Development & Testing** (pytest, ruff, mypy):
+  ```bash
+  python -m pip install -e ".[dev]"
+  ```
+- **Full Installation (Recommended)**:
+  ```bash
+  python -m pip install -e ".[all]"
+  ```
+
+---
+
+## Step 7 — Verify Installation
+
+Verify that the CLI entry point and environment definitions are registered properly:
+
+```bash
+# 1. Check CLI options
+adaptive-rl --help
+
+# 2. Check package version
+adaptive-rl version
+
+# 3. Inspect the drone environment specification and observation dimensions
+adaptive-rl env inspect drone
+
+# 4. Validate the demonstration configuration YAML
+adaptive-rl config validate configs/drone_ppo_demo.yaml
+```
+
+If all four commands complete with green status messages, the installation is working correctly.
+
+---
+
+## Step 8 — Run Tests
+
+Run the automated test suite using `pytest`:
+
+```bash
+python -m pytest
+```
+
+For detailed per-test execution traces:
+```bash
+python -m pytest -v
+```
+
+The repository includes **49 automated unit and integration tests** verifying:
+- 3D kinematics equations and aerodynamic drag
+- 29-dimensional observation space bounds
+- Analytical 16-ray LiDAR raycasts and obstacle clearance
+- Farama Gymnasium compliance checker
+- Deterministic random seeding
+- PPO policy training and checkpoint persistence
+- Random policy baseline evaluation
+- Obstacle-density experiment scaling
+- Plotly 3D visualizer and chart generation
+- CLI commands and argument parsing
+
+---
+
+## Step 9 — Train the PPO Agent
+
+Training means the reinforcement learning agent interacts with the simulated 3D drone environment, accumulates experiences, and updates its neural network policy using PPO.
+
+### Fast Demonstration Training (Recommended for Evaluation)
+```bash
+adaptive-rl train --config configs/drone_ppo_demo.yaml
+```
+- **Budget**: 25,000 timesteps
+- **Estimated time**: ~20–35 seconds on a modern x86_64 CPU *(training time depends on your CPU and system configuration)*
+
+### Full Training Run
+```bash
+adaptive-rl train --config configs/drone_ppo.yaml
+```
+- **Budget**: 50,000 timesteps
+- **Estimated time**: ~40–70 seconds on CPU
+
+---
+
+## Training Output & Artifacts
+
+When a training run completes, artifacts are automatically written to disk:
+
+- **Trained Model Checkpoint**:  
+  `artifacts/models/{experiment_name}_final.zip`  
+  *(e.g., `artifacts/models/drone_ppo_demo_final.zip`)*
+- **Training Metadata & Loss/Reward Log**:  
+  `artifacts/metadata/{experiment_name}_training.json`  
+  *(contains total timesteps, duration in seconds, mean reward, and per-episode return lists)*
+- **Periodic Checkpoints** (if configured):  
+  `artifacts/checkpoints/{experiment_name}/`
+
+---
+
+## Step 10 — Evaluate the Trained Agent
+
+Evaluate the saved policy weights across multiple deterministic test episodes:
+
+```bash
+adaptive-rl evaluate \
+  --config configs/drone_ppo_demo.yaml \
+  --model artifacts/models/drone_ppo_demo_final.zip \
+  --episodes 20
+```
+
+### Compare Against the Random Action Baseline
+To scientifically prove that the agent learned purposeful navigation rather than succeeding by random chance, include the `--compare-random` flag:
+
+```bash
+adaptive-rl evaluate \
+  --config configs/drone_ppo_demo.yaml \
+  --model artifacts/models/drone_ppo_demo_final.zip \
+  --episodes 20 \
+  --compare-random
+```
+
+This prints a formatted comparison table displaying:
+- **Success Rate (%)**: Percentage of episodes reaching within 1.5m of the target.
+- **Collision Rate (%)**: Percentage of episodes colliding with obstacles or arena walls.
+- **Mean Reward**: Average cumulative episodic return ($\pm$ standard deviation).
+- **Mean Steps**: Average flight duration before termination or truncation.
+
+The evaluation report is saved to `artifacts/evaluation.json`.
+
+View all evaluation options:
+```bash
+adaptive-rl evaluate --help
+```
+
+---
+
+## Step 11 — Run the Command-Line Drone Demo
+
+Run a single deterministic flight demonstration in the terminal:
+
+```bash
+adaptive-rl demo-drone \
+  --model artifacts/models/drone_ppo_demo_final.zip \
+  --seed 42
+```
+
+The terminal outputs real-time step telemetry:
+- **Step number**
+- **Altitude ($Z$ coordinate in meters)**
+- **Ground speed ($\text{m/s}$)**
+- **Distance to goal ($\text{m}$)**
+- **Proximity to nearest obstacle ($\text{m}$)**
+- **Step reward**
+- **Final outcome banner (`SUCCESS` or `FAILED / COLLISION`)**
+
+---
+
+## Step 12 — Launch the 3D GUI
+
+Launch the interactive presentation flight deck in your default web browser:
+
+```bash
+adaptive-rl gui
+```
+
+Alternatively, you can launch Streamlit directly:
+```bash
+streamlit run app.py
+```
+
+- **Local Address**: `http://localhost:8501`
+- **To Stop the GUI Server**: Press `Ctrl+C` in the terminal.
+
+If port 8501 is already occupied by another application, pass a custom port:
+```bash
+adaptive-rl gui --port 8502
+```
+
+---
+
+## GUI Walkthrough
+
+The browser GUI is organized into 5 dedicated demonstration panels:
+
+### 1. 🎮 Live 3D Flight Demo
+- **3D Flight Arena**: Renders bounding arena wireframes, red obstacle spheres, green diamond target, initial launch position, and continuous 3D flight trajectory.
+- **LiDAR Visualization**: Visualizes 16-ray spherical rangefinder beams cast from the drone.
+- **Trajectory Playback Scrubber**: Scrub forward and backward in time to inspect obstacle clearances, velocity vectors, and altitude changes step-by-step.
+- **Controls**: Choose policy checkpoint, adjust procedural obstacle count (0 to 8), toggle LiDAR beams, and set deterministic seeds.
+
+### 2. 📈 Train PPO
+- **Interactive Controls**: Select training budget (5k, 10k, 25k, 50k steps), learning rate, and random seed.
+- **CPU Execution**: Executes real Stable-Baselines3 PPO training with live status indicators.
+- **Training Curve**: Displays an interactive Plotly chart of raw episode returns and 10-episode moving averages.
+- **Safety**: Automatically disables simultaneous training jobs to prevent resource contention.
+
+### 3. 📊 Benchmark Evaluation & Baseline
+- **Head-to-Head Comparison**: Evaluates the trained PPO agent against the untrained Random Policy baseline under identical random seeds.
+- **Metric Summaries**: Displays Success Rate, Collision Rate, Mean Return, and Episode Length.
+- **Visual Comparison**: Interactive grouped bar chart comparing survival and collision rates.
+- **Export**: Saves formal benchmark reports to `artifacts/evaluation.json`.
+
+### 4. 🎯 Difficulty Experiment (Obstacle Density)
+- **Difficulty Scaling**: Evaluates the policy across **4, 6, and 8 obstacles** under controlled seeds.
+- **Empirical Demonstration**: Shows how increasing obstacle density constrains safe flight corridors, leading to higher collision rates.
+- **Honest Display**: Displays "Not evaluated" until executed by the user; no placeholder or fake numbers.
+- **Export**: Exports results to `artifacts/obstacle_density_experiment.json`.
+
+### 5. 📘 About & Architecture
+- **Step-by-Step "How It Works"**: Beginner- and professor-friendly 7-step explanation of the RL control loop.
+- **Technical Specifications**: Full 29-dimensional observation breakdown, 3D continuous acceleration space, and kinematic state formulas.
+- **Honest Academic Scope**: Explicit documentation of point-mass kinematics, geometric raycasts, and simulation boundaries.
+
+---
+
+## Quick Start
+
+For a new Linux user on Ubuntu or Debian, here is the complete sequence from a fresh terminal:
+
+```bash
+# 1. Install system prerequisites
+sudo apt update && sudo apt install -y python3 python3-pip python3-venv git
+
+# 2. Clone repository and enter directory
+git clone https://github.com/StellarResearch/ARL.git
 cd ARL
 
-# 2. Create and activate a virtual environment
+# 3. Create and activate virtual environment
 python3 -m venv .venv
 source .venv/bin/activate
 
-# 3. Install AdaptiveRL (minimal: planners, config, CLI)
+# 4. Upgrade packaging tools and install AdaptiveRL
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -e ".[all]"
 
-# Or install the optional desktop research interface
-pip install -e ".[studio]"
-pip install -e .
-
-# Or install for full development (RL engines, SB3, PyTorch, dev tools)
-pip install -e ".[all]"
-```
-
----
-
-## 5. Command-Line Interface (CLI)
-
-AdaptiveRL includes a CLI tool (`adaptive-rl`):
-
-```bash
-# View help and available commands
+# 5. Verify installation and run tests
 adaptive-rl --help
-
-# Show installed version and current milestone
-adaptive-rl version
-
-
-# Launch AdaptiveRL Studio desktop interface
-adaptive-rl studio
-```
-
-### AdaptiveRL Studio
-
-AdaptiveRL Studio is an optional PySide6 desktop control center for the existing
-framework. It provides an experiment overview, environment episode visualization,
-background training through the existing trainer API, and experiment artifact
-inspection. It does not implement a second RL engine.
-
-Use `--output-dir` to point Studio at another experiment artifact directory:
-
-```bash
-adaptive-rl studio --output-dir experiments/results
-```
-
-```bash
-# Inspect development roadmap and completed phases
-adaptive-rl info
-
-# List and inspect registered environments
-adaptive-rl env list
-adaptive-rl env inspect gridworld
-
-# Run an interactive or simulated rollout
-adaptive-rl env run gridworld --steps 15 --seed 42
-```
-
----
-
-## 6. Procedural GridWorld Environment
-
-AdaptiveRL provides a procedurally generated 2D grid navigation environment compliant with the Farama Gymnasium contract.
-
-* **Observation Space:** `Box(4,)` containing normalized coordinates `[agent_x, agent_y, goal_x, goal_y]`.
-* **Action Space:** `Discrete(4)` corresponding to `UP (0)`, `DOWN (1)`, `LEFT (2)`, `RIGHT (3)`.
-* **Rewards:** `+100.0` for reaching goal, `-100.0` for obstacle collision, `-1.0` per step.
-* **Solvability Guarantee:** Breadth-First Search (BFS) path verification guarantees a valid collision-free path exists for every generated obstacle layout.
-
-### Python Example
-
-```python
-from adaptive_rl.environments import make_env
-
-# Instantiate via factory with custom dimensions and obstacle count
-env = make_env("gridworld", width=6, height=5, num_obstacles=3, max_steps=50)
-
-obs, info = env.reset(seed=42)
-print("Initial observation:", obs)
-env.render()
-
-# Step through the environment
-obs, reward, terminated, truncated, info = env.step(1)  # DOWN
-env.close()
-```
-
----
-
-## 7. PPO Training Engine
-
-AdaptiveRL features an end-to-end PPO training engine integrating Stable-Baselines3 with automated metric logging callbacks and model checkpoint management.
-
-### Training via CLI
-
-```bash
-# Train on GridWorld with PPO for 5,000 steps
-adaptive-rl train --config configs/gridworld_ppo.yaml --timesteps 5000
-
-# Train on standard CartPole baseline
-adaptive-rl train --config configs/ppo.yaml --timesteps 10000
-```
-
-### Training via Python API
-
-```python
-from adaptive_rl.config import load_config
-from adaptive_rl.training import PPOTrainer
-
-# 1. Load experiment configuration
-config = load_config("configs/gridworld_ppo.yaml")
-
-# 2. Instantiate trainer and run optimization
-trainer = PPOTrainer(config=config)
-result = trainer.fit()
-
-print(f"Trained {result.total_timesteps} steps across {result.episodes_completed} episodes.")
-print(f"Final model saved to: {result.final_model_path}")
-print(f"Saved {len(result.checkpoints)} periodic checkpoints.")
-```
-
----
-
-## 8. Evaluation Engine & Standard Metrics
-
-AdaptiveRL provides a standardized evaluation benchmark engine to measure policy performance across fixed episode sets and configurable scenarios, with automatic export to JSON reports.
-
-* **Standard Metrics Tracked:** Mean episodic return ± standard deviation, min/max returns, success rate, collision rate, and mean episode length ± standard deviation.
-* **Deterministic Seeding:** Enforces deterministic seeding across evaluation episodes and environments.
-* **Scenario Testing:** Benchmarks agents across curated challenge scenarios (e.g. varying obstacle densities).
-
-### Evaluation via CLI
-
-```bash
-# Evaluate a trained model over 20 deterministic episodes
-adaptive-rl evaluate --config configs/gridworld_ppo.yaml --model experiments/results/models/gridworld_ppo_baseline_final.zip --episodes 20
-
-# Export structured aggregate JSON metrics report
-adaptive-rl evaluate --config configs/gridworld_ppo.yaml --model experiments/results/models/gridworld_ppo_baseline_final.zip --episodes 20 --output-report experiments/results/eval_report.json
-
-# Export per-episode metrics report in JSON or CSV
-adaptive-rl evaluate --config configs/gridworld_ppo.yaml --model experiments/results/models/gridworld_ppo_baseline_final.zip --episodes 20 --episode-report experiments/results/episodes.json
-adaptive-rl evaluate --config configs/gridworld_ppo.yaml --model experiments/results/models/gridworld_ppo_baseline_final.zip --episodes 20 -er experiments/results/episodes.csv
-```
-
-#### Episode-Level Export
-
-The `--episode-report` (`-er`) option exports individual evaluation episode records without re-running the evaluation pass. Supported file formats: `.json` and `.csv`.
-
-* **Relationship to `--output-report`:** `--output-report` (`-o`) saves aggregate statistics across the full evaluation benchmark (`EvaluationMetrics`: mean reward, success rate, collision rate, episode length). In contrast, `--episode-report` (`-er`) exports fine-grained records (`EpisodeEvaluationRecord`), with exactly one record per evaluated episode. Both flags can be used together in a single evaluation run.
-* **Scenario Support:** When evaluating across curated scenarios (`evaluate_scenarios()`), records from all scenarios are aggregated into canonical records preserving their individual scenario identifiers, seeds, and episode indices.
-
-##### Output Structure & Schema
-
-Each record contains the following fields:
-
-* `episode_index` (`int`): Zero-based index of the episode.
-* `seed` (`int | null`): Deterministic random seed used for the episode environment reset.
-* `environment` (`str`): Environment identifier.
-* `scenario` (`str | null`): Scenario name if evaluated within a scenario benchmark, or `null`.
-* `return` (`float`): Total cumulative episodic return.
-* `episode_length` (`int`): Total timesteps elapsed during the episode.
-* `success` (`bool | null`): True if successful, False if failed, or null if undefined.
-* `collision` (`bool | null`): True if collision occurred, False if collision-free, or null if undefined.
-
-##### CSV Column Order
-```text
-episode_index,seed,environment,scenario,return,episode_length,success,collision
-```
-
-### Evaluation via Python API
-
-```python
-from adaptive_rl.algorithms.ppo import PPOAlgorithm
-from adaptive_rl.environments.registry import make_env
-from adaptive_rl.evaluation import EpisodeEvaluationRecord, EvaluationScenario, Evaluator
-
-# 1. Instantiate environment and loaded agent
-env = make_env("gridworld", width=6, height=5, num_obstacles=3)
-algo = PPOAlgorithm.from_pretrained(
-    "experiments/results/models/gridworld_ppo_baseline_final.zip", env=env
-)
-
-# 2. Run multi-episode evaluation
-evaluator = Evaluator(algorithm=algo, env=env)
-metrics = evaluator.evaluate(num_episodes=20, deterministic=True, base_seed=42)
-
-print(f"Mean Return: {metrics.mean_reward:.2f} ± {metrics.std_reward:.2f}")
-print(f"Success Rate: {metrics.success_rate * 100:.1f}%")
-print(f"Collision Rate: {metrics.collision_rate * 100:.1f}%")
-
-# 3. Export aggregate JSON report
-evaluator.save_report(metrics, "experiments/results/eval_report.json")
-
-# 4. Export per-episode metrics (JSON or CSV)
-evaluator.save_episode_report(evaluator.last_episode_records, "experiments/results/episodes.json")
-evaluator.save_episode_report(evaluator.last_episode_records, "experiments/results/episodes.csv")
-```
-
----
-
-## 9. Continuous 2D Navigation & SAC Algorithm
-
-Continuous navigation introduces continuous action space control and distance-based rangefinder (LiDAR) sensing.
-
-* **Continuous Action Space:** `Box(-1.0, 1.0, shape=(2,))` governing continuous 2D planar velocity $[v_x, v_y]$.
-* **14-Dimensional Observation Space:**
-  * Normalized agent coordinates $[x/W, y/H] \in [0, 1]^2$
-  * Normalized target goal coordinates $[g_x/W, g_y/H] \in [0, 1]^2$
-  * Relative target offset vector $[(g_x - x)/W, (g_y - y)/H] \in [-1, 1]^2$
-  * 8-Ray LiDAR distance readings normalized to $[0, 1]$ computed via analytical ray-casting against circular obstacles and arena perimeter walls.
-* **Collision Physics & Rewards:** Non-overlapping procedural circular obstacles with safety margins around start/goal. Terminal rewards: $+100.0$ for goal arrival, $-100.0$ for collision with obstacle/wall, plus dense progress shaping.
-* **Soft Actor-Critic (SAC) Engine:** SB3-backed `SACAlgorithm` wrapper and `SACTrainer` pipeline for sample-efficient continuous actor-critic optimization.
-
-### Continuous Navigation via CLI
-
-```bash
-# Simulate 10 continuous navigation steps with ASCII visualization
-adaptive-rl env run navigation --steps 10 --seed 42
-
-# Train SAC continuous control agent on navigation
-adaptive-rl train --config configs/navigation.yaml --timesteps 10000
-```
-
-### Continuous Navigation via Python API
-
-```python
-import numpy as np
-from adaptive_rl.environments import make_env
-from adaptive_rl.algorithms import SACAlgorithm
-
-# 1. Instantiate continuous navigation environment
-env = make_env("navigation", arena_width=20.0, arena_height=20.0, num_obstacles=5)
-obs, info = env.reset(seed=42)
-
-# 2. Train SAC agent
-agent = SACAlgorithm(env=env, learning_rate=3e-4, buffer_size=50000)
-agent.train(total_timesteps=10000)
-
-# 3. Predict continuous velocity action
-action, _ = agent.predict(obs, deterministic=True)
-obs, reward, terminated, truncated, info = env.step(action)
-print(f"Action: {action}, Reward: {reward:.2f}, Dist to Goal: {info['distance_to_goal']:.2f}")
-env.close()
-```
-
----
-
-## 10. Curriculum Learning Engine
-
-AdaptiveRL features a flexible, automated curriculum learning subsystem that gradually escalates task complexity based on empirical agent proficiency.
-
-* **Curriculum Stages:** Encapsulate environmental complexity parameters (e.g. obstacle density, arena dimensions), advancement criteria (rolling success rate $\ge$ threshold, mean reward $\ge$ threshold), and maximum timestep timeouts.
-* **Curriculum State Machine:** `Curriculum` tracks the active milestone, evaluates graduation rules over a rolling window, records stage transition events with timestamps, and exports JSON audit reports.
-* **Dynamic Gymnasium Wrapper:** `CurriculumEnvWrapper` intercepts resets and steps, injecting the active stage's configuration parameters directly into the environment without re-instantiation.
-* **Callback Coordination:** `CurriculumCallback` bridges training optimization loops and curriculum state, triggering seamless transitions when graduation thresholds are achieved.
-* **Built-in Presets:**
-  * **Navigation (4 tiers):** `Clear Corridor` (0 obstacles) $\rightarrow$ `Sparse Clutter` (2 obstacles) $\rightarrow$ `Standard Density` (5 obstacles) $\rightarrow$ `Dense Hazard Field` (8 obstacles).
-  * **GridWorld (4 tiers):** `Open Grid` (4x4, 0 obstacles) $\rightarrow$ `Light Clutter` (5x5, 2 obstacles) $\rightarrow$ `Standard Grid` (6x5, 4 obstacles) $\rightarrow$ `Dense Labyrinth` (7x7, 6 obstacles).
-
-### Curriculum via CLI
-
-```bash
-# List available curriculum presets
-adaptive-rl curriculum list
-
-# Inspect stages, progression thresholds, and parameters of a preset
-adaptive-rl curriculum inspect navigation
-
-# Train agent with automated curriculum progression
-adaptive-rl train --config configs/curriculum_navigation.yaml
-```
-
-### Curriculum via Python API
-
-```python
-from adaptive_rl.config import load_config
-from adaptive_rl.curriculum import CurriculumTrainer
-
-# 1. Load experiment configuration with curriculum block enabled
-config = load_config("configs/curriculum_navigation.yaml")
-
-# 2. Train agent with automated curriculum transitions
-trainer = CurriculumTrainer(config=config)
-result = trainer.fit()
-
-print(f"Trained {result.total_timesteps} steps across {result.episodes_completed} episodes.")
-print(f"Final model saved to: {result.final_model_path}")
-```
-
----
-
-## 11. Traffic Signal Optimization Environment
-
-Traffic demonstrates the domain-agnostic capability of AdaptiveRL through a discrete, non-spatial queuing optimization benchmark: a **4-way signalized intersection** (`TrafficSignalEnv`, registered as `traffic` and `traffic_signal`).
-
-* **Intersection Queuing Dynamics:**
-  * 4 directional approach lanes: **North (N)**, **South (S)**, **East (E)**, and **West (W)**.
-  * Stochastic Poisson arrival process per approach with configurable arrival rates $\lambda = (\lambda_N, \lambda_S, \lambda_E, \lambda_W)$.
-  * Saturation discharge throughput: Green approaches discharge up to `departure_rate` vehicles per step; Red approaches discharge 0.
-  * FIFO vehicle delay tracking: Accurately records individual waiting time, cumulative delay, and maximum waiting times.
-* **Farama Gymnasium Spaces:**
-  * **Observation Space:** `Box(low=0.0, high=1.0, shape=(10,), dtype=np.float32)`
-    * Normalized queue lengths: $[q_N, q_S, q_E, q_W] / \text{max\_queue}$
-    * Normalized waiting times: $[w_N, w_S, w_E, w_W] / \text{max\_wait\_limit}$
-    * Current signal phase: $0.0$ for North-South Green, $1.0$ for East-West Green
-    * Phase duration ratio: $\min(\text{duration} / \text{max\_phase\_duration}, 1.0)$
-  * **Action Space:** `Discrete(2)`
-    * `0`: North-South Green (East & West Red)
-    * `1`: East-West Green (North & South Red)
-* **Multi-Objective Reward Function:**
-  $$R_t = c_{\text{dep}} \cdot \Delta_{\text{departures}} - c_q \sum q_i - c_w \max(w_i) - c_{\text{switch}} \cdot \mathbb{I}_{\text{switch}} - c_{\text{prem}} \cdot \mathbb{I}_{\text{premature}}$$
-  Incentivizes clearing vehicle queues while penalizing excessive signal flickering and premature phase switching before minimum green time.
-* **ASCII Visualizer:**
-```
-+--------------------------------------------------+
-|   4-WAY SIGNALIZED INTERSECTION OPTIMIZATION     |
-+--------------------------------------------------+
-| Phase: NORTH_SOUTH (Green)  Step: 012/100        |
-| Duration: 04 | Switches: 02 | Cleared: 018       |
-+--------------------------------------------------+
-                 |   N   |                          
-                 | Q:02  | (Wait: 03)             
-                 |  [G]  |                          
-  ---------------+       +---------------           
-   W  Q:04  [R]              [R]  Q:01  E    
-  (Wait: 08)                       (Wait: 02)     
-  ---------------+       +---------------           
-                 |  [G]  |                          
-                 | Q:01  | (Wait: 01)             
-                 |   S   |                          
-+--------------------------------------------------+
-  Queues: [N=2, S=1, E=1, W=4] | Total: 08
-+--------------------------------------------------+
-```
-
-### Traffic Signal via CLI
-
-```bash
-# Simulate 10 traffic steps with live ASCII rendering
-adaptive-rl env run traffic --steps 10 --seed 42
-
-# Inspect spaces and metadata
-adaptive-rl env inspect traffic
-
-# Train PPO agent on traffic signal optimization
-adaptive-rl train --config configs/traffic_ppo.yaml
-```
-
-### Traffic Signal via Python API
-
-```python
-from adaptive_rl.environments import make_env
-from adaptive_rl.algorithms import PPOAlgorithm
-
-# 1. Create 4-way traffic signal environment
-env = make_env("traffic", max_steps=100, arrival_rates=(0.35, 0.35, 0.2, 0.2))
-obs, info = env.reset(seed=42)
-
-# 2. Train PPO policy
-agent = PPOAlgorithm(env=env, learning_rate=3e-4)
-agent.train(total_timesteps=10000)
-
-# 3. Step environment with optimized signal controls
-action, _ = agent.predict(obs, deterministic=True)
-obs, reward, terminated, truncated, step_info = env.step(action)
-print(
-    f"Phase: {step_info['phase_name']}, Total Queue: {step_info['total_queue']}, Reward: {reward:.2f}"
-)
-env.close()
-```
-
----
-
-## 12. Autonomous 3D Drone Navigation Environment
-
-The flagship environment is a continuous 3D quadrotor flight environment (`DroneNavigation3DEnv`, registered as `drone`, `drone_3d`, and `drone_navigation`), combining second-order translation kinematics, aerodynamic drag damping, procedural 3D spherical obstacle fields, and multi-directional 3D spherical LiDAR rangefinders.
-
-* **3D Kinematic Physics Model:**
-  * Translational state: position $\mathbf{p} = [x, y, z]^T \in [0, X_{\max}] \times [0, Y_{\max}] \times [0, Z_{\max}]$, velocity $\mathbf{v} = [v_x, v_y, v_z]^T$, and acceleration $\mathbf{a} = [a_x, a_y, a_z]^T$.
-  * Equations of motion:
-    $$\frac{d\mathbf{v}}{dt} = \mathbf{a} - c_d \mathbf{v}$$
-    $$\frac{d\mathbf{p}}{dt} = \mathbf{v}$$
-    Integrated via semi-implicit Euler integration with maximum velocity spherical clamping ($\|\mathbf{v}\| \le v_{\max}$).
-* **Farama Gymnasium Spaces:**
-  * **Continuous Action Space:** `Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)` representing commanded 3D accelerations $[a_x, a_y, a_z]$, scaled by $a_{\max} = 4.0\ \text{m/s}^2$.
-  * **Continuous Observation Space:** `Box(low=-1.0, high=1.0, shape=(29,), dtype=np.float32)`
-    * $[0:3]$: Normalized 3D position $\mathbf{p} / \mathbf{B} \in [0, 1]^3$
-    * $[3:6]$: Normalized 3D velocity $\mathbf{v} / v_{\max} \in [-1, 1]^3$
-    * $[6:9]$: Normalized 3D waypoint target $\mathbf{g} / \mathbf{B} \in [0, 1]^3$
-    * $[9:12]$: Relative target vector $(\mathbf{g} - \mathbf{p}) / \mathbf{B} \in [-1, 1]^3$
-    * $[12]$: Normalized Euclidean distance to goal $\|\mathbf{g} - \mathbf{p}\| / D_{\max} \in [0, 1]$
-    * $[13:29]$: 16-ray 3D LiDAR distance rangefinder readings $\in [0, 1]^{16}$ (8 horizontal equatorial rays, 4 upper hemispheric rays $+45^\circ$, 4 lower hemispheric rays $-45^\circ$) computed via analytical 3D ray-sphere and ray-box slab intersections.
-* **Procedural Obstacle Field:**
-  * Generates non-overlapping spherical obstacles with guaranteed safe radius clearance around both drone takeoff position and destination waypoint.
-* **Reward Structure:**
-  * $+100.0$: Target waypoint reached within `target_radius`.
-  * $-100.0$: Collision with obstacle sphere or bounding perimeter wall.
-  * $+w_{\text{progress}} \cdot (d_{t-1} - d_t)$: Dense potential-based progress reward.
-  * $-0.05$: Per-step time penalty.
-  * $-0.01 \cdot \|\mathbf{a}\|^2$: Action effort / control smoothness regularization.
-* **ASCII 3D Flight Deck:**
-```
-+----------------------------------------------------------------+
-|               AUTONOMOUS 3D DRONE FLIGHT DECK                  |
-+----------------------------------------------------------------+
-| Step: 014/300 | Altitude (Z):  12.4m | Speed:  4.2 m/s         |
-| Position [X, Y, Z]: [ 18.2,  22.1,  12.4]                      |
-| Velocity [Vx,Vy,Vz]: [  2.8,   3.1,   0.5]                     |
-| Waypoint [Gx,Gy,Gz]: [ 45.0,  45.0,  20.0]                     |
-| Range to Target:  35.6m | Obstacles in Area: 08                |
-+----------------------------------------------------------------+
-  Flight Arena Boundaries: [0..50, 0..50, 0..25] m
-+----------------------------------------------------------------+
-```
-
-### Drone Navigation via CLI
-
-```bash
-# Simulate 10 continuous 3D drone steps with live flight deck visualization
-adaptive-rl env run drone --steps 10 --seed 42
-
-# Inspect 3D observation and action spaces
 adaptive-rl env inspect drone
+python -m pytest
 
-# Train continuous PPO on 3D drone navigation
-adaptive-rl train --config configs/drone.yaml
+# 6. Train demonstration model (~25s on CPU)
+adaptive-rl train --config configs/drone_ppo_demo.yaml
 
-# Train continuous SAC on 3D drone navigation
-adaptive-rl train --config configs/drone_sac.yaml
-```
+# 7. Evaluate PPO vs Random baseline
+adaptive-rl evaluate \
+  --config configs/drone_ppo_demo.yaml \
+  --model artifacts/models/drone_ppo_demo_final.zip \
+  --episodes 20 \
+  --compare-random
 
-### Drone Navigation via Python API
-
-```python
-import numpy as np
-from adaptive_rl.environments import make_env
-from adaptive_rl.algorithms import SACAlgorithm
-
-# 1. Instantiate 3D continuous drone environment
-env = make_env("drone", bounds=(50.0, 50.0, 25.0), num_obstacles=8)
-obs, info = env.reset(seed=42)
-
-# 2. Train SAC agent for continuous 3D control
-agent = SACAlgorithm(env=env, learning_rate=3e-4, buffer_size=50000)
-agent.train(total_timesteps=100000)
-
-# 3. Predict continuous 3D acceleration command
-action, _ = agent.predict(obs, deterministic=True)
-obs, reward, terminated, truncated, step_info = env.step(action)
-print(
-    f"Altitude: {step_info['altitude']:.1f}m, Distance: {step_info['distance_to_goal']:.1f}m, Reward: {reward:.2f}"
-)
-env.close()
+# 8. Launch interactive 3D browser GUI
+adaptive-rl gui
 ```
 
 ---
 
-## 13. Drone Disturbances and Constraints
+## Technical Details
 
-The disturbed drone environment extends 3D quadrotor flight navigation with realistic atmospheric disturbances, electro-mechanical energy constraints, and moving obstacle hazards.
+### Action Space
+```text
+Box(-1.0, 1.0, shape=(3,), dtype=float32)
+```
+The action represents a continuous 3D acceleration command $(u_x, u_y, u_z) \in [-1.0, 1.0]^3$. The environment scales these values to physical commanded acceleration:
+$$\mathbf{a}_t = \mathbf{u}_t \cdot a_{\max} \quad (a_{\max} = 4.0\text{ m/s}^2)$$
 
-### Environmental Features:
-1. **3D Atmospheric Wind Field**:
-   - Prevailing steady wind current $[w_x, w_y, w_z]$.
-   - Linear altitude shear gradient: wind velocity scales higher with altitude $z$.
-   - **Ornstein-Uhlenbeck Stochastic Gust Turbulence**: mean-reverting continuous Brownian velocity perturbations ($dg = -\theta g\,dt + \sigma\sqrt{dt}N(0, I)$).
-2. **Quadrotor Battery Depletion Model**:
-   - Power consumption dynamically modeled: $P_{\text{total}} = P_{\text{base}} + c_{\text{thrust}}\|a\|^2 + c_{\text{speed}}\|v\|^2$.
-   - Battery state-of-charge tracking ($\text{SoC} \in [0.0, 1.0]$) with termination penalty upon complete exhaustion.
-3. **Dynamic 3D Moving Obstacles**:
-   - Autonomous spherical obstacles with velocity vectors $[\dot{x}, \dot{y}, \dot{z}]$ and elastic perimeter reflection upon hitting arena boundary walls.
-   - Combined static and dynamic obstacle distance measuring via unified 16-ray spherical LiDAR.
-4. **Observation & Action Spaces**:
-   - **Action**: Continuous 3D acceleration command $\mathbf{a} \in [-1.0, 1.0]^3$.
-   - **Observation**: 33-dimensional normalized continuous vector including drone coordinates, velocities, goal vector, 16-ray LiDAR distances, battery charge level, and instantaneous 3D wind velocity.
+### Observation Space (29 Dimensions)
+```text
+Box(-1.0, 1.0, shape=(29,), dtype=float32)
+```
+The 29-dimensional continuous state vector is structured as follows:
 
-### CLI Usage:
+| Index Range | Dimension Count | Description | Normalization |
+|---|---|---|---|
+| `[0:3]` | 3 | Drone current position $\mathbf{p} = [x, y, z]$ | Divided by arena bounds $[30.0, 30.0, 15.0]$ |
+| `[3:6]` | 3 | Drone current velocity $\mathbf{v} = [v_x, v_y, v_z]$ | Divided by max velocity $v_{\max} = 8.0\text{ m/s}$ |
+| `[6:9]` | 3 | Target waypoint position $\mathbf{g} = [g_x, g_y, g_z]$ | Divided by arena bounds |
+| `[9:12]` | 3 | Relative target vector $\mathbf{g} - \mathbf{p}$ | Divided by arena bounds |
+| `[12:13]` | 1 | Euclidean distance to target $\|\mathbf{g} - \mathbf{p}\|$ | Divided by arena diagonal ($\approx 45.0\text{ m}$) |
+| `[13:29]` | 16 | 16-ray spherical LiDAR rangefinder readings | Normalized in $[0.0, 1.0]$ ($20.0\text{ m}$ max range) |
+
+**Total dimensions**: $3 + 3 + 3 + 3 + 1 + 16 = \mathbf{29}$
+
+### Environment Parameters
+
+| Parameter | Value | Description |
+|---|---|---|
+| Flight Arena Bounds | $30.0\text{ m} \times 30.0\text{ m} \times 15.0\text{ m}$ | Bounded rectangular flight volume |
+| Simulation Time Step ($\Delta t$) | $0.1\text{ s}$ | Discrete time delta per step |
+| Maximum Velocity ($v_{\max}$) | $8.0\text{ m/s}$ | Physical speed cap |
+| Maximum Acceleration ($a_{\max}$) | $4.0\text{ m/s}^2$ | Maximum thrust acceleration |
+| Aerodynamic Linear Drag ($c_{\text{drag}}$) | $0.05$ | Velocity damping coefficient |
+| Maximum Steps per Episode | $200$ steps | Episode truncation limit ($20.0\text{ s}$ of flight) |
+| Default Obstacle Count | $4$ spheres | Procedurally generated with start/goal clearance |
+| Obstacle Radius | $2.0\text{ m}$ | Radius of procedural spherical obstacles |
+| Target Arrival Radius | $1.5\text{ m}$ | Distance threshold for goal success |
+| Drone Collision Radius | $0.8\text{ m}$ | Physical drone clearance radius |
+| LiDAR Rangefinder | $16$ rays, $20.0\text{ m}$ range | Spherical Fibonacci distribution |
+
+---
+
+## Reward Function
+
+The reward function at step $t$ actively guides the policy toward the goal while penalizing collisions and slow trajectories:
+
+$$R_t = w_{\text{prog}} (d_{t-1} - d_t) + r_{\text{step}} - w_{\text{act}} \|\mathbf{a}_t\|^2 + R_{\text{terminal}}$$
+
+- **Distance Progress ($w_{\text{prog}} = 2.0$)**: Rewards reducing Euclidean distance to the target: $2.0 \times (d_{t-1} - d_t)$.
+- **Time Step Penalty ($r_{\text{step}} = -0.05$)**: Small penalty on every step to encourage finding direct, time-efficient paths.
+- **Control Regularization ($w_{\text{act}} = 0.01$)**: Penalizes excessive acceleration commands (energy conservation).
+- **Goal Reached ($R_{\text{terminal}} = +100.0$)**: Awarded when the drone enters within $1.5\text{ m}$ of the target coordinate.
+- **Collision ($R_{\text{terminal}} = -100.0$)**: Incurred when the drone's collision radius strikes an obstacle or arena boundary.
+
+---
+
+## PPO Explanation
+
+Proximal Policy Optimization (PPO) is an on-policy actor-critic reinforcement learning algorithm.
+
+Instead of hand-coding navigation heuristics, the agent learns through trial and error:
+1. **Observe**: The agent reads the current 29-dimensional sensor vector.
+2. **Act**: The policy network outputs a continuous 3D acceleration command.
+3. **Receive Reward**: The environment scores the action based on distance progress and obstacle proximity.
+4. **Update Policy**: PPO uses a clipped surrogate objective function that prevents destructively large policy updates, ensuring stable and reliable convergence.
+
+---
+
+## Measured Benchmark Results
+
+> [!NOTE]
+> **Previously measured repository benchmark**  
+> Results vary depending on your hardware, CPU speed, software library versions, random seeds, and training configuration. The values below were empirically measured on an x86_64 CPU under controlled seeds ($42$).
+
+### 1. PPO vs Untrained Random Action Baseline (20 Test Episodes, Seed 42)
+
+| Policy Evaluated | Success Rate (%) | Collision Rate (%) | Mean Reward | Mean Steps | Outcome |
+|---|---|---|---|---|---|
+| **Random Policy Baseline** | **0.0%** | **100.0%** | **-101.24** | **71.2** | Collided in 100% of test episodes |
+| **Trained PPO Policy (25k steps)** | **5.0%** | **35.0%** | **-3.34** | **141.0** | **65% survival rate**, +97.9 reward delta |
+
+*Finding: An unguided random agent collides 100% of the time within ~71 steps. PPO dramatically reduces collisions to 35% and doubles flight duration, validating goal-directed attraction and obstacle avoidance.*
+
+### 2. Obstacle-Density Scaling (10 Test Episodes per Condition, Seed 42)
+
+| Condition | Obstacle Count | Collision Rate (%) | Mean Return | Mean Flight Steps |
+|---|---|---|---|---|
+| **Low Density** | 4 Obstacles | **20.0%** | **+5.00** | 169.0 steps |
+| **Medium Density** | 6 Obstacles | **40.0%** | **-15.20** | 136.2 steps |
+| **High Density** | 8 Obstacles | **70.0%** | **-32.43** | 88.2 steps |
+
+*Finding: As obstacle density increases from 4 to 8, the collision rate rises from 20% to 70% and mean return drops, demonstrating how environmental complexity restricts safe flight paths.*
+
+---
+
+## Project Structure
+
+```text
+ARL/
+├── app.py                      # Interactive 5-tab Streamlit presentation GUI
+├── pyproject.toml              # Build specification, dependencies, and CLI entry point
+├── README.md                   # Complete project documentation and Linux guide
+├── LICENSE                     # MIT License
+├── Makefile                    # Make shortcuts for install, test, and lint
+├── CONTRIBUTING.md             # Developer guidelines and contribution workflow
+├── configs/
+│   ├── drone_ppo.yaml          # Full training configuration (50,000 steps)
+│   └── drone_ppo_demo.yaml     # Fast demonstration configuration (25,000 steps)
+├── docs/
+│   ├── COLLEGE_DEMO.md         # 5–10 minute demonstration script & viva defense Q&A
+│   ├── DEMO.md                 # CLI & GUI execution walkthrough
+│   └── EXPERIMENT.md           # Experimental methodology & verified empirical metrics
+├── src/adaptive_rl/
+│   ├── __init__.py             # Package version declaration
+│   ├── cli.py                  # Typer CLI implementation
+│   ├── config.py               # Pydantic configuration schemas and YAML loader
+│   ├── algorithms/
+│   │   ├── base.py             # BaseAlgorithm abstract interface
+│   │   ├── ppo.py              # Stable-Baselines3 PPO wrapper
+│   │   └── random_policy.py    # Uniform-random action policy baseline
+│   ├── environments/
+│   │   ├── base.py             # AdaptiveRLEnv abstract base class
+│   │   ├── drone.py            # DroneNavigation3DEnv, kinematics, and LiDAR raycaster
+│   │   └── registry.py         # Gymnasium environment factory registry
+│   ├── evaluation/
+│   │   ├── evaluator.py        # Evaluator, baseline comparison, and density experiment
+│   │   └── metrics.py          # EvaluationMetrics dataclass
+│   ├── gui/
+│   │   ├── __init__.py         # GUI exports
+│   │   └── visualizer.py       # Plotly 3D flight deck and interactive chart builders
+│   └── training/
+│       ├── callbacks.py        # Episode metric logging and checkpoint callbacks
+│       └── trainer.py          # PPOTrainer training orchestrator
+└── tests/                      # 49 automated unit and integration tests
+    ├── test_cli.py
+    ├── test_configuration.py
+    ├── test_drone.py
+    ├── test_evaluation.py
+    ├── test_gui.py
+    └── test_training.py
+```
+
+---
+
+## Troubleshooting
+
+### `python3: command not found`
+Python 3 is not installed or not in your system `$PATH`.  
+- **Ubuntu/Debian**: `sudo apt install python3`  
+- **Fedora**: `sudo dnf install python3`  
+- **Arch**: `sudo pacman -S python`
+
+### `python3 -m venv` fails with an error
+Some Debian/Ubuntu systems package `venv` separately. Install the package:
 ```bash
-# Run 10 steps of disturbed drone simulation
-adaptive-rl env run drone_disturbed --steps 10 --seed 42
+sudo apt install python3-venv
+```
 
-# Inspect disturbed drone environment spaces and registration
-adaptive-rl env inspect drone_disturbed
+### `pip` problems or `pip: command not found`
+Always run pip as a module under your active Python interpreter:
+```bash
+python -m pip install <package>
+```
+instead of invoking the global `pip` binary directly.
 
-# Inspect 4-stage progressive disturbance curriculum
-adaptive-rl curriculum inspect drone_disturbed
+### `adaptive-rl: command not found`
+This indicates your virtual environment is not currently active, or the package was not installed in editable mode. Run:
+```bash
+source .venv/bin/activate
+python -m pip install -e ".[all]"
+```
 
-# Train PPO under wind disturbances and battery constraints
-adaptive-rl train --config configs/drone_disturbed_ppo.yaml
+### GUI does not launch
+Verify that Streamlit is installed in your environment:
+```bash
+python -m pip show streamlit
+```
+If missing, reinstall GUI dependencies:
+```bash
+python -m pip install -e ".[gui]"
+```
+Then launch:
+```bash
+adaptive-rl gui
+# or
+streamlit run app.py
+```
+
+### Port 8501 already in use
+If another service is using port 8501, specify a different port:
+```bash
+adaptive-rl gui --port 8502
+```
+Or with Streamlit:
+```bash
+streamlit run app.py --server.port 8502
 ```
 
 ---
 
-## 14. Generalization to Unseen Environments Benchmark
+## Leaving the Environment
 
-AdaptiveRL includes structured evaluation protocols to test whether trained reinforcement learning policies generalize to novel, unseen environment topologies or merely overfit to training layouts.
-
-### Key Capabilities:
-1. **Strict Train/Test Partitioning**:
-   - Training environments are strictly constrained using `TrainingDistributionWrapper`, guaranteeing zero exposure to test seeds during optimization.
-   - `GeneralizationDistribution` performs automated programmatic assertions ensuring $|D_{\text{train}} \cap D_{\text{test}}| = 0$.
-2. **Generalization Gap Metrics**:
-   - Quantifies performance degradation: $\Delta_{\text{success}} = S_{\text{train}} - S_{\text{unseen}}$ and $\Delta_{\text{reward}} = R_{\text{train}} - R_{\text{unseen}}$.
-   - Calculates relative success retention percentage ($S_{\text{test}} / S_{\text{train}}$).
-3. **Reproducible Experiment Runner**:
-   - `GeneralizationExperimentRunner` executes end-to-end training and evaluation, persisting structured JSON reports.
-
-### CLI Usage:
-```bash
-# Run generalization benchmark on GridWorld
-adaptive-rl generalization --config configs/generalization_gridworld.yaml
-
-# Run generalization benchmark on Continuous 2D Navigation
-adaptive-rl generalization --config configs/generalization_navigation.yaml --train-count 20 --test-count 20
-```
-
-### Controlled Distribution-Shift Benchmark (Issue #105)
-
-Seed generalization keeps physics fixed; the distribution-shift benchmark varies
-the physics. A PPO/SAC policy is **trained only on TRAIN conditions** (nominal
-static baseline: 8 obstacles, low wind) and evaluated **without adaptation** on
-four shifted TEST distributions (obstacle-density; density + moderate-wind
-compound; dynamic-obstacle + wind compound; high hidden disturbance), measuring
-success, collision, reward, event-weighted recovery time (environment steps via
-an explicit disturbance/recovery telemetry contract with completion/censoring
-rates), and TEST-vs-TRAIN generalization gaps (recovery time gaps are suppressed
-whenever either side has censored events). Train/test seed sets are strictly
-disjoint, one fixed event threshold (0.7 m/s) applies to every scenario, and a
-single frozen policy (weight fingerprint) is evaluated across all scenarios with
-raw per-seed records stored for independent recomputation.
+When you are finished working with AdaptiveRL, deactivate the virtual environment:
 
 ```bash
-# Run the Issue #105 drone distribution-shift benchmark (TRAIN → TEST-A/B/C/D)
-adaptive-rl benchmark-shifts --config configs/drone_distribution_shift.yaml
+deactivate
 ```
 
-See `docs/EXPERIMENTS.md` §8 for the full protocol, scenario parameter values,
-recovery-time definition, gap formulas, and the JSON artifact schema.
-
----
-
-## 15. Implementation Status & Scientific Claim Classification
-
-To maintain the highest standards of research integrity, every capability in AdaptiveRL is explicitly classified into one of four empirical verification tiers:
-
-| Component / Capability | Category | Status | Verification Details |
-|:-----------------------|:---------|:-------|:---------------------|
-| `GridWorldEnv` (discrete 2D) | Environment | **Implemented & Tested** | Comprehensive Gym checkers, collision & goal contracts (`test_gridworld.py`) |
-| `ContinuousNavigation2DEnv` | Environment | **Implemented & Tested** | Continuous dynamics, ray-casting LiDAR, obstacle boundary tests (`test_navigation.py`) |
-| `TrafficSignalEnv` | Environment | **Implemented & Tested** | Poisson arrivals, queue overflow prevention, multi-objective rewards (`test_traffic.py`) |
-| `Drone3DEnv` | Environment | **Implemented & Tested** | 3D quadrotor acceleration model, spherical LiDAR, goal distance rewards (`test_drone.py`) |
-| `DisturbedDrone3DEnv` | Environment | **Implemented & Tested** | Ornstein-Uhlenbeck gusts, altitude shear, battery SoC depletion (`test_drone_disturbances.py`) |
-| PPO Policy Adapter | Algorithm | **Implemented & Tested** | Integration with SB3 PPO, discrete/continuous spaces, checkpointing (`test_ppo.py`) |
-| SAC Policy Adapter | Algorithm | **Implemented & Tested** | Continuous control on navigation and drone environments (`test_planners.py`) |
-| A* Search Planner | Algorithm | **Implemented & Tested** | Admissible Manhattan/Euclidean heuristics, deterministic path finding (`test_planners.py`) |
-| RRT* Motion Planner | Algorithm | **Implemented & Tested** | Continuous 2D sampling, steer function, local tree rewiring (`test_planners.py`) |
-| `AlgorithmRegistry` | Architecture | **Implemented & Tested** | Authoritative algorithm registration, type metadata, introspection (`test_algorithm_registry.py`) |
-| `ExperimentManager` | Orchestration | **Implemented & Tested** | Execution orchestration, effective config persistence, artifact emission (`test_experiment_manager.py`) |
-| Standardized Metrics | Metrics | **Implemented & Tested** | Null vs zero separation, JSON/CSV round-trip, traffic aggregation (`test_standardized_metrics.py`) |
-| Seeding Protocol | Reproducibility | **Implemented & Tested** | Deterministic seed derivation, seed=0 preservation, manifest audit (`test_evaluation_seeding.py`) |
-| Disjoint Generalization | Benchmark | **Implemented & Tested** | Zero train/test seed overlap assertion, generalization gap calculation (`test_generalization.py`) |
-| Controlled Distribution Shift (Issue #105) | Benchmark | **Implemented & Tested** | Train-once-on-TRAIN, frozen-policy eval on TEST-A/B/C/D with real wind/dynamic/disturbance shifts, fixed event threshold, event-weighted censoring-aware recovery, directional gaps, per-episode records (`test_distribution_shift_benchmark.py`) |
-| Long-Horizon Convergence (>100k steps) | Research | **Not yet validated** | Training loops are functional; systematic scaling benchmarks require compute allocations |
-| Formal Asymptotic Optimality of RRT* | Algorithm | **Not yet validated** | Current implementation uses a fixed connection radius approximation; not shrinking radius |
-
----
-
-## 16. Provenance Metadata vs. Bitwise Reproducibility
-
-AdaptiveRL draws a fundamental methodological distinction between **execution provenance tracking** and **bitwise floating-point reproducibility**:
-
-1. **Provenance Tracking (Guaranteed)**:
-   - Every experiment run captures an immutable `manifest.json` recording:
-     - Exact Git commit SHA, active branch name, and uncommitted dirty working-tree status.
-     - Python interpreter version, operating system, kernel, and CPU architecture.
-     - Exact pinned installed package versions (`gymnasium`, `torch`, `stable-baselines3`, `pydantic`).
-     - Source YAML configuration and effective merged runtime overrides.
-     - Base random seeds and per-episode evaluation seed sequences.
-   - This ensures complete research transparency, enabling external researchers to inspect the exact configuration and codebase state of every trial.
-
-2. **Bitwise Reproducibility (Caveats & Scoping)**:
-   - **Deterministic Components**: Classical planners (A*) and procedural environment generation (GridWorld, Navigation obstacle placement) are **bitwise deterministic** given identical seeds.
-   - **Non-Bitwise Components**: Neural network training using PyTorch (PPO, SAC) is **not guaranteed to be bitwise identical** across different hardware architectures (e.g. CPU vs GPU, different CUDA compute capabilities) or different BLAS/MKL thread pool reductions due to non-associative floating-point summation.
-   - **Research Standard**: To address stochastic variance, AdaptiveRL enforces **multi-seed benchmarking** (`adaptive-rl benchmark --seeds ...`), reporting mean, standard deviation, and range distributions rather than claiming single-seed bitwise equivalence.
-
----
-
-## 17. Running Tests
-
-Execute the automated test suite with `pytest`:
+To resume working later, enter the directory and reactivate the environment:
 ```bash
-# Run all tests
-pytest -v tests/
-
-# Run with coverage
-pytest --cov=adaptive_rl tests/
+cd ARL
+source .venv/bin/activate
 ```
 
 ---
 
-## 18. Contributing
+## Updating an Existing Installation
 
-We welcome contributions! Please review [CONTRIBUTING.md](CONTRIBUTING.md) for branch naming conventions, quality gates, and code formatting standards before opening a pull request.
+To pull the latest changes from Git and update dependencies:
+
+```bash
+cd ARL
+git pull
+source .venv/bin/activate
+python -m pip install -e ".[all]"
+```
 
 ---
 
-## 19. License
+## Clean Reinstall
 
-This project is licensed under the [MIT License](LICENSE).
+If your virtual environment becomes corrupted or has conflicting packages, you can safely remove and rebuild it:
 
+```bash
+cd ARL
+rm -rf .venv
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -e ".[all]"
+```
 
+*(This will not delete your saved models or training logs in `artifacts/`.)*
 
+---
 
+## Limitations
 
+- **Kinematic Point Mass**: The drone is modeled as a 3-DOF translational point-mass with linear aerodynamic drag. It does not model 6-DOF rotational attitude dynamics, motor RPM lag, or gyroscopic effects.
+- **Analytical Rangefinder**: LiDAR sensing calculates exact geometric ray-sphere and ray-box intersections without simulated sensor noise, beam divergence, or surface reflection scattering.
+- **Simulation Only**: This project is built strictly as an academic educational demonstration and cannot be directly deployed onto real drone flight hardware without a low-level attitude controller.
 
+---
 
+## Contributing
 
+Contributions are welcome! Please follow these steps:
+
+1. Fork the repository on GitHub.
+2. Create a feature branch: `git checkout -b feature/my-improvement`.
+3. Create and activate a virtual environment.
+4. Install all dependencies: `python -m pip install -e ".[all]"`.
+5. Run the test suite: `python -m pytest`.
+6. Make your changes and add relevant unit tests.
+7. Run tests, linter, and typechecker:
+   ```bash
+   ruff check src/ tests/ app.py
+   ruff format --check src/ tests/ app.py
+   mypy src/
+   pytest -v tests/
+   ```
+8. Commit your changes and open a Pull Request.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
+
+---
+
+## License
+
+This project is licensed under the terms of the MIT License. See the [LICENSE](LICENSE) file for the full text.
