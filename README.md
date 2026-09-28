@@ -2,6 +2,8 @@
 
 AdaptiveRL is an educational reinforcement-learning project in which a Proximal Policy Optimization (PPO) agent learns to navigate a simulated 3D drone through an obstacle-filled environment toward a target coordinate.
 
+🌐 **Project Website & Interactive Showcase:** [https://stellarresearch.github.io/ARL/](https://stellarresearch.github.io/ARL/)
+
 ---
 
 ## Table of Contents
