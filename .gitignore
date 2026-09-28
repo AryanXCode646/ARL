@@ -88,10 +88,8 @@ ehthumbs.db
 Thumbs.db
 
 # Experiment outputs, logs, and checkpoints
-experiments/logs/*
-!experiments/logs/.gitkeep
-experiments/results/*
-!experiments/results/.gitkeep
+artifacts/
+logs/
 checkpoints/
 runs/
 *.tfevents.*
