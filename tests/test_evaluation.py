@@ -1,16 +1,19 @@
-"""Tests for agent evaluation and JSON report generation."""
-
+import csv
 import json
 from pathlib import Path
 
+import numpy as np
+import pytest
+
 from adaptive_rl.algorithms.ppo import PPOAlgorithm
-from adaptive_rl.environments.drone import DroneNavigation3DEnv
+from adaptive_rl.environments.drone import DroneNavigation3DEnv, ObstacleSphere3D
 from adaptive_rl.evaluation.evaluator import (
     Evaluator,
     compare_policies,
     evaluate_random_policy,
     run_obstacle_density_experiment,
 )
+from adaptive_rl.evaluation.metrics import compute_trajectory_metrics
 
 
 def test_evaluator_deterministic_evaluation(tmp_path: Path) -> None:
@@ -112,4 +115,220 @@ def test_run_obstacle_density_experiment(tmp_path: Path) -> None:
     assert len(saved_data) == 2
     assert "success_rate" in saved_data[0]
     assert "collision_rate" in saved_data[0]
+    env.close()
+
+
+def test_trajectory_metrics_stationary() -> None:
+    """Verify stationary trajectory produces 0 path length and 0 efficiency."""
+    positions = [[1.0, 2.0, 3.0], [1.0, 2.0, 3.0], [1.0, 2.0, 3.0]]
+    goal = [5.0, 2.0, 3.0]
+    metrics = compute_trajectory_metrics(positions, goal)
+
+    assert metrics["path_length"] == 0.0
+    assert metrics["path_efficiency"] == 0.0
+    assert metrics["straight_line_distance"] == pytest.approx(4.0)
+
+
+def test_trajectory_metrics_straight_line() -> None:
+    """Verify perfect straight-line trajectory achieves ~1.0 path efficiency."""
+    positions = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [5.0, 0.0, 0.0]]
+    goal = [5.0, 0.0, 0.0]
+    metrics = compute_trajectory_metrics(positions, goal)
+
+    assert metrics["path_length"] == pytest.approx(5.0)
+    assert metrics["straight_line_distance"] == pytest.approx(5.0)
+    assert metrics["path_efficiency"] == pytest.approx(1.0)
+
+
+def test_trajectory_metrics_zigzag() -> None:
+    """Verify non-straight trajectory yields efficiency strictly less than 1.0."""
+    positions = [
+        [0.0, 0.0, 0.0],
+        [1.0, 2.0, 0.0],
+        [2.0, 0.0, 0.0],
+        [3.0, 2.0, 0.0],
+        [4.0, 0.0, 0.0],
+    ]
+    goal = [4.0, 0.0, 0.0]
+    metrics = compute_trajectory_metrics(positions, goal)
+
+    assert metrics["straight_line_distance"] == pytest.approx(4.0)
+    assert metrics["path_length"] > 4.0
+    assert 0.0 < metrics["path_efficiency"] < 1.0
+
+
+def test_trajectory_metrics_zero_length_and_empty() -> None:
+    """Verify zero-length and single-waypoint trajectories do not raise division errors."""
+    # Empty positions
+    metrics_empty = compute_trajectory_metrics([], goal=[1.0, 1.0, 1.0])
+    assert metrics_empty["path_length"] == 0.0
+    assert metrics_empty["path_efficiency"] == 0.0
+    assert metrics_empty["straight_line_distance"] == 0.0
+
+    # Single position
+    metrics_single = compute_trajectory_metrics([[1.0, 1.0, 1.0]], goal=[4.0, 1.0, 1.0])
+    assert metrics_single["path_length"] == 0.0
+    assert metrics_single["path_efficiency"] == 0.0
+    assert metrics_single["straight_line_distance"] == pytest.approx(3.0)
+
+
+def test_trajectory_metrics_obstacle_clearance_surface() -> None:
+    """Verify closest distance calculation measures to spherical obstacle surface, not center."""
+    obs = ObstacleSphere3D(center=np.array([5.0, 5.0, 5.0]), radius=1.5)
+    # p1: dist to center = 5.0, surface clearance = 5.0 - 1.5 = 3.5
+    # p2: dist to center = 2.0, surface clearance = 2.0 - 1.5 = 0.5
+    # p3: dist to center = 6.0, surface clearance = 6.0 - 1.5 = 4.5
+    positions = [[0.0, 5.0, 5.0], [3.0, 5.0, 5.0], [11.0, 5.0, 5.0]]
+    goal = [11.0, 5.0, 5.0]
+
+    metrics = compute_trajectory_metrics(positions, goal, obstacles=[obs])
+    assert metrics["min_obstacle_clearance"] == pytest.approx(0.5)
+
+
+def test_trajectory_metrics_max_velocity() -> None:
+    """Verify maximum velocity computation against known synthetic velocity vectors."""
+    positions = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
+    goal = [1.0, 0.0, 0.0]
+    velocities = [
+        [1.0, 2.0, 2.0],  # norm = 3.0
+        [0.0, 4.0, 3.0],  # norm = 5.0
+        [2.0, 0.0, 0.0],  # norm = 2.0
+    ]
+    metrics = compute_trajectory_metrics(positions, goal, velocities=velocities)
+    assert metrics["max_velocity"] == pytest.approx(5.0)
+
+
+def test_trajectory_metrics_max_acceleration() -> None:
+    """Verify maximum acceleration computation against known synthetic acceleration vectors."""
+    positions = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
+    goal = [1.0, 0.0, 0.0]
+    accelerations = [
+        [0.0, 0.0, 0.0],  # norm = 0.0
+        [1.0, 2.0, 2.0],  # norm = 3.0
+        [-2.0, 1.0, 2.0],  # norm = 3.0
+    ]
+    metrics = compute_trajectory_metrics(positions, goal, accelerations=accelerations)
+    assert metrics["max_acceleration"] == pytest.approx(3.0)
+
+
+def test_obstacle_vs_boundary_collision_separation() -> None:
+    """Verify obstacle collisions and boundary collisions are tracked separately."""
+
+    class DummyEnv:
+        def __init__(self) -> None:
+            self.episode = 0
+            self.action_space = None
+            self.observation_space = None
+            self.obstacles = []
+
+        def reset(self, seed: int | None = None) -> tuple[np.ndarray, dict]:
+            self.episode += 1
+            return np.zeros(29, dtype=np.float32), {
+                "drone_position": np.array([0.0, 0.0, 0.0]),
+                "target_position": np.array([5.0, 5.0, 5.0]),
+                "velocity": np.array([0.0, 0.0, 0.0]),
+                "acceleration": np.array([0.0, 0.0, 0.0]),
+                "obstacles": [],
+            }
+
+        def step(self, action: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict]:
+            if self.episode == 1:
+                # Obstacle collision
+                info = {
+                    "drone_position": np.array([1.0, 0.0, 0.0]),
+                    "target_position": np.array([5.0, 5.0, 5.0]),
+                    "velocity": np.array([1.0, 0.0, 0.0]),
+                    "acceleration": np.array([0.5, 0.0, 0.0]),
+                    "collision": True,
+                    "collision_type": "obstacle",
+                    "success": False,
+                    "obstacles": [],
+                }
+                return np.zeros(29, dtype=np.float32), -50.0, True, False, info
+            elif self.episode == 2:
+                # Boundary collision
+                info = {
+                    "drone_position": np.array([0.0, 10.0, 0.0]),
+                    "target_position": np.array([5.0, 5.0, 5.0]),
+                    "velocity": np.array([0.0, 2.0, 0.0]),
+                    "acceleration": np.array([0.0, 1.0, 0.0]),
+                    "collision": True,
+                    "collision_type": "boundary_y",
+                    "success": False,
+                    "obstacles": [],
+                }
+                return np.zeros(29, dtype=np.float32), -50.0, True, False, info
+            else:
+                # Success
+                info = {
+                    "drone_position": np.array([5.0, 5.0, 5.0]),
+                    "target_position": np.array([5.0, 5.0, 5.0]),
+                    "velocity": np.array([0.1, 0.0, 0.0]),
+                    "acceleration": np.array([0.0, 0.0, 0.0]),
+                    "collision": False,
+                    "collision_type": None,
+                    "success": True,
+                    "obstacles": [],
+                }
+                return np.zeros(29, dtype=np.float32), 100.0, True, False, info
+
+        def close(self) -> None:
+            pass
+
+    dummy_env = DummyEnv()
+    evaluator = Evaluator(algorithm=None, env=dummy_env)  # type: ignore[arg-type]
+    metrics = evaluator.evaluate(num_episodes=3, deterministic=True, base_seed=1)
+
+    assert metrics.episodes == 3
+    assert metrics.collision_rate == pytest.approx(2 / 3)
+    assert metrics.obstacle_collision_count == 1
+    assert metrics.obstacle_collision_rate == pytest.approx(1 / 3)
+    assert metrics.boundary_collision_count == 1
+    assert metrics.boundary_collision_rate == pytest.approx(1 / 3)
+    assert metrics.success_rate == pytest.approx(1 / 3)
+
+
+def test_evaluator_trajectory_metrics_and_csv_export(tmp_path: Path) -> None:
+    """Verify evaluator produces trajectory metrics and exports to JSON and CSV."""
+    env = DroneNavigation3DEnv(bounds=(20.0, 20.0, 10.0), max_steps=20, num_obstacles=1)
+    algo = PPOAlgorithm(env=env, n_steps=64, batch_size=32, seed=42)
+    evaluator = Evaluator(algorithm=algo, env=env)
+
+    metrics = evaluator.evaluate(num_episodes=2, deterministic=True, base_seed=42)
+
+    # Trajectory metrics populated
+    assert metrics.mean_path_length is not None
+    assert metrics.mean_straight_line_distance is not None
+    assert metrics.mean_path_efficiency is not None
+    assert metrics.mean_max_velocity is not None
+    assert metrics.mean_max_acceleration is not None
+    assert metrics.obstacle_collision_count is not None
+    assert metrics.boundary_collision_count is not None
+    assert metrics.obstacle_collision_rate is not None
+    assert metrics.boundary_collision_rate is not None
+
+    # JSON export
+    json_path = tmp_path / "eval.json"
+    evaluator.save_report(metrics, json_path)
+    assert json_path.exists()
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    assert "mean_path_length" in data
+    assert "mean_path_efficiency" in data
+    assert "obstacle_collision_count" in data
+    assert "boundary_collision_count" in data
+
+    # CSV export
+    csv_path = tmp_path / "eval.csv"
+    evaluator.save_csv_report(metrics, csv_path)
+    assert csv_path.exists()
+    with open(csv_path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        row = next(reader)
+        assert "episode_return" in row
+        assert "path_length" in row
+        assert "path_efficiency" in row
+        assert "obstacle_collision_count" in row
+        assert "boundary_collision_count" in row
+
     env.close()

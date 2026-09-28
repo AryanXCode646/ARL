@@ -126,6 +126,7 @@ log_dir: "{tmp_path / "logs"}"
 
     # 2. Evaluate command
     eval_report = tmp_path / "eval_report.json"
+    eval_csv = tmp_path / "eval_report.csv"
     eval_res = runner.invoke(
         app,
         [
@@ -138,6 +139,8 @@ log_dir: "{tmp_path / "logs"}"
             "2",
             "--output-report",
             str(eval_report),
+            "--output-csv",
+            str(eval_csv),
             "--compare-random",
         ],
     )
@@ -145,6 +148,7 @@ log_dir: "{tmp_path / "logs"}"
     assert "## Evaluation" in eval_res.output
     assert "Policy Comparison" in eval_res.output
     assert eval_report.exists()
+    assert eval_csv.exists()
 
     # 2b. Experiment-density command
     density_report = tmp_path / "density_test.json"

@@ -74,6 +74,7 @@ AdaptiveRL is an educational reinforcement-learning project in which a PPO agent
 - **Target Detection**: Automatic goal-arrival termination within a calibrated target radius.
 - **Reward Shaping**: Multi-component reward encouraging progress toward the goal while penalizing collisions and excessive step duration.
 - **Deterministic Evaluation**: Reusable evaluation pipeline with reproducible seed control.
+- **Trajectory & Safety Metrics**: Rigorous trajectory evaluation including path length, straight-line distance, path efficiency, obstacle surface clearance, maximum velocity/acceleration, and separated obstacle vs. boundary collisions.
 - **Untrained Random Policy Baseline**: Built-in non-learning baseline to scientifically validate policy improvement.
 - **Obstacle-Density Experiment**: Controlled testing across 4, 6, and 8 obstacles to demonstrate environmental difficulty scaling.
 - **Command-Line Interface (CLI)**: Typer-based CLI for training, evaluation, environment inspection, and trajectory demonstration.
@@ -426,11 +427,13 @@ adaptive-rl evaluate \
 
 This prints a formatted comparison table displaying:
 - **Success Rate (%)**: Percentage of episodes reaching within 1.5m of the target.
-- **Collision Rate (%)**: Percentage of episodes colliding with obstacles or arena walls.
+- **Collision Rate (%)**: Percentage of episodes colliding with obstacles or arena walls (with separate obstacle and boundary collision breakdown).
 - **Mean Reward**: Average cumulative episodic return ($\pm$ standard deviation).
 - **Mean Steps**: Average flight duration before termination or truncation.
+- **Trajectory Quality**: Path length (m), straight-line distance (m), and path efficiency.
+- **Safety & Dynamics**: Minimum obstacle surface clearance (m), maximum velocity (m/s), and maximum acceleration (m/s²).
 
-The evaluation report is saved to `artifacts/evaluation.json`.
+The evaluation report is saved to `artifacts/evaluation.json` (and optionally to CSV via `--output-csv`).
 
 View all evaluation options:
 ```bash

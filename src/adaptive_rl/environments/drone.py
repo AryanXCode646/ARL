@@ -525,6 +525,7 @@ class DroneNavigation3DEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
             "max_steps": self.max_steps,
             "position": self._position.copy(),
             "velocity": self._velocity.copy(),
+            "acceleration": self.kinematics.state.acceleration.copy(),
             "speed": speed,
             "goal": self._goal.copy(),
             "distance_to_goal": dist,

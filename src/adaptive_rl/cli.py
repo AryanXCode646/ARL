@@ -224,6 +224,9 @@ def evaluate(
     output_report: Optional[Path] = typer.Option(
         None, "--output-report", "-o", help="Optional path to export JSON metrics report"
     ),
+    output_csv: Optional[Path] = typer.Option(
+        None, "--output-csv", help="Optional path to export CSV metrics report"
+    ),
     compare_random: bool = typer.Option(
         False,
         "--compare-random",
@@ -312,10 +315,50 @@ def evaluate(
         table.add_row("Min / Max Reward", f"{metrics.min_reward:.2f} / {metrics.max_reward:.2f}")
         table.add_row("Success Rate", success_pct)
         table.add_row("Collision Rate", collision_pct)
+        if (
+            metrics.obstacle_collision_count is not None
+            and metrics.boundary_collision_count is not None
+        ):
+            table.add_row(
+                "  • Obstacle Collisions",
+                f"{metrics.obstacle_collision_count} ({(metrics.obstacle_collision_rate or 0.0) * 100:.1f}%)",
+            )
+            table.add_row(
+                "  • Boundary Collisions",
+                f"{metrics.boundary_collision_count} ({(metrics.boundary_collision_rate or 0.0) * 100:.1f}%)",
+            )
         table.add_row(
             "Mean Episode Length",
             f"{metrics.mean_episode_length:.1f} ± {metrics.std_episode_length:.1f}",
         )
+        if metrics.mean_path_length is not None:
+            table.add_row(
+                "Mean Path Length",
+                f"{metrics.mean_path_length:.2f} ± {metrics.std_path_length or 0.0:.2f} m",
+            )
+        if metrics.mean_straight_line_distance is not None:
+            table.add_row(
+                "Straight-Line Distance",
+                f"{metrics.mean_straight_line_distance:.2f} m",
+            )
+        if metrics.mean_path_efficiency is not None:
+            table.add_row(
+                "Path Efficiency",
+                f"{metrics.mean_path_efficiency * 100:.1f}%",
+            )
+        if metrics.mean_min_obstacle_clearance is not None:
+            import math
+
+            clearance_str = (
+                f"{metrics.mean_min_obstacle_clearance:.2f} m"
+                if math.isfinite(metrics.mean_min_obstacle_clearance)
+                else "N/A"
+            )
+            table.add_row("Min Obstacle Clearance", clearance_str)
+        if metrics.mean_max_velocity is not None:
+            table.add_row("Max Velocity", f"{metrics.mean_max_velocity:.2f} m/s")
+        if metrics.mean_max_acceleration is not None:
+            table.add_row("Max Acceleration", f"{metrics.mean_max_acceleration:.2f} m/s²")
         console.print(table)
 
         if compare_random:
@@ -350,6 +393,10 @@ def evaluate(
         report_target = output_report or (exp_config.output_dir / "evaluation.json")
         saved_path = evaluator.save_report(metrics, report_target)
         console.print(f"\n[bold green]Report saved to:[/bold green] {saved_path}")
+
+        csv_target = output_csv or (exp_config.output_dir / "evaluation.csv")
+        saved_csv = evaluator.save_csv_report(metrics, csv_target)
+        console.print(f"[bold green]CSV report saved to:[/bold green] {saved_csv}")
 
         env.close()
     except Exception as err:
