@@ -1,5 +1,6 @@
 """Tests verifying Typer CLI commands and execution."""
 
+import re
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -26,8 +27,10 @@ def test_cli_gui_help() -> None:
     """Verify adaptive-rl gui --help displays options."""
     result = runner.invoke(app, ["gui", "--help"])
     assert result.exit_code == 0
-    assert "--port" in result.output
-    assert "--host" in result.output
+    clean_output = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", result.output)
+    assert "--port" in clean_output
+    assert "--host" in clean_output
+    assert "Streamlit" in clean_output
 
 
 def test_cli_version() -> None:
