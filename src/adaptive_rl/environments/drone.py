@@ -563,6 +563,16 @@ class DroneNavigation3DEnv(AdaptiveRLEnv[np.ndarray, np.ndarray]):
         """Convenience property exposing the target waypoint."""
         return self._goal
 
+    @property
+    def obstacles(self) -> List[ObstacleSphere3D]:
+        """Public read-only snapshot of the active obstacle set.
+
+        Evaluation and visualization code should use this telemetry
+        interface instead of the private ``_obstacles`` attribute. The list
+        is copied so callers cannot mutate environment state.
+        """
+        return list(self._obstacles)
+
     def reset(
         self,
         *,

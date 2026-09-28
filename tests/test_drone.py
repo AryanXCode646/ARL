@@ -423,3 +423,19 @@ def test_drone_random_rollout_lifecycle() -> None:
     assert "position" in step_info
     assert "distance_to_goal" in step_info
     env.close()
+
+
+def test_drone_exposes_public_obstacle_interface() -> None:
+    """The environment exposes obstacles through a public read-only interface."""
+    env = DroneNavigation3DEnv(bounds=(20.0, 20.0, 10.0), max_steps=10, num_obstacles=3)
+    env.reset(seed=11)
+
+    obstacles = env.obstacles
+    assert len(obstacles) == 3
+    assert obstacles == env._obstacles
+
+    # The public getter returns a snapshot, not the live backing list.
+    obstacles.clear()
+    assert len(env.obstacles) == 3
+    assert len(env._obstacles) == 3
+    env.close()

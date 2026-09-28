@@ -8,7 +8,7 @@ a target, evaluate the trained agent, and visualize the flight demonstration.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional, cast
 
 import typer
 from rich.console import Console
@@ -28,7 +28,7 @@ app = typer.Typer(
 
 benchmark_app = typer.Typer(
     name="benchmark",
-    help="Benchmarking commands for training-budget learning curves.",
+    help="PPO learning-curve benchmark commands (PPO only).",
     no_args_is_help=True,
 )
 app.add_typer(benchmark_app, name="benchmark")
@@ -266,8 +266,18 @@ def benchmark_budgets(
         None, "--output-dir", help="Directory for benchmark JSON/CSV/plot artifacts"
     ),
     plot: bool = typer.Option(False, "--plot/--no-plot", help="Render a learning-curve plot"),
+    plot_x_axis: str = typer.Option(
+        "trained",
+        "--plot-x-axis",
+        help="Plot x-axis semantics: 'trained' (actual timesteps) or 'requested' (budget)",
+    ),
+    evaluation_split: Optional[str] = typer.Option(
+        None,
+        "--evaluation-split",
+        help="Evaluation distribution: custom, train, or held-out test",
+    ),
 ) -> None:
-    """Train and evaluate PPO across a set of training budgets."""
+    """Run the PPO learning-curve benchmark across training budgets (PPO only)."""
     if config is None:
         for candidate in [Path("configs/drone_ppo.yaml"), Path("configs/drone_ppo_demo.yaml")]:
             if candidate.exists():
@@ -285,9 +295,33 @@ def benchmark_budgets(
         console.print(f"[bold red]Configuration error:[/bold red] {err}")
         raise typer.Exit(code=1)
 
-    try:
-        from adaptive_rl.benchmarking import run_learning_curve_benchmark, validate_budgets
+    x_axis = plot_x_axis.strip().lower()
+    if x_axis not in ("trained", "requested"):
+        console.print(
+            f"[bold red]Invalid --plot-x-axis:[/bold red] {plot_x_axis!r}. "
+            "Expected 'trained' or 'requested'."
+        )
+        raise typer.Exit(code=1)
+    if evaluation_split is not None:
+        evaluation_split = evaluation_split.strip().lower()
+        if evaluation_split not in ("custom", "train", "test"):
+            console.print(
+                f"[bold red]Invalid --evaluation-split:[/bold red] {evaluation_split!r}. "
+                "Expected 'custom', 'train', or 'test'."
+            )
+            raise typer.Exit(code=1)
 
+    try:
+        from adaptive_rl.benchmarking import (
+            BenchmarkRunError,
+            run_learning_curve_benchmark,
+            validate_budgets,
+        )
+    except ImportError as err:
+        console.print(f"[bold red]Benchmarking module unavailable:[/bold red] {err}")
+        raise typer.Exit(code=1)
+
+    try:
         budget_values = validate_budgets(budgets) if budgets is not None else None
         if eval_seeds is not None:
             seed_tokens = [part.strip() for part in eval_seeds.split(",")]
@@ -313,24 +347,59 @@ def benchmark_budgets(
             deterministic=deterministic,
             output_dir=output_dir,
             plot=plot,
+            plot_x_axis=cast(Literal["trained", "requested"], x_axis),
+            evaluation_split=cast(Literal["custom", "train", "test"] | None, evaluation_split),
         )
+    except BenchmarkRunError as err:
+        partial = err.result
+        completed = ", ".join(str(b) for b in partial.completed_budgets) or "none"
+        console.print(
+            Panel.fit(
+                f"[bold red]PPO learning-curve benchmark FAILED[/bold red]\n\n"
+                f"• [bold]Status:[/bold] {partial.status}\n"
+                f"• [bold]Completed budgets:[/bold] {completed}\n"
+                f"• [bold]Failed budget:[/bold] {partial.failed_budget}\n"
+                f"• [bold]Error:[/bold] {partial.error}\n"
+                f"• [bold]JSON:[/bold] {partial.json_path}\n"
+                f"• [bold]CSV:[/bold] {partial.csv_path}",
+                title="Learning Curve Benchmark (partial)",
+                border_style="red",
+            )
+        )
+        raise typer.Exit(code=1)
     except Exception as err:
         console.print(f"[bold red]Benchmark failed with error:[/bold red] {err}")
         raise typer.Exit(code=1)
 
+    if result.plot_path is None:
+        plot_summary = "not requested"
+    elif result.plot_error is not None:
+        plot_summary = f"FAILED ({result.plot_error})"
+    else:
+        plot_summary = str(result.plot_path)
+
     console.print(
         Panel.fit(
             f"[bold green]PPO learning-curve benchmark complete[/bold green]\n\n"
+            f"• [bold]Status:[/bold] {result.status}\n"
             f"• [bold]Budgets:[/bold] {', '.join(str(b) for b in result.budgets)}\n"
+            f"• [bold]Completed budgets:[/bold] "
+            f"{', '.join(str(b) for b in result.completed_budgets)}\n"
             f"• [bold]Training seed:[/bold] {result.training_seed}\n"
             f"• [bold]Evaluation seeds:[/bold] {result.evaluation_seeds}\n"
+            f"• [bold]Episodes per seed:[/bold] {result.evaluation_episodes}\n"
             f"• [bold]JSON:[/bold] {result.json_path}\n"
             f"• [bold]CSV:[/bold] {result.csv_path}\n"
-            f"• [bold]Plot:[/bold] {result.plot_path if result.plot_path else 'not generated'}",
+            f"• [bold]Plot:[/bold] {plot_summary}",
             title="Learning Curve Benchmark",
             border_style="green",
         )
     )
+    if result.plot_error is not None:
+        console.print(
+            "[bold red]Plot generation failed; JSON/CSV artifacts were preserved.[/bold red]"
+        )
+        raise typer.Exit(code=1)
 
 
 @app.command(context_settings={"allow_extra_args": True})
