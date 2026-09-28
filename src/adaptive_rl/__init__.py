@@ -1,7 +1,7 @@
-"""AdaptiveRL — Multi-Environment Reinforcement Learning Platform.
+"""AdaptiveRL — Reinforcement Learning for Simulated 3D Drone Navigation.
 
-AdaptiveRL is a modular reinforcement learning framework designed to train,
-evaluate, and benchmark agents across multiple environments.
+AdaptiveRL trains, evaluates, and demonstrates an RL agent navigating
+a simulated 3D drone through obstacles toward a target waypoint.
 """
 
 from adaptive_rl.config import (
@@ -19,7 +19,6 @@ from adaptive_rl.metrics import (
     EpisodeMetrics,
     EpisodeMetricsAccumulator,
     OutcomePolicy,
-    TrafficOutcomePolicy,
     compute_rate,
     extract_episode_metrics,
 )
@@ -37,7 +36,6 @@ __all__ = [
     "EvaluationConfig",
     "ExperimentConfig",
     "OutcomePolicy",
-    "TrafficOutcomePolicy",
     "TrainingConfig",
     "compute_rate",
     "extract_episode_metrics",
