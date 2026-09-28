@@ -120,7 +120,10 @@ def test_evaluator_episode_records() -> None:
 def test_student_t_statistics_match_analytical_values() -> None:
     assert student_t_critical_value(0.95, 1) == pytest.approx(12.7062047364, rel=1e-9)
     assert student_t_critical_value(0.95, 2) == pytest.approx(4.3026527297, rel=1e-9)
+    assert student_t_critical_value(0.95, 5) == pytest.approx(2.5705818356, rel=1e-9)
     assert student_t_critical_value(0.95, 9) == pytest.approx(2.2621571627, rel=1e-9)
+    assert student_t_critical_value(0.95, 10) == pytest.approx(2.2281388520, rel=1e-9)
+    assert student_t_critical_value(0.95, 30) == pytest.approx(2.0422724563, rel=1e-9)
 
     stats = summarize_seed_values([1.0, 2.0, 3.0])
     margin = 4.3026527297 / math.sqrt(3.0)

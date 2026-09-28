@@ -354,7 +354,7 @@ For detailed per-test execution traces:
 python -m pytest -v
 ```
 
-The repository includes **49 automated unit and integration tests** verifying:
+The repository includes automated unit and integration tests verifying:
 - 3D kinematics equations and aerodynamic drag
 - 29-dimensional observation space bounds
 - Analytical 16-ray LiDAR raycasts and obstacle clearance
@@ -397,7 +397,7 @@ When a training run completes, artifacts are automatically written to disk:
   *(e.g., `artifacts/models/drone_ppo_demo_final.zip`)*
 - **Training Metadata & Loss/Reward Log**:  
   `artifacts/metadata/{experiment_name}_training.json`  
-  *(contains total timesteps, duration in seconds, mean reward, and per-episode return lists)*
+  *(contains total timesteps, `training_time_seconds` for PPO optimization only, broader `duration_seconds` through model serialization, mean reward, and per-episode return lists)*
 - **Periodic Checkpoints** (if configured):  
   `artifacts/checkpoints/{experiment_name}/`
 

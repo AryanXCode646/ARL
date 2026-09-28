@@ -5,16 +5,11 @@ from __future__ import annotations
 import csv
 import json
 import math
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
-from adaptive_rl.algorithms.ppo import PPOAlgorithm
 from adaptive_rl.config import BenchmarkConfig, ExperimentConfig
-from adaptive_rl.environments.registry import make_env
-from adaptive_rl.evaluation.evaluator import Evaluator
-from adaptive_rl.training.trainer import PPOTrainer
 
 
 def validate_budgets(
@@ -80,7 +75,7 @@ class LearningCurvePoint:
     collision_rate: float | None
     timeout_rate: float | None
     mean_reward: float
-    std_reward: float
+    std_reward: float | None
     mean_episode_length: float
     training_time_seconds: float
     model_path: str
@@ -90,6 +85,8 @@ class LearningCurvePoint:
     deterministic: bool
     algorithm: str
     environment: str
+    per_seed_summaries: list[dict[str, int | float | None]] = field(default_factory=list)
+    cross_seed_statistics: dict[str, dict[str, float | int | None]] = field(default_factory=dict)
 
 
 @dataclass
@@ -123,6 +120,22 @@ class LearningCurveBenchmarkResult:
                 "evaluation_episodes": self.evaluation_episodes,
                 "deterministic": self.deterministic,
                 "budgets": self.budgets,
+                "metric_semantics": {
+                    "aggregation": "pooled episode-level descriptive statistics",
+                    "success_rate": "pooled over episodes with available success metadata",
+                    "collision_rate": "pooled over episodes with available collision metadata",
+                    "timeout_rate": "fraction of all evaluated episodes with truncated=True",
+                    "mean_reward": "mean of pooled episode returns",
+                    "std_reward": "sample standard deviation across pooled episode returns",
+                    "mean_episode_length": "mean of pooled episode lengths",
+                    "cross_seed_statistics": (
+                        "Student's t summaries across evaluator per-seed summaries; "
+                        "within-seed reward and length standard deviations use evaluator semantics"
+                    ),
+                },
+                "training_time_semantics": (
+                    "monotonic elapsed time inside PPOAlgorithm.train() only"
+                ),
             },
             "results": [
                 {
@@ -142,6 +155,8 @@ class LearningCurveBenchmarkResult:
                     "deterministic": point.deterministic,
                     "algorithm": point.algorithm,
                     "environment": point.environment,
+                    "per_seed_summaries": point.per_seed_summaries,
+                    "cross_seed_statistics": point.cross_seed_statistics,
                 }
                 for point in self.points
             ],
@@ -170,6 +185,26 @@ def _budget_dir(base_output_dir: Path, budget: int) -> Path:
     return base_output_dir / "learning_curve" / f"budget_{budget}"
 
 
+def _make_env(env_name: str, **env_kwargs: Any) -> Any:
+    from adaptive_rl.environments.registry import make_env
+
+    return make_env(env_name, **env_kwargs)
+
+
+def _make_trainer(config: ExperimentConfig, env: Any) -> Any:
+    from adaptive_rl.training.trainer import PPOTrainer
+
+    return PPOTrainer(config=config, env=env)
+
+
+def _load_evaluator(model_path: Path, env: Any) -> tuple[Any, Any]:
+    from adaptive_rl.algorithms.ppo import PPOAlgorithm
+    from adaptive_rl.evaluation.evaluator import Evaluator
+
+    algorithm = PPOAlgorithm.from_pretrained(model_path, env=env)
+    return algorithm, Evaluator(algorithm=algorithm, env=env)
+
+
 def _evaluate_model(
     model_path: Path,
     *,
@@ -178,36 +213,35 @@ def _evaluate_model(
     evaluation_seeds: Sequence[int],
     evaluation_episodes: int,
     deterministic: bool,
-) -> tuple[float | None, float | None, float | None, float, float, float]:
-    env = make_env(env_name, **env_kwargs)
+) -> tuple[
+    float | None,
+    float | None,
+    float | None,
+    float,
+    float | None,
+    float,
+    list[dict[str, Any]],
+    dict[str, dict[str, float | int | None]],
+]:
+    env = _make_env(env_name, **env_kwargs)
     try:
-        algo = PPOAlgorithm.from_pretrained(model_path, env=env)
-        evaluator = Evaluator(algorithm=algo, env=env)
+        _, evaluator = _load_evaluator(model_path, env)
+        evaluation = evaluator.evaluate_seeds(
+            seeds=evaluation_seeds,
+            episodes_per_seed=evaluation_episodes,
+            deterministic=deterministic,
+        )
+        records = evaluation.episodes
+        if not records:
+            raise RuntimeError("Evaluation produced no episodes.")
+        all_rewards = [record.return_value for record in records]
+        all_lengths = [record.episode_length for record in records]
+        successes = [record.success for record in records if record.success is not None]
+        collisions = [record.collision for record in records if record.collision is not None]
+        timeout_count = sum(record.truncated for record in records)
+        total_episodes = len(records)
 
-        all_rewards: list[float] = []
-        all_lengths: list[int] = []
-        successes: list[bool] = []
-        collisions: list[bool] = []
-        timeout_count = 0
-        total_episodes = 0
-
-        for seed in evaluation_seeds:
-            metrics = evaluator.evaluate(
-                num_episodes=evaluation_episodes,
-                deterministic=deterministic,
-                base_seed=seed,
-            )
-            all_rewards.extend(metrics.additional_metrics.get("all_rewards", []))
-            all_lengths.extend(metrics.additional_metrics.get("all_lengths", []))
-            records = evaluator.last_episode_records
-            total_episodes += len(records)
-            successes.extend(record.success for record in records if record.success is not None)
-            collisions.extend(
-                record.collision for record in records if record.collision is not None
-            )
-            timeout_count += sum(record.truncated for record in records)
-
-        mean_reward = float(sum(all_rewards) / len(all_rewards)) if all_rewards else 0.0
+        mean_reward = float(sum(all_rewards) / len(all_rewards))
         std_reward = (
             float(
                 (
@@ -217,9 +251,9 @@ def _evaluate_model(
                 ** 0.5
             )
             if len(all_rewards) > 1
-            else 0.0
+            else None
         )
-        mean_episode_length = float(sum(all_lengths) / len(all_lengths)) if all_lengths else 0.0
+        mean_episode_length = float(sum(all_lengths) / len(all_lengths))
 
         success_rate = float(sum(successes) / len(successes)) if successes else None
         collision_rate = float(sum(collisions) / len(collisions)) if collisions else None
@@ -232,6 +266,8 @@ def _evaluate_model(
             mean_reward,
             std_reward,
             mean_episode_length,
+            [summary.to_dict() for summary in evaluation.per_seed],
+            {name: stats.to_dict() for name, stats in evaluation.aggregate.items()},
         )
     finally:
         env.close()
@@ -261,13 +297,12 @@ def _run_single_budget(
     config_copy.output_dir = benchmark_dir
     config_copy.log_dir = benchmark_dir / "logs"
 
-    env = make_env(config_copy.environment.name, **config_copy.environment.parameters)
-    trainer: PPOTrainer | None = None
-    start = time.perf_counter()
+    env = _make_env(config_copy.environment.name, **config_copy.environment.parameters)
+    trainer: Any = None
     try:
-        trainer = PPOTrainer(config=config_copy, env=env)
+        trainer = _make_trainer(config_copy, env)
         result = trainer.fit()
-        training_time_seconds = time.perf_counter() - start
+        training_time_seconds = result.training_time_seconds
     finally:
         if trainer is not None:
             trainer.close()
@@ -287,15 +322,22 @@ def _run_single_budget(
             f"Invalid training duration for budget {budget}: {training_time_seconds}"
         )
 
-    success_rate, collision_rate, timeout_rate, mean_reward, std_reward, mean_episode_length = (
-        _evaluate_model(
-            model_path,
-            env_name=config_copy.environment.name,
-            env_kwargs=config_copy.environment.parameters,
-            evaluation_seeds=evaluation_seeds,
-            evaluation_episodes=evaluation_episodes,
-            deterministic=deterministic,
-        )
+    (
+        success_rate,
+        collision_rate,
+        timeout_rate,
+        mean_reward,
+        std_reward,
+        mean_episode_length,
+        per_seed_summaries,
+        cross_seed_statistics,
+    ) = _evaluate_model(
+        model_path,
+        env_name=config_copy.environment.name,
+        env_kwargs=config_copy.environment.parameters,
+        evaluation_seeds=evaluation_seeds,
+        evaluation_episodes=evaluation_episodes,
+        deterministic=deterministic,
     )
 
     return LearningCurvePoint(
@@ -315,6 +357,8 @@ def _run_single_budget(
         deterministic=deterministic,
         algorithm=config_copy.algorithm.name,
         environment=config_copy.environment.name,
+        per_seed_summaries=per_seed_summaries,
+        cross_seed_statistics=cross_seed_statistics,
     )
 
 
@@ -335,11 +379,8 @@ def run_learning_curve_benchmark(
     if config.training is None:
         raise ValueError("A training section is required to run the learning-curve benchmark.")
 
-    if budgets is None:
-        benchmark_cfg = _resolve_benchmark_config(config, None)
-        normalized = validate_budgets(benchmark_cfg.budgets)
-    else:
-        normalized = validate_budgets(budgets)
+    benchmark_cfg = _resolve_benchmark_config(config, None)
+    normalized = validate_budgets(benchmark_cfg.budgets if budgets is None else budgets)
 
     if training_seed is not None:
         final_training_seed = training_seed
@@ -348,13 +389,9 @@ def run_learning_curve_benchmark(
     else:
         final_training_seed = config.seed
 
-    if evaluation_seeds is None:
-        if config.benchmark is not None:
-            final_eval_seeds = list(config.benchmark.evaluation_seeds)
-        else:
-            final_eval_seeds = [config.seed + i for i in range(config.evaluation.eval_episodes)]
-    else:
-        final_eval_seeds = list(evaluation_seeds)
+    final_eval_seeds = (
+        list(benchmark_cfg.evaluation_seeds) if evaluation_seeds is None else list(evaluation_seeds)
+    )
 
     if isinstance(final_training_seed, bool) or not isinstance(final_training_seed, int):
         raise ValueError("Training seed must be an integer.")
@@ -369,13 +406,9 @@ def run_learning_curve_benchmark(
     if len(set(final_eval_seeds)) != len(final_eval_seeds):
         raise ValueError("Evaluation seeds must not contain duplicates.")
 
-    if evaluation_episodes is None:
-        if config.benchmark is not None:
-            final_eval_episodes = config.benchmark.evaluation_episodes
-        else:
-            final_eval_episodes = config.evaluation.eval_episodes
-    else:
-        final_eval_episodes = evaluation_episodes
+    final_eval_episodes = (
+        benchmark_cfg.evaluation_episodes if evaluation_episodes is None else evaluation_episodes
+    )
     if isinstance(final_eval_episodes, bool) or not isinstance(final_eval_episodes, int):
         raise ValueError("Evaluation episodes per seed must be an integer.")
     if final_eval_episodes <= 0:
@@ -498,17 +531,19 @@ def plot_learning_curve(
     rewards = [point.mean_reward for point in result.points]
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 4), constrained_layout=True)
-    axes[0].plot(budgets, success_rates, marker="o", linewidth=2)
-    axes[0].set_title("Success rate vs training budget")
-    axes[0].set_xlabel("Training budget (timesteps)")
-    axes[0].set_ylabel("Success rate")
-    axes[0].set_ylim(-0.05, 1.05)
+    try:
+        axes[0].plot(budgets, success_rates, marker="o", linewidth=2)
+        axes[0].set_title("Success rate vs training budget")
+        axes[0].set_xlabel("Training budget (timesteps)")
+        axes[0].set_ylabel("Success rate")
+        axes[0].set_ylim(-0.05, 1.05)
 
-    axes[1].plot(budgets, rewards, marker="s", linewidth=2, color="tab:orange")
-    axes[1].set_title("Mean reward vs training budget")
-    axes[1].set_xlabel("Training budget (timesteps)")
-    axes[1].set_ylabel("Mean reward")
+        axes[1].plot(budgets, rewards, marker="s", linewidth=2, color="tab:orange")
+        axes[1].set_title("Mean reward vs training budget")
+        axes[1].set_xlabel("Training budget (timesteps)")
+        axes[1].set_ylabel("Mean reward")
 
-    fig.savefig(plot_target, dpi=160)
-    plt.close(fig)
+        fig.savefig(plot_target, dpi=160, metadata={"Software": "AdaptiveRL"})
+    finally:
+        plt.close(fig)
     return plot_target

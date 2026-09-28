@@ -3,8 +3,14 @@
 import csv
 import json
 import math
+import os
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
+from types import ModuleType
 from typing import Any
+from unittest.mock import MagicMock
 
 import gymnasium as gym
 import numpy as np
@@ -142,21 +148,58 @@ benchmark:
     assert configured.benchmark.deterministic is False
 
 
+def test_core_and_benchmark_imports_do_not_load_optional_rl_stack() -> None:
+    repository_root = Path(__file__).resolve().parent.parent
+    script = textwrap.dedent(
+        """
+        import sys
+        from importlib.abc import MetaPathFinder
+
+        class BlockOptionalRLImports(MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == "gymnasium" or fullname.startswith(
+                    ("stable_baselines3", "torch")
+                ):
+                    raise AssertionError(f"Optional RL dependency imported eagerly: {fullname}")
+                return None
+
+        sys.meta_path.insert(0, BlockOptionalRLImports())
+        import adaptive_rl
+        from adaptive_rl.benchmarking import run_learning_curve_benchmark
+
+        assert callable(run_learning_curve_benchmark)
+        assert callable(adaptive_rl.run_learning_curve_benchmark)
+        """
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.pathsep.join(
+        [str(repository_root / "src"), environment.get("PYTHONPATH", "")]
+    )
+    subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=repository_root,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def test_learning_curve_benchmark_execution_and_exports(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from adaptive_rl.benchmarking import learning_curve
+    from adaptive_rl.training.trainer import PPOTrainer
 
     config = _make_config(tmp_path)
     original = config.model_dump(mode="python")
-    real_trainer_type = learning_curve.PPOTrainer
-    real_make_env = learning_curve.make_env
+    real_make_env = learning_curve._make_env
     real_evaluate_model = learning_curve._evaluate_model
     trainers: list[Any] = []
     envs: list[gym.Env] = []
     evaluation_calls: list[dict[str, Any]] = []
 
-    class TrackingTrainer(real_trainer_type):
+    class TrackingTrainer(PPOTrainer):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
             self.fit_calls = 0
@@ -166,17 +209,20 @@ def test_learning_curve_benchmark_execution_and_exports(
             self.fit_calls += 1
             return super().fit()
 
-    def track_env(*args: Any, **kwargs: Any) -> gym.Env:
-        env = real_make_env(*args, **kwargs)
+    def track_env(env_name: str, **kwargs: Any) -> gym.Env:
+        env = real_make_env(env_name, **kwargs)
         envs.append(env)
         return env
+
+    def track_trainer(config: ExperimentConfig, env: gym.Env) -> PPOTrainer:
+        return TrackingTrainer(config=config, env=env)
 
     def track_evaluation(*args: Any, **kwargs: Any) -> Any:
         evaluation_calls.append(kwargs.copy())
         return real_evaluate_model(*args, **kwargs)
 
-    monkeypatch.setattr(learning_curve, "PPOTrainer", TrackingTrainer)
-    monkeypatch.setattr(learning_curve, "make_env", track_env)
+    monkeypatch.setattr(learning_curve, "_make_trainer", track_trainer)
+    monkeypatch.setattr(learning_curve, "_make_env", track_env)
     monkeypatch.setattr(learning_curve, "_evaluate_model", track_evaluation)
 
     result = run_learning_curve_benchmark(config, budgets=[128, 64])
@@ -236,7 +282,7 @@ def test_learning_curve_benchmark_execution_and_exports(
         assert point.collision_rate is None or 0.0 <= point.collision_rate <= 1.0
         assert point.timeout_rate is None or 0.0 <= point.timeout_rate <= 1.0
         assert math.isfinite(point.mean_reward)
-        assert point.std_reward >= 0.0
+        assert point.std_reward is None or point.std_reward >= 0.0
         assert point.mean_episode_length >= 0.0
         assert math.isfinite(point.training_time_seconds)
         assert point.training_time_seconds >= 0.0
@@ -274,6 +320,12 @@ def test_learning_curve_benchmark_execution_and_exports(
         assert required_metrics <= row.keys()
         assert Path(row["model_path"]).is_file()
     assert set(data["plot_data"]) == {"budgets", "success_rate", "mean_reward"}
+    assert data["benchmark"]["metric_semantics"]["aggregation"] == (
+        "pooled episode-level descriptive statistics"
+    )
+    assert data["benchmark"]["training_time_semantics"].startswith("monotonic elapsed time")
+    assert all(len(row["per_seed_summaries"]) == 2 for row in data["results"])
+    assert all("success_rate" in row["cross_seed_statistics"] for row in data["results"])
 
     assert result.csv_path is not None and result.csv_path.is_file()
     with result.csv_path.open(newline="", encoding="utf-8") as handle:
@@ -336,6 +388,134 @@ def test_learning_curve_benchmark_repeats_deterministically(tmp_path: Path) -> N
         assert getattr(first_point, field) == getattr(second_point, field)
 
 
+def test_benchmark_keeps_single_episode_standard_deviation_unavailable(
+    tmp_path: Path,
+) -> None:
+    config = _make_config(tmp_path)
+    assert config.benchmark is not None
+    config.benchmark.evaluation_seeds = [11]
+    config.benchmark.evaluation_episodes = 1
+
+    result = run_learning_curve_benchmark(
+        config,
+        budgets=[64],
+        output_dir=tmp_path / "single_episode",
+    )
+
+    point = result.points[0]
+    assert point.std_reward is None
+    assert result.to_dict()["results"][0]["std_reward"] is None
+    assert result.csv_path is not None
+    with result.csv_path.open(newline="", encoding="utf-8") as handle:
+        row = next(csv.DictReader(handle))
+    assert row["std_reward"] == ""
+
+
+def test_default_benchmark_evaluation_does_not_derive_seed_count_from_episode_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from adaptive_rl.benchmarking import learning_curve
+
+    config = _make_config(tmp_path)
+    config.benchmark = None
+    config.evaluation.eval_episodes = 2
+    calls: list[dict[str, Any]] = []
+
+    def fake_run(
+        config: ExperimentConfig,
+        budget: int,
+        **kwargs: Any,
+    ) -> learning_curve.LearningCurvePoint:
+        calls.append({"budget": budget, **kwargs})
+        return learning_curve.LearningCurvePoint(
+            budget_timesteps=budget,
+            trained_timesteps=budget,
+            success_rate=None,
+            collision_rate=None,
+            timeout_rate=0.0,
+            mean_reward=1.0,
+            std_reward=0.0,
+            mean_episode_length=1.0,
+            training_time_seconds=0.0,
+            model_path=str(tmp_path / "model.zip"),
+            training_seed=kwargs["training_seed"],
+            evaluation_seeds=list(kwargs["evaluation_seeds"]),
+            evaluation_episodes=kwargs["evaluation_episodes"],
+            deterministic=kwargs["deterministic"],
+            algorithm="ppo",
+            environment="drone",
+        )
+
+    monkeypatch.setattr(learning_curve, "_run_single_budget", fake_run)
+    result = run_learning_curve_benchmark(config, budgets=[64], output_dir=tmp_path / "out")
+
+    assert result.evaluation_seeds == [42, 43, 44, 45, 46]
+    assert result.evaluation_episodes == 20
+    assert calls[0]["evaluation_seeds"] == [42, 43, 44, 45, 46]
+    assert calls[0]["evaluation_episodes"] == 20
+    assert len(calls[0]["evaluation_seeds"]) * calls[0]["evaluation_episodes"] == 100
+
+
+def test_plotting_is_lazy_and_closes_figure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from adaptive_rl.benchmarking.learning_curve import (
+        LearningCurveBenchmarkResult,
+        plot_learning_curve,
+    )
+
+    figure = MagicMock()
+    figure.savefig.side_effect = lambda path, dpi, metadata: Path(path).touch()
+    axes = [MagicMock(), MagicMock()]
+    pyplot = ModuleType("matplotlib.pyplot")
+    pyplot.subplots = MagicMock(return_value=(figure, axes))  # type: ignore[attr-defined]
+    pyplot.close = MagicMock()  # type: ignore[attr-defined]
+    matplotlib = ModuleType("matplotlib")
+    matplotlib.use = MagicMock()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "matplotlib", matplotlib)
+    monkeypatch.setitem(sys.modules, "matplotlib.pyplot", pyplot)
+
+    output_path = tmp_path / "curve.png"
+    result = LearningCurveBenchmarkResult(
+        benchmark_name="ppo_learning_curve",
+        algorithm="ppo",
+        environment="drone",
+        budgets=[],
+        training_seed=0,
+        evaluation_seeds=[],
+        evaluation_episodes=1,
+        deterministic=True,
+    )
+    path = plot_learning_curve(result, output_path)
+    assert path == output_path
+    assert output_path.is_file()
+    assert figure.savefig.call_args.kwargs["metadata"] == {"Software": "AdaptiveRL"}
+    pyplot.close.assert_called_once_with(figure)  # type: ignore[attr-defined]
+
+
+def test_plotting_reports_missing_matplotlib(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from adaptive_rl.benchmarking.learning_curve import (
+        LearningCurveBenchmarkResult,
+        plot_learning_curve,
+    )
+
+    monkeypatch.setitem(sys.modules, "matplotlib", None)
+    result = LearningCurveBenchmarkResult(
+        benchmark_name="ppo_learning_curve",
+        algorithm="ppo",
+        environment="drone",
+        budgets=[],
+        training_seed=0,
+        evaluation_seeds=[],
+        evaluation_episodes=1,
+        deterministic=True,
+    )
+    with pytest.raises(RuntimeError, match="requires matplotlib"):
+        plot_learning_curve(result, tmp_path / "curve.png")
+
+
 class _OutcomeEnv(gym.Env):
     observation_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
     action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
@@ -351,6 +531,14 @@ class _OutcomeEnv(gym.Env):
         return np.zeros(1, dtype=np.float32), {}
 
     def step(self, action: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+        if self.outcome == "collision":
+            return (
+                np.zeros(1, dtype=np.float32),
+                1.0,
+                True,
+                False,
+                {"success": False, "collision": True},
+            )
         if self.outcome == "truncated":
             return (
                 np.zeros(1, dtype=np.float32),
@@ -393,21 +581,26 @@ class _ConstantPolicy:
 
 
 @pytest.mark.parametrize(
-    ("outcome", "expected_success", "expected_timeout"),
+    ("outcome", "expected_success", "expected_collision", "expected_timeout"),
     [
-        ("termination", 0.0, 0.0),
-        ("truncated", 0.0, 1.0),
-        ("success", 1.0, 0.0),
+        ("termination", 0.0, 0.0, 0.0),
+        ("collision", 0.0, 1.0, 0.0),
+        ("truncated", 0.0, 0.0, 1.0),
+        ("success", 1.0, 0.0, 0.0),
     ],
 )
 def test_evaluator_uses_gymnasium_truncation_signal(
-    outcome: str, expected_success: float, expected_timeout: float
+    outcome: str,
+    expected_success: float,
+    expected_collision: float,
+    expected_timeout: float,
 ) -> None:
     env = _OutcomeEnv(outcome)
     evaluator = Evaluator(algorithm=_ConstantPolicy(), env=env)  # type: ignore[arg-type]
     metrics = evaluator.evaluate(num_episodes=1, deterministic=True, base_seed=2)
 
     assert metrics.success_rate == expected_success
+    assert metrics.collision_rate == expected_collision
     assert metrics.truncation_rate == expected_timeout
     assert evaluator.last_episode_records[0].truncated is (expected_timeout == 1.0)
     evaluator.close()
@@ -431,6 +624,24 @@ def test_benchmark_cli_dispatch_and_budget_validation(
     config_path = tmp_path / "benchmark.yaml"
     save_config(_make_config(tmp_path), config_path)
     runner = CliRunner()
+    benchmark_help = runner.invoke(app, ["benchmark", "--help"])
+    assert benchmark_help.exit_code == 0
+    assert "budgets" in benchmark_help.output
+    budget_help = runner.invoke(app, ["benchmark", "budgets", "--help"])
+    assert budget_help.exit_code == 0
+    for option in (
+        "--config",
+        "--budgets",
+        "--training-seed",
+        "--eval-seeds",
+        "--episodes",
+        "--deterministic",
+        "--stochastic",
+        "--output-dir",
+        "--plot",
+        "--no-plot",
+    ):
+        assert option in budget_help.output
     dispatch: list[dict[str, Any]] = []
     fake_result = LearningCurveBenchmarkResult(
         benchmark_name="ppo_learning_curve",
@@ -490,6 +701,7 @@ def test_benchmark_cli_dispatch_and_budget_validation(
         )
         assert result.exit_code == 1
         assert "Benchmark failed with error" in result.output
+        assert "Traceback" not in result.output
     assert len(dispatch) == 1
 
     malformed_seeds = runner.invoke(
@@ -507,6 +719,7 @@ def test_benchmark_cli_dispatch_and_budget_validation(
     )
     assert malformed_seeds.exit_code == 1
     assert "Malformed evaluation seed list" in malformed_seeds.output
+    assert "Traceback" not in malformed_seeds.output
     assert len(dispatch) == 1
 
     invalid_seed_value = runner.invoke(

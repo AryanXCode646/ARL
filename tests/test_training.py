@@ -1,5 +1,6 @@
 """Tests for PPO training pipeline and model persistence."""
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -84,4 +85,52 @@ def test_ppo_trainer_full_lifecycle(tmp_path: Path) -> None:
     assert result.final_model_path.exists()
     assert result.metadata_path is not None and result.metadata_path.exists()
     assert isinstance(result.mean_reward, float)
+    assert result.training_time_seconds >= 0.0
+    trainer.close()
+
+
+def test_training_duration_excludes_model_serialization(tmp_path: Path, monkeypatch) -> None:
+    from adaptive_rl.training import trainer as trainer_module
+
+    clock = [0.0]
+
+    class FakeEnv:
+        def close(self) -> None:
+            pass
+
+    class FakeAlgorithm:
+        def __init__(self, **kwargs) -> None:
+            self.num_timesteps = 64
+
+        def train(self, total_timesteps: int, callback=None) -> None:
+            clock[0] += 2.5
+
+        def save(self, path: str | Path) -> None:
+            clock[0] += 100.0
+            Path(path).write_bytes(b"model")
+
+    monkeypatch.setattr(trainer_module, "PPOAlgorithm", FakeAlgorithm)
+    monkeypatch.setattr(trainer_module, "SB3CallbackAdapter", lambda **kwargs: object())
+    monkeypatch.setattr(trainer_module.time, "perf_counter", lambda: clock[0])
+    config = ExperimentConfig(
+        name="timing_test",
+        output_dir=tmp_path / "artifacts",
+        log_dir=tmp_path / "logs",
+        algorithm=AlgorithmConfig(
+            name="ppo",
+            parameters={"n_steps": 64, "batch_size": 32},
+        ),
+        environment=EnvironmentConfig(name="drone"),
+        training=TrainingConfig(total_timesteps=64, checkpoint_freq=0),
+        evaluation=EvaluationConfig(eval_episodes=1),
+    )
+
+    trainer = PPOTrainer(config=config, env=FakeEnv())  # type: ignore[arg-type]
+    result = trainer.fit()
+    metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+
+    assert result.training_time_seconds == 2.5
+    assert clock[0] == 102.5
+    assert metadata["training_time_seconds"] == 2.5
+    assert result.final_model_path.is_file()
     trainer.close()

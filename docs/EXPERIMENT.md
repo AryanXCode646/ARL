@@ -35,7 +35,7 @@ This document details the experimental methodology, hypotheses, benchmark variab
 
 ## 3. PPO Learning-Curve Benchmark
 
-The budget benchmark trains a fresh PPO model from the same base configuration at each requested training budget. Every model is evaluated with the same ordered evaluation seeds, episode count per seed, and deterministic-action setting; evaluation uses the saved model and a separate fresh environment.
+The budget benchmark trains a fresh PPO model from the same base configuration at each requested training budget. Every model is evaluated with the same ordered evaluation seed groups, episode count per seed, environment parameters, algorithm settings, and deterministic-action setting; evaluation uses the saved model and a separate fresh environment. `--eval-seeds` selects the seed groups; `--episodes` is the number of episodes run within each group and does not determine how many seeds are evaluated.
 
 ```bash
 adaptive-rl benchmark budgets \
@@ -68,11 +68,17 @@ artifacts/benchmarks/
     └── ...
 ```
 
-JSON contains benchmark settings, one result object per requested budget, and plot-ready series. CSV contains the same per-budget performance values. Pass `--plot` to additionally render `learning_curve_budget.png`; Matplotlib must be installed for that optional output.
+JSON contains benchmark settings, one result object per requested budget, pooled metrics, per-seed summaries, cross-seed Student's t statistics, and plot-ready series. CSV contains the pooled per-budget performance values. Pass `--plot` to additionally render `learning_curve_budget.png`; Matplotlib is imported only when plotting is requested and must be installed for that optional output. Generated plot figures are closed after saving.
 
-`budget_timesteps` records the requested budget, while `trained_timesteps` records the actual environment interactions reported by Stable-Baselines3. PPO collects complete rollouts, so a requested budget that is not a multiple of its configured `n_steps` can be exceeded up to the next rollout boundary. Compare results using `trained_timesteps` when budgets are not aligned to rollout sizes. Training duration is informational and should not be interpreted as a hardware-independent performance metric.
+The built-in benchmark defaults are budgets `[5000, 10000, 25000, 50000]`, training seed `42`, evaluation seed groups `[42, 43, 44, 45, 46]`, and `20` episodes per seed. A `benchmark` section in the YAML supplies these values instead; explicit CLI options override the corresponding config values. Legacy `evaluation.eval_episodes` does not control the number of seed groups or the benchmark episode count. Thus, without overrides, the default evaluation runs five seed groups with twenty episodes each, not twenty seed groups with twenty episodes each.
 
-Interpret the curves jointly: rising success rate and mean reward with a falling collision or timeout rate suggest improvement; flat metrics may indicate a plateau. A timeout is counted only when Gymnasium returns `truncated=True`, not merely because an episode has a particular length. The same seeds make evaluation conditions comparable, but do not remove variation from training or guarantee bit-for-bit results across hardware, PyTorch versions, or CUDA kernels.
+`budget_timesteps` records the requested budget, while `trained_timesteps` records the actual environment interactions reported by Stable-Baselines3. For example, budget `65` with PPO `n_steps: 64` trains to `128` steps because PPO collects complete rollouts. Compare results using `trained_timesteps` when budgets are not aligned to rollout sizes.
+
+`training_time_seconds` measures only the call to `PPOAlgorithm.train()` using a monotonic clock. It excludes environment/model setup, final model serialization, metadata writing, evaluation, JSON/CSV export, and plotting. Training metadata also retains the broader legacy `duration_seconds` lifecycle measure, which is not the benchmark training-time metric. Neither duration is hardware-independent.
+
+The named benchmark metrics (`success_rate`, `collision_rate`, `timeout_rate`, `mean_reward`, `std_reward`, and `mean_episode_length`) are pooled descriptive summaries over all evaluated episodes for a budget. Reward standard deviation is the sample standard deviation across pooled episode returns and is unavailable (`null` in JSON, blank in CSV) with fewer than two episodes. Success and collision rates use episodes that reported the corresponding outcome field; timeout rate is based only on Gymnasium's actual `truncated` signal. The JSON additionally retains per-seed summaries and cross-seed Student's t statistics from the reusable evaluator; these are distinct from the pooled metrics and are not estimates based on the pooled episode sample. Within-seed reward and episode-length standard deviations follow the evaluator's existing population-standard-deviation convention; cross-seed uncertainty is then calculated over those seed summaries using sample-standard-deviation and Student's t conventions.
+
+Interpret the curves jointly: rising success rate and mean reward with a falling collision or timeout rate suggest improvement; flat metrics may indicate a plateau. A timeout is counted only when Gymnasium returns `truncated=True`, not merely because an episode has a particular length. The same seed groups and settings make evaluation conditions comparable, but do not remove variation from training or guarantee bit-for-bit results across hardware, PyTorch versions, or CUDA kernels.
 
 For a CI-sized run, copy the experiment YAML and set PPO `n_steps: 64` and `batch_size: 32` in that copy. Then run a short evaluation:
 

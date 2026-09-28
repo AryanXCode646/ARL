@@ -230,10 +230,12 @@ def benchmark_budgets(
         None, "--training-seed", help="Override the training seed used across budgets"
     ),
     eval_seeds: Optional[str] = typer.Option(
-        None, "--eval-seeds", help="Comma-separated evaluation seeds (for example: 42,43,44)"
+        None,
+        "--eval-seeds",
+        help="Comma-separated evaluation seed groups; defaults to configured or benchmark seeds",
     ),
     episodes: Optional[int] = typer.Option(
-        None, "--episodes", help="Override evaluation episodes per seed"
+        None, "--episodes", help="Evaluation episodes per seed (separate from the seed count)"
     ),
     deterministic: Optional[bool] = typer.Option(
         None, "--deterministic/--stochastic", help="Use deterministic actions during evaluation"

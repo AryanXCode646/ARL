@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 import time
 from dataclasses import dataclass, field
@@ -40,6 +41,7 @@ class TrainingResult:
     success_rate: Optional[float] = None
     collision_rate: Optional[float] = None
     metadata_path: Optional[Path] = None
+    training_time_seconds: float = 0.0
 
 
 class PPOTrainer:
@@ -109,10 +111,14 @@ class PPOTrainer:
         )
 
         assert self.config.training is not None
+        training_started_at = time.perf_counter()
         self.algorithm.train(
             total_timesteps=self.config.training.total_timesteps,
             callback=adapter,
         )
+        training_time_seconds = time.perf_counter() - training_started_at
+        if not math.isfinite(training_time_seconds) or training_time_seconds < 0:
+            raise RuntimeError(f"Invalid training duration: {training_time_seconds}")
 
         # Save model artifact
         models_dir = self.config.output_dir / "models"
@@ -140,6 +146,7 @@ class PPOTrainer:
             "collision_rate": self.metric_logger.collision_rate,
             "final_model_path": str(final_model_path),
             "duration_seconds": round(duration, 2),
+            "training_time_seconds": training_time_seconds,
             "episode_rewards": [round(float(r), 2) for r in self.metric_logger.episode_rewards],
             "episode_lengths": [int(length) for length in self.metric_logger.episode_lengths],
             "version": adaptive_rl.__version__,
@@ -159,6 +166,7 @@ class PPOTrainer:
             success_rate=self.metric_logger.success_rate,
             collision_rate=self.metric_logger.collision_rate,
             metadata_path=metadata_path,
+            training_time_seconds=training_time_seconds,
         )
 
     def close(self) -> None:
