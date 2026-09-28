@@ -26,6 +26,19 @@ def test_cli_help() -> None:
     assert "experiment-ablation" in result.output
     assert "config" in result.output
     assert "env" in result.output
+    assert "benchmark" in result.output
+
+
+def test_cli_benchmark_compare_algorithms_help() -> None:
+    """Verify adaptive-rl benchmark compare-algorithms --help displays options."""
+    result = runner.invoke(app, ["benchmark", "compare-algorithms", "--help"])
+    assert result.exit_code == 0
+    clean_output = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", result.output)
+    assert "--algorithms" in clean_output
+    assert "--timesteps" in clean_output
+    assert "--episodes" in clean_output
+    assert "--output-report" in clean_output
+    assert "--output-csv" in clean_output
 
 
 def test_cli_gui_help() -> None:

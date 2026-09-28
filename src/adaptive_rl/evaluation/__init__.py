@@ -25,9 +25,16 @@ from adaptive_rl.evaluation.generalization import (
     validate_split_seed,
 )
 from adaptive_rl.evaluation.metrics import EvaluationMetrics
-from adaptive_rl.evaluation.statistics import MetricStatistics, student_t_critical_value
+from adaptive_rl.evaluation.statistics import (
+    DescriptiveMetrics,
+    MetricStatistics,
+    student_t_critical_value,
+    summarize_descriptive_episodes,
+    summarize_seed_values,
+)
 
 __all__ = [
+    "DescriptiveMetrics",
     "EpisodeEvaluationRecord",
     "EvaluationMetrics",
     "Evaluator",
@@ -50,5 +57,7 @@ __all__ = [
     "is_seed_in_split",
     "run_obstacle_density_experiment",
     "student_t_critical_value",
+    "summarize_descriptive_episodes",
+    "summarize_seed_values",
     "validate_split_seed",
 ]

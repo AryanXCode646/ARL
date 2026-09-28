@@ -5,10 +5,11 @@ AdaptiveRL is structured around a minimal, modular pipeline consisting of four p
 ```text
 src/adaptive_rl/
 ├── environments/      # 3D kinematic drone navigation environment (Gymnasium)
-├── algorithms/        # RL algorithm registry and wrappers (Stable-Baselines3 PPO)
+├── algorithms/        # RL algorithm registry and wrappers (Stable-Baselines3 PPO & SAC)
 ├── planners/          # Classical motion-planning baselines (A* 3D lattice planner)
-├── training/          # PPO training loop, checkpointing, and artifact export
-├── evaluation/        # Multi-episode deterministic evaluator and metrics
+├── training/          # Unified RL training loop (RLTrainer/PPOTrainer), checkpointing, and artifact export
+├── evaluation/        # Multi-episode deterministic evaluator, policy comparison, and metrics
+├── benchmarking/      # Controlled ablations and cross-algorithm benchmarking (PPO vs SAC)
 ├── config.py          # Strongly typed Pydantic configuration schemas
 └── cli.py             # User-facing Typer CLI application
 ```
@@ -19,25 +20,28 @@ src/adaptive_rl/
 - Implements `DroneNavigation3DEnv` conforming to the Gymnasium `Env` interface.
 - State: 3D position $p \in \mathbb{R}^3$, 3D velocity $v \in \mathbb{R}^3$, target coordinate $g \in \mathbb{R}^3$, and obstacle positions.
 - Observations: 29-dimensional normalized vector:
-  - Normalized drone position (3 dims)
-  - Drone velocity (3 dims)
-  - Normalized target position (3 dims)
   - Relative target vector (3 dims)
-  - Normalized distance to goal (1 dim)
+  - Drone velocity (3 dims)
+  - Normalized drone position (3 dims)
+  - Normalized target position (3 dims)
+  - Target distance scalar (1 dim)
   - 16-ray spherical LiDAR rangefinder readings (16 dims)
 - Actions: 3-dimensional continuous thrust acceleration $a \in [-1.0, 1.0]^3$.
 
-### 2. Algorithm & Training (`adaptive_rl.training.trainer`)
-- Wraps `stable_baselines3.PPO` with standardized hyperparameters:
-  - Multi-Layer Perceptron (MlpPolicy) with orthogonal initialization.
+### 2. Algorithms & Training (`adaptive_rl.algorithms`, `adaptive_rl.training`)
+- **PPO (`PPOAlgorithm`)**: On-policy actor-critic algorithm wrapped from Stable-Baselines3.
+  - Multi-Layer Perceptron (`MlpPolicy`).
   - Generalized Advantage Estimation (GAE) with $\gamma=0.99, \lambda=0.95$.
-  - Entropy regularization coefficient $0.01$ for exploration.
+- **SAC (`SACAlgorithm`)**: Off-policy maximum-entropy actor-critic algorithm wrapped from Stable-Baselines3.
+  - Replay buffer size $100{,}000$, soft target update $\tau=0.005$, learning rate $3 \times 10^{-4}$, batch size $256$.
+- **Trainer (`RLTrainer` / `PPOTrainer`)**: Generalized trainer dispatching algorithms by configuration (`config.algorithm.name`), orchestrating callbacks, periodic checkpointing, and structured metadata logging.
 
-### 3. Evaluation Engine (`adaptive_rl.evaluation.evaluator`)
+### 3. Evaluation & Benchmarking (`adaptive_rl.evaluation`, `adaptive_rl.benchmarking`)
 - Evaluates trained checkpoints across deterministic seed sets.
 - Tracks binary outcomes: Target Reached (Success), Obstacle Collision, Boundary Violation, Timeout.
-- Computes trajectory safety and efficiency metrics: path length, path efficiency, minimum clearance.
-- Serializes evaluation reports to `artifacts/evaluation.json` and `artifacts/evaluation.csv`.
+- Measures trajectory metrics: path length, path efficiency, obstacle surface clearance, max velocity/acceleration.
+- Provides comparative benchmarking workflow (`adaptive-rl benchmark compare-algorithms`) under strictly fair, identical environment configurations and evaluation seeds.
+- Serializes evaluation reports to `artifacts/evaluation.json`, `artifacts/evaluation.csv`, and `artifacts/algorithm_comparison.json`.
 
 ### 4. Classical Planning Baseline (`adaptive_rl.planners.astar3d`)
 - Implements `AStar3DPlanner`: a deterministic classical 3D motion-planning baseline operating on a spatial lattice.
@@ -59,4 +63,3 @@ src/adaptive_rl/
 - **Limitations & Feasibility Paradigms**:
   - **Dynamic Feasibility (PPO & Random Policy)**: Evaluated through closed-loop physics simulation in `DroneNavigation3DEnv`. The drone must generate continuous acceleration control commands to navigate under inertia, velocity drag, and actuation limits. Success requires dynamically executing the trajectory without colliding.
   - **Geometric Feasibility (A* Planner)**: Evaluated as open-loop 3D spatial path planning. Success denotes finding an obstacle-free, boundary-clearing geometric path from start to goal on the discretized spatial lattice. The path is not executed through drone attitude dynamics or closed-loop tracking control.
-

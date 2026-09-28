@@ -8,7 +8,7 @@ a target, evaluate the trained agent, and visualize the flight demonstration.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional, cast
 
 import typer
 from rich.console import Console
@@ -28,7 +28,7 @@ app = typer.Typer(
 
 benchmark_app = typer.Typer(
     name="benchmark",
-    help="Benchmarking commands for training-budget learning curves.",
+    help="PPO learning-curve benchmark commands (PPO only).",
     no_args_is_help=True,
 )
 app.add_typer(benchmark_app, name="benchmark")
@@ -46,6 +46,13 @@ env_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(env_app, name="env")
+
+benchmark_app = typer.Typer(
+    name="benchmark",
+    help="Benchmarking and comparative evaluation commands.",
+    no_args_is_help=True,
+)
+app.add_typer(benchmark_app, name="benchmark")
 
 console = Console()
 
@@ -205,7 +212,7 @@ def train(
             f"• [bold]Seed:[/bold] {exp_config.seed}\n"
             f"• [bold]Output Dir:[/bold] {exp_config.output_dir}"
             f"{split_info}",
-            title="PPO Drone Training Pipeline",
+            title=f"{exp_config.algorithm.name.upper()} Drone Training Pipeline",
             border_style="cyan",
         )
     )
@@ -259,8 +266,18 @@ def benchmark_budgets(
         None, "--output-dir", help="Directory for benchmark JSON/CSV/plot artifacts"
     ),
     plot: bool = typer.Option(False, "--plot/--no-plot", help="Render a learning-curve plot"),
+    plot_x_axis: str = typer.Option(
+        "trained",
+        "--plot-x-axis",
+        help="Plot x-axis semantics: 'trained' (actual timesteps) or 'requested' (budget)",
+    ),
+    evaluation_split: Optional[str] = typer.Option(
+        None,
+        "--evaluation-split",
+        help="Evaluation distribution: custom, train, or held-out test",
+    ),
 ) -> None:
-    """Train and evaluate PPO across a set of training budgets."""
+    """Run the PPO learning-curve benchmark across training budgets (PPO only)."""
     if config is None:
         for candidate in [Path("configs/drone_ppo.yaml"), Path("configs/drone_ppo_demo.yaml")]:
             if candidate.exists():
@@ -277,9 +294,33 @@ def benchmark_budgets(
     except ConfigError as err:
         console.print(f"[bold red]Configuration error:[/bold red] {err}")
         raise typer.Exit(code=1)
-    try:
-        from adaptive_rl.benchmarking import run_learning_curve_benchmark, validate_budgets
+    x_axis = plot_x_axis.strip().lower()
+    if x_axis not in ("trained", "requested"):
+        console.print(
+            f"[bold red]Invalid --plot-x-axis:[/bold red] {plot_x_axis!r}. "
+            "Expected 'trained' or 'requested'."
+        )
+        raise typer.Exit(code=1)
+    if evaluation_split is not None:
+        evaluation_split = evaluation_split.strip().lower()
+        if evaluation_split not in ("custom", "train", "test"):
+            console.print(
+                f"[bold red]Invalid --evaluation-split:[/bold red] {evaluation_split!r}. "
+                "Expected 'custom', 'train', or 'test'."
+            )
+            raise typer.Exit(code=1)
 
+    try:
+        from adaptive_rl.benchmarking import (
+            BenchmarkRunError,
+            run_learning_curve_benchmark,
+            validate_budgets,
+        )
+    except ImportError as err:
+        console.print(f"[bold red]Benchmarking module unavailable:[/bold red] {err}")
+        raise typer.Exit(code=1)
+
+    try:
         budget_values = validate_budgets(budgets) if budgets is not None else None
         if eval_seeds is not None:
             seed_tokens = [part.strip() for part in eval_seeds.split(",")]
@@ -305,24 +346,59 @@ def benchmark_budgets(
             deterministic=deterministic,
             output_dir=output_dir,
             plot=plot,
+            plot_x_axis=cast(Literal["trained", "requested"], x_axis),
+            evaluation_split=cast(Literal["custom", "train", "test"] | None, evaluation_split),
         )
+    except BenchmarkRunError as err:
+        partial = err.result
+        completed = ", ".join(str(b) for b in partial.completed_budgets) or "none"
+        console.print(
+            Panel.fit(
+                f"[bold red]PPO learning-curve benchmark FAILED[/bold red]\n\n"
+                f"• [bold]Status:[/bold] {partial.status}\n"
+                f"• [bold]Completed budgets:[/bold] {completed}\n"
+                f"• [bold]Failed budget:[/bold] {partial.failed_budget}\n"
+                f"• [bold]Error:[/bold] {partial.error}\n"
+                f"• [bold]JSON:[/bold] {partial.json_path}\n"
+                f"• [bold]CSV:[/bold] {partial.csv_path}",
+                title="Learning Curve Benchmark (partial)",
+                border_style="red",
+            )
+        )
+        raise typer.Exit(code=1)
     except Exception as err:
         console.print(f"[bold red]Benchmark failed with error:[/bold red] {err}")
         raise typer.Exit(code=1)
 
+    if result.plot_path is None:
+        plot_summary = "not requested"
+    elif result.plot_error is not None:
+        plot_summary = f"FAILED ({result.plot_error})"
+    else:
+        plot_summary = str(result.plot_path)
+
     console.print(
         Panel.fit(
             f"[bold green]PPO learning-curve benchmark complete[/bold green]\n\n"
+            f"• [bold]Status:[/bold] {result.status}\n"
             f"• [bold]Budgets:[/bold] {', '.join(str(b) for b in result.budgets)}\n"
+            f"• [bold]Completed budgets:[/bold] "
+            f"{', '.join(str(b) for b in result.completed_budgets)}\n"
             f"• [bold]Training seed:[/bold] {result.training_seed}\n"
             f"• [bold]Evaluation seeds:[/bold] {result.evaluation_seeds}\n"
+            f"• [bold]Episodes per seed:[/bold] {result.evaluation_episodes}\n"
             f"• [bold]JSON:[/bold] {result.json_path}\n"
             f"• [bold]CSV:[/bold] {result.csv_path}\n"
-            f"• [bold]Plot:[/bold] {result.plot_path if result.plot_path else 'not generated'}",
+            f"• [bold]Plot:[/bold] {plot_summary}",
             title="Learning Curve Benchmark",
             border_style="green",
         )
     )
+    if result.plot_error is not None:
+        console.print(
+            "[bold red]Plot generation failed; JSON/CSV artifacts were preserved.[/bold red]"
+        )
+        raise typer.Exit(code=1)
 
 
 @app.command(context_settings={"allow_extra_args": True})
@@ -465,7 +541,7 @@ def evaluate(
         )
     )
 
-    from adaptive_rl.algorithms.ppo import PPOAlgorithm
+    from adaptive_rl.algorithms.registry import load_algorithm_from_pretrained
     from adaptive_rl.evaluation.evaluator import Evaluator
 
     try:
@@ -473,7 +549,11 @@ def evaluate(
             exp_config.environment.name,
             **exp_config.environment.parameters,
         )
-        algo = PPOAlgorithm.from_pretrained(model, env=env)
+        algo = load_algorithm_from_pretrained(
+            model,
+            env=env,
+            algorithm_name=exp_config.algorithm.name,
+        )
         evaluator = Evaluator(algorithm=algo, env=env)
 
         metrics = None
@@ -597,7 +677,7 @@ def evaluate(
             from adaptive_rl.evaluation.evaluator import compare_policies
 
             comp_results = compare_policies(
-                ppo_algorithm=algo,
+                algorithm=algo,
                 env=env,
                 num_episodes=num_episodes,
                 base_seed=(exp_config.seed if seed is None else seed)
@@ -776,12 +856,12 @@ def evaluate_generalization_cmd(
         )
     )
 
-    from adaptive_rl.algorithms.ppo import PPOAlgorithm
+    from adaptive_rl.algorithms.registry import load_algorithm_from_pretrained
     from adaptive_rl.evaluation.generalization import evaluate_generalization
 
     try:
         env = make_env(env_name, **env_params)
-        algo = PPOAlgorithm.from_pretrained(model, env=env)
+        algo = load_algorithm_from_pretrained(model, env=env)
 
         benchmark_result = evaluate_generalization(
             algorithm=algo,
@@ -906,13 +986,13 @@ def experiment_density(
         )
     )
 
-    from adaptive_rl.algorithms.ppo import PPOAlgorithm
+    from adaptive_rl.algorithms.registry import load_algorithm_from_pretrained
     from adaptive_rl.environments.drone import DroneNavigation3DEnv
     from adaptive_rl.evaluation.evaluator import run_obstacle_density_experiment
 
     dummy_env = DroneNavigation3DEnv()
     try:
-        algo = PPOAlgorithm.from_pretrained(model, env=dummy_env)
+        algo = load_algorithm_from_pretrained(model, env=dummy_env)
         results = run_obstacle_density_experiment(
             algorithm=algo,
             obstacle_counts=(4, 6, 8),
@@ -1068,6 +1148,161 @@ def experiment_ablation(
         raise typer.Exit(code=1)
 
 
+@benchmark_app.command(name="compare-algorithms")
+@app.command(name="compare-algorithms")
+def compare_algorithms_cmd(
+    algorithms: str = typer.Option(
+        "ppo,sac",
+        "--algorithms",
+        "-a",
+        help="Comma-separated list of algorithms to benchmark (e.g. 'ppo,sac')",
+    ),
+    timesteps: int = typer.Option(
+        25000,
+        "--timesteps",
+        "-t",
+        help="Total training timesteps budget per algorithm",
+    ),
+    episodes: int = typer.Option(
+        20,
+        "--episodes",
+        "-e",
+        help="Number of held-out evaluation episodes per algorithm",
+    ),
+    seed: int = typer.Option(
+        42,
+        "--seed",
+        "-s",
+        help="Deterministic base seed for training and evaluation",
+    ),
+    config: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Optional base configuration YAML for environment settings",
+    ),
+    output_report: Optional[Path] = typer.Option(
+        Path("artifacts/algorithm_comparison.json"),
+        "--output-report",
+        "-o",
+        help="Optional path to export JSON benchmark report",
+    ),
+    output_csv: Optional[Path] = typer.Option(
+        None,
+        "--output-csv",
+        help="Optional path to export CSV benchmark report",
+    ),
+) -> None:
+    """Run fair comparative benchmark between RL algorithms (PPO vs SAC) on 3D drone navigation."""
+    parsed_algos = [a.strip().lower() for a in algorithms.split(",") if a.strip()]
+    if not parsed_algos:
+        console.print("[bold red]No valid algorithms specified.[/bold red]")
+        raise typer.Exit(code=1)
+
+    env_name = "drone"
+    env_params: Optional[Dict[str, Any]] = None
+    if config is not None and config.exists():
+        try:
+            cfg = load_config(config)
+            env_name = cfg.environment.name
+            env_params = cfg.environment.parameters
+        except ConfigError as err:
+            console.print(f"[bold red]Configuration error:[/bold red] {err}")
+            raise typer.Exit(code=1)
+
+    console.print(
+        Panel.fit(
+            f"[bold cyan]Running Multi-Algorithm Benchmark Comparison[/bold cyan]\n\n"
+            f"• [bold]Algorithms:[/bold] {', '.join(a.upper() for a in parsed_algos)}\n"
+            f"• [bold]Training Budget:[/bold] {timesteps:,} steps/algorithm\n"
+            f"• [bold]Evaluation Episodes:[/bold] {episodes} (identical held-out seeds)\n"
+            f"• [bold]Base Seed:[/bold] {seed}\n"
+            f"• [bold]Environment:[/bold] {env_name}\n"
+            f"• [bold]Report Output:[/bold] {output_report}\n\n"
+            f"[dim]Hypothesis: Evaluate sample efficiency and flight stability under identical conditions.[/dim]",
+            title="Algorithm Benchmark: PPO vs SAC",
+            border_style="cyan",
+        )
+    )
+
+    from adaptive_rl.benchmarking.comparison import run_algorithm_comparison
+
+    try:
+        report_json = output_report or Path("artifacts/algorithm_comparison.json")
+        data = run_algorithm_comparison(
+            algorithms=parsed_algos,
+            timesteps=timesteps,
+            eval_episodes=episodes,
+            seed=seed,
+            env_name=env_name,
+            env_parameters=env_params,
+            output_json=report_json,
+            output_csv=output_csv,
+        )
+
+        results = data.get("results", [])
+
+        table = Table(title=f"Algorithm Comparison Results ({episodes} evaluation episodes)")
+        table.add_column("Algorithm", style="bold cyan")
+        table.add_column("Success Rate", justify="right")
+        table.add_column("Collision Rate", justify="right")
+        table.add_column("Mean Reward", justify="right")
+        table.add_column("Mean Steps", justify="right")
+        table.add_column("Path Length", justify="right")
+        table.add_column("Path Efficiency", justify="right")
+        table.add_column("Clearance", justify="right")
+
+        for r in results:
+            succ_str = (
+                f"{r['success_rate'] * 100:.1f}%" if r.get("success_rate") is not None else "N/A"
+            )
+            coll_str = (
+                f"{r['collision_rate'] * 100:.1f}%"
+                if r.get("collision_rate") is not None
+                else "N/A"
+            )
+            rew_str = f"{r['mean_reward']:.2f}" if r.get("mean_reward") is not None else "N/A"
+            step_str = (
+                f"{r['mean_episode_length']:.1f}"
+                if r.get("mean_episode_length") is not None
+                else "N/A"
+            )
+            path_str = (
+                f"{r['mean_path_length']:.2f} m" if r.get("mean_path_length") is not None else "N/A"
+            )
+            eff_str = (
+                f"{r['mean_path_efficiency'] * 100:.1f}%"
+                if r.get("mean_path_efficiency") is not None
+                else "N/A"
+            )
+            clear_str = (
+                f"{r['mean_min_obstacle_clearance']:.2f} m"
+                if r.get("mean_min_obstacle_clearance") is not None
+                else "N/A"
+            )
+
+            table.add_row(
+                r["algorithm"],
+                succ_str,
+                coll_str,
+                rew_str,
+                step_str,
+                path_str,
+                eff_str,
+                clear_str,
+            )
+
+        console.print("\n")
+        console.print(table)
+        console.print(f"\n[bold green]JSON report saved to:[/bold green] {report_json}")
+        if output_csv is not None:
+            console.print(f"[bold green]CSV report saved to:[/bold green] {output_csv}")
+
+    except Exception as err:
+        console.print(f"[bold red]Benchmark comparison failed with error:[/bold red] {err}")
+        raise typer.Exit(code=1)
+
+
 @app.command(name="demo-drone")
 def demo_drone(
     model: Path = typer.Option(..., "--model", "-m", help="Path to trained model artifact (.zip)"),
@@ -1085,10 +1320,11 @@ def demo_drone(
         cfg = load_config(config)
         env_kwargs = cfg.environment.parameters
 
-    from adaptive_rl.algorithms.ppo import PPOAlgorithm
+    from adaptive_rl.algorithms.registry import load_algorithm_from_pretrained
 
     env = make_env("drone", **env_kwargs)
-    algo = PPOAlgorithm.from_pretrained(model, env=env)
+    algo_hint = cfg.algorithm.name if "cfg" in locals() and cfg is not None else None
+    algo = load_algorithm_from_pretrained(model, env=env, algorithm_name=algo_hint)
 
     obs, info = env.reset(seed=seed)
     console.print(
