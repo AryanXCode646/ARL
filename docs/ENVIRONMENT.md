@@ -48,3 +48,30 @@ Where:
 - $R_{\\text{terminal}}$:
   - $+100.0$ if reached target ($d_t \\le 1.0\\text{ m}$)
   - $-50.0$ if collided with obstacle or arena boundary
+
+---
+
+## Trajectory-Quality & Safety Evaluation Metrics
+
+The evaluation engine computes deterministic trajectory-quality and safety metrics across evaluation rollouts:
+
+### Trajectory-Quality Metrics
+
+- **Path length ($L$)** [$\text{m}$]: Cumulative Euclidean distance traveled across trajectory waypoints:
+  $$L = \sum_{t=0}^{T-1} \|\mathbf{p}_{t+1} - \mathbf{p}_t\|_2$$
+- **Straight-line distance ($D_0$)** [$\text{m}$]: Euclidean distance from initial drone position to target:
+  $$D_0 = \|\mathbf{g} - \mathbf{p}_0\|_2$$
+- **Path efficiency ($\eta$)** [dimensionless]: Ratio of straight-line distance to actual path length, clamped to $[0.0, 1.0]$:
+  $$\eta = \begin{cases} \text{clip}\left(\frac{D_0}{L}, 0.0, 1.0\right) & \text{if } L > 0 \\ 0.0 & \text{if } L \le 0 \end{cases}$$
+
+### Safety & Dynamics Metrics
+
+- **Minimum obstacle clearance ($d_{\min}$)** [$\text{m}$]: Closest distance from drone position to any spherical obstacle surface over the rollout:
+  $$d_{\min} = \min_{t, i} \left(\|\mathbf{p}_t - \mathbf{c}_i\|_2 - r_i\right)$$
+  *(Measured to obstacle surface, where $\mathbf{c}_i$ is the center and $r_i$ is the radius. Negative values indicate penetration.)*
+- **Maximum velocity ($v_{\max}$)** [$\text{m/s}$]: Peak instantaneous linear speed attained during rollout:
+  $$v_{\max} = \max_t \|\mathbf{v}_t\|_2$$
+- **Maximum acceleration ($a_{\max}$)** [$\text{m/s}^2$]: Peak instantaneous linear acceleration magnitude:
+  $$a_{\max} = \max_t \|\mathbf{a}_t\|_2$$
+- **Obstacle collisions**: Count and rate of terminal impacts against spherical obstacle surfaces.
+- **Boundary collisions**: Count and rate of terminal impacts against arena bounding planes ($X, Y, Z$).

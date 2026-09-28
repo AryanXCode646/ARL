@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
+import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
 
 # Backward-compatible re-exports from canonical adaptive_rl.metrics module
@@ -19,6 +20,113 @@ from adaptive_rl.metrics import (
 from adaptive_rl.metrics import (
     extract_episode_metrics as extract_episode_metrics,
 )
+
+
+def compute_trajectory_metrics(
+    positions: Sequence[Any],
+    goal: Optional[Any] = None,
+    velocities: Optional[Sequence[Any]] = None,
+    accelerations: Optional[Sequence[Any]] = None,
+    obstacles: Optional[Sequence[Any]] = None,
+) -> Dict[str, Optional[float]]:
+    """Compute trajectory-quality and safety metrics for a single episode.
+
+    Calculates:
+    - path_length: L = sum(||p[t+1] - p[t]||) (m)
+    - straight_line_distance: D0 = ||goal - p[0]|| (m)
+    - path_efficiency: eta = D0 / L clamped to [0.0, 1.0] (0.0 if L <= 0)
+    - min_obstacle_clearance: minimum distance from drone position to obstacle surface (m)
+    - max_velocity: max(||v[t]||) (m/s)
+    - max_acceleration: max(||a[t]||) (m/s^2)
+
+    Args:
+        positions: Sequence of 3D positions [[x0, y0, z0], [x1, y1, z1], ...].
+        velocities: Optional sequence of 3D velocity vectors.
+        accelerations: Optional sequence of 3D acceleration vectors.
+        goal: Optional 3D goal coordinate [gx, gy, gz].
+        obstacles: Optional sequence of obstacles with distance_to(pos) or (center, radius).
+
+    Returns:
+        Dictionary containing scalar trajectory and safety metrics.
+    """
+    if not positions:
+        return {
+            "path_length": 0.0,
+            "straight_line_distance": 0.0,
+            "path_efficiency": 0.0,
+            "min_obstacle_clearance": None,
+            "max_velocity": 0.0,
+            "max_acceleration": 0.0,
+        }
+
+    pos_arr = np.asarray(positions, dtype=np.float64)
+
+    # 1. Path length: L = sum(||p[t+1] - p[t]||)
+    if len(pos_arr) >= 2:
+        step_diffs = pos_arr[1:] - pos_arr[:-1]
+        step_dists = np.linalg.norm(step_diffs, axis=1)
+        path_length = float(np.sum(step_dists))
+    else:
+        path_length = 0.0
+
+    # 2. Straight-line distance: D0 = ||goal - p[0]||
+    if goal is not None and len(pos_arr) >= 1:
+        goal_arr = np.asarray(goal, dtype=np.float64)
+        straight_line_distance = float(np.linalg.norm(goal_arr - pos_arr[0]))
+    else:
+        straight_line_distance = 0.0
+
+    # 3. Path efficiency: eta = D0 / L clamped to [0.0, 1.0]
+    if path_length > 0.0:
+        path_efficiency = float(min(1.0, max(0.0, straight_line_distance / path_length)))
+    else:
+        path_efficiency = 0.0
+
+    # 4. Minimum obstacle surface clearance
+    min_obstacle_clearance: Optional[float] = None
+    if obstacles is not None and len(obstacles) > 0 and len(pos_arr) >= 1:
+        clearances: List[float] = []
+        for p in pos_arr:
+            for obs in obstacles:
+                if hasattr(obs, "distance_to"):
+                    clearances.append(float(obs.distance_to(p)))
+                elif hasattr(obs, "center") and hasattr(obs, "radius"):
+                    center = np.asarray(obs.center, dtype=np.float64)
+                    dist = float(np.linalg.norm(p - center)) - float(obs.radius)
+                    clearances.append(dist)
+        if clearances:
+            min_obstacle_clearance = float(min(clearances))
+
+    # 5. Maximum velocity: max(||v[t]||)
+    if velocities is not None and len(velocities) > 0:
+        vel_arr = np.asarray(velocities, dtype=np.float64)
+        if vel_arr.ndim == 1:
+            max_velocity = float(np.max(np.abs(vel_arr)))
+        else:
+            speeds = np.linalg.norm(vel_arr, axis=1)
+            max_velocity = float(np.max(speeds))
+    else:
+        max_velocity = 0.0
+
+    # 6. Maximum acceleration: max(||a[t]||)
+    if accelerations is not None and len(accelerations) > 0:
+        acc_arr = np.asarray(accelerations, dtype=np.float64)
+        if acc_arr.ndim == 1:
+            max_acceleration = float(np.max(np.abs(acc_arr)))
+        else:
+            acc_norms = np.linalg.norm(acc_arr, axis=1)
+            max_acceleration = float(np.max(acc_norms))
+    else:
+        max_acceleration = 0.0
+
+    return {
+        "path_length": path_length,
+        "straight_line_distance": straight_line_distance,
+        "path_efficiency": path_efficiency,
+        "min_obstacle_clearance": min_obstacle_clearance,
+        "max_velocity": max_velocity,
+        "max_acceleration": max_acceleration,
+    }
 
 
 class EvaluationMetrics(BaseModel):
@@ -128,6 +236,42 @@ class EvaluationMetrics(BaseModel):
     std_episode_length: float = Field(
         0.0, ge=0.0, description="Standard deviation of episode length"
     )
+    mean_path_length: Optional[float] = Field(
+        None, ge=0.0, description="Mean total Euclidean path length in meters"
+    )
+    std_path_length: Optional[float] = Field(
+        None, ge=0.0, description="Standard deviation of path length in meters"
+    )
+    mean_straight_line_distance: Optional[float] = Field(
+        None, ge=0.0, description="Mean straight-line distance from start to goal in meters"
+    )
+    mean_path_efficiency: Optional[float] = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="Mean path efficiency (ratio of straight-line distance to actual path length)",
+    )
+    mean_min_obstacle_clearance: Optional[float] = Field(
+        None, description="Mean minimum obstacle surface clearance in meters"
+    )
+    mean_max_velocity: Optional[float] = Field(
+        None, ge=0.0, description="Mean maximum linear velocity per episode in m/s"
+    )
+    mean_max_acceleration: Optional[float] = Field(
+        None, ge=0.0, description="Mean maximum acceleration per episode in m/s^2"
+    )
+    obstacle_collision_rate: Optional[float] = Field(
+        None, ge=0.0, le=1.0, description="Fraction of episodes ending in obstacle collision"
+    )
+    boundary_collision_rate: Optional[float] = Field(
+        None, ge=0.0, le=1.0, description="Fraction of episodes ending in arena boundary collision"
+    )
+    obstacle_collision_count: Optional[int] = Field(
+        None, ge=0, description="Total count of episodes ending in obstacle collision"
+    )
+    boundary_collision_count: Optional[int] = Field(
+        None, ge=0, description="Total count of episodes ending in arena boundary collision"
+    )
     additional_metrics: Dict[str, Any] = Field(
         default_factory=dict,
         description="Environment-specific metrics (e.g. energy consumption, path length, traffic telemetry)",
@@ -184,6 +328,30 @@ class StandardizedExperimentMetrics(BaseModel):
         ge=0.0,
         le=1.0,
         description="Ratio of optimal/straight-line distance to actual path length",
+    )
+    straight_line_distance: Optional[float] = Field(
+        None, ge=0.0, description="Mean straight-line distance from start to goal in meters"
+    )
+    min_obstacle_clearance: Optional[float] = Field(
+        None, description="Mean minimum obstacle surface clearance in meters"
+    )
+    max_velocity: Optional[float] = Field(
+        None, ge=0.0, description="Mean maximum linear velocity per episode in m/s"
+    )
+    max_acceleration: Optional[float] = Field(
+        None, ge=0.0, description="Mean maximum acceleration per episode in m/s^2"
+    )
+    obstacle_collision_count: Optional[int] = Field(
+        None, ge=0, description="Total episodes ending in obstacle collision"
+    )
+    boundary_collision_count: Optional[int] = Field(
+        None, ge=0, description="Total episodes ending in arena boundary collision"
+    )
+    obstacle_collision_rate: Optional[float] = Field(
+        None, ge=0.0, le=1.0, description="Fraction of episodes ending in obstacle collision"
+    )
+    boundary_collision_rate: Optional[float] = Field(
+        None, ge=0.0, le=1.0, description="Fraction of episodes ending in arena boundary collision"
     )
     planning_time: Optional[float] = Field(
         None, ge=0.0, description="Mean planning/search or inference wall-clock time in seconds"
@@ -262,7 +430,21 @@ class StandardizedExperimentMetrics(BaseModel):
         handled_keys = {
             "mean_path_length",
             "path_length",
+            "std_path_length",
             "path_efficiency",
+            "mean_path_efficiency",
+            "straight_line_distance",
+            "mean_straight_line_distance",
+            "min_obstacle_clearance",
+            "mean_min_obstacle_clearance",
+            "max_velocity",
+            "mean_max_velocity",
+            "max_acceleration",
+            "mean_max_acceleration",
+            "obstacle_collision_count",
+            "boundary_collision_count",
+            "obstacle_collision_rate",
+            "boundary_collision_rate",
             "mean_planning_time",
             "planning_time",
             "generalization_gap",
@@ -286,6 +468,53 @@ class StandardizedExperimentMetrics(BaseModel):
             "truncation_rate",
         }
 
+        path_len = _first_not_none(
+            eval_metrics.mean_path_length,
+            extra.get("mean_path_length"),
+            extra.get("path_length"),
+        )
+        path_eff = _first_not_none(
+            eval_metrics.mean_path_efficiency,
+            extra.get("mean_path_efficiency"),
+            extra.get("path_efficiency"),
+        )
+        straight_dist = _first_not_none(
+            eval_metrics.mean_straight_line_distance,
+            extra.get("mean_straight_line_distance"),
+            extra.get("straight_line_distance"),
+        )
+        min_clear = _first_not_none(
+            eval_metrics.mean_min_obstacle_clearance,
+            extra.get("mean_min_obstacle_clearance"),
+            extra.get("min_obstacle_clearance"),
+        )
+        max_vel = _first_not_none(
+            eval_metrics.mean_max_velocity,
+            extra.get("mean_max_velocity"),
+            extra.get("max_velocity"),
+        )
+        max_acc = _first_not_none(
+            eval_metrics.mean_max_acceleration,
+            extra.get("mean_max_acceleration"),
+            extra.get("max_acceleration"),
+        )
+        obs_coll_cnt = _first_not_none(
+            eval_metrics.obstacle_collision_count,
+            extra.get("obstacle_collision_count"),
+        )
+        bound_coll_cnt = _first_not_none(
+            eval_metrics.boundary_collision_count,
+            extra.get("boundary_collision_count"),
+        )
+        obs_coll_rate = _first_not_none(
+            eval_metrics.obstacle_collision_rate,
+            extra.get("obstacle_collision_rate"),
+        )
+        bound_coll_rate = _first_not_none(
+            eval_metrics.boundary_collision_rate,
+            extra.get("boundary_collision_rate"),
+        )
+
         return cls(
             episodes=eval_metrics.episodes,
             episode_return=eval_metrics.mean_reward,
@@ -294,8 +523,16 @@ class StandardizedExperimentMetrics(BaseModel):
             overflow_rate=overflow_r,
             truncation_rate=truncation_r,
             episode_length=eval_metrics.mean_episode_length,
-            path_length=_first_not_none(extra.get("mean_path_length"), extra.get("path_length")),
-            path_efficiency=extra.get("path_efficiency"),
+            path_length=path_len,
+            path_efficiency=path_eff,
+            straight_line_distance=straight_dist,
+            min_obstacle_clearance=min_clear,
+            max_velocity=max_vel,
+            max_acceleration=max_acc,
+            obstacle_collision_count=obs_coll_cnt,
+            boundary_collision_count=bound_coll_cnt,
+            obstacle_collision_rate=obs_coll_rate,
+            boundary_collision_rate=bound_coll_rate,
             planning_time=_first_not_none(
                 extra.get("mean_planning_time"), extra.get("planning_time")
             ),
@@ -357,4 +594,5 @@ class StandardizedExperimentMetrics(BaseModel):
 __all__ = [
     "EvaluationMetrics",
     "StandardizedExperimentMetrics",
+    "compute_trajectory_metrics",
 ]
