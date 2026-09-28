@@ -141,7 +141,7 @@ def summarize_seed_values(values: Sequence[float | None]) -> MetricStatistics:
         return MetricStatistics(mean, None, None, None, count)
 
     variance = math.fsum((value - mean) ** 2 for value in observed) / (count - 1)
-    std = math.sqrt(variance)
+    std = math.sqrt(max(0.0, variance))
     critical = student_t_critical_value(0.95, count - 1)
     margin = critical * std / math.sqrt(count)
     return MetricStatistics(mean, std, mean - margin, mean + margin, count)

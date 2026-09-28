@@ -4,6 +4,7 @@ import csv
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import textwrap
@@ -493,6 +494,60 @@ def test_plotting_is_lazy_and_closes_figure(
     pyplot.close.assert_called_once_with(figure)  # type: ignore[attr-defined]
 
 
+def test_plot_learning_curve_with_none_success_rates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from adaptive_rl.benchmarking.learning_curve import (
+        LearningCurveBenchmarkResult,
+        LearningCurvePoint,
+        plot_learning_curve,
+    )
+
+    figure = MagicMock()
+    axes = [MagicMock(), MagicMock()]
+    pyplot = MagicMock()
+    pyplot.subplots.return_value = (figure, axes)
+    matplotlib = ModuleType("matplotlib")
+    matplotlib.use = MagicMock()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "matplotlib", matplotlib)
+    monkeypatch.setitem(sys.modules, "matplotlib.pyplot", pyplot)
+
+    output_path = tmp_path / "curve_none.png"
+    point = LearningCurvePoint(
+        budget_timesteps=64,
+        trained_timesteps=64,
+        success_rate=None,
+        collision_rate=None,
+        timeout_rate=None,
+        mean_reward=10.0,
+        std_reward=None,
+        mean_episode_length=5.0,
+        training_time_seconds=1.0,
+        model_path="dummy.zip",
+        training_seed=0,
+        evaluation_seeds=[1],
+        evaluation_episodes=1,
+        deterministic=True,
+        algorithm="ppo",
+        environment="drone",
+    )
+    result = LearningCurveBenchmarkResult(
+        benchmark_name="ppo_learning_curve",
+        algorithm="ppo",
+        environment="drone",
+        budgets=[64],
+        training_seed=0,
+        evaluation_seeds=[1],
+        evaluation_episodes=1,
+        deterministic=True,
+        points=[point],
+    )
+    path = plot_learning_curve(result, output_path)
+    assert path == output_path
+    axes[0].plot.assert_not_called()
+    axes[1].plot.assert_called_once()
+
+
 def test_plotting_reports_missing_matplotlib(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -615,6 +670,13 @@ def test_evaluator_preserves_unavailable_outcome_metrics() -> None:
     evaluator.close()
 
 
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+
+def _clean(text: str) -> str:
+    return ANSI_ESCAPE.sub("", text)
+
+
 def test_benchmark_cli_dispatch_and_budget_validation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -626,9 +688,10 @@ def test_benchmark_cli_dispatch_and_budget_validation(
     runner = CliRunner()
     benchmark_help = runner.invoke(app, ["benchmark", "--help"])
     assert benchmark_help.exit_code == 0
-    assert "budgets" in benchmark_help.output
+    assert "budgets" in _clean(benchmark_help.output)
     budget_help = runner.invoke(app, ["benchmark", "budgets", "--help"])
     assert budget_help.exit_code == 0
+    clean_budget_help = _clean(budget_help.output)
     for option in (
         "--config",
         "--budgets",
@@ -641,7 +704,7 @@ def test_benchmark_cli_dispatch_and_budget_validation(
         "--plot",
         "--no-plot",
     ):
-        assert option in budget_help.output
+        assert option in clean_budget_help
     dispatch: list[dict[str, Any]] = []
     fake_result = LearningCurveBenchmarkResult(
         benchmark_name="ppo_learning_curve",
@@ -679,8 +742,9 @@ def test_benchmark_cli_dispatch_and_budget_validation(
         ],
     )
     assert success.exit_code == 0, success.output
-    assert "learning-curve benchmark complete" in success.output
-    assert "64, 128" in success.output
+    clean_success = _clean(success.output)
+    assert "learning-curve benchmark complete" in clean_success
+    assert "64, 128" in clean_success
     assert len(dispatch) == 1
     assert dispatch[0]["budgets"] == [64, 128]
     assert dispatch[0]["training_seed"] == 17
@@ -700,8 +764,9 @@ def test_benchmark_cli_dispatch_and_budget_validation(
             ],
         )
         assert result.exit_code == 1
-        assert "Benchmark failed with error" in result.output
-        assert "Traceback" not in result.output
+        clean_result = _clean(result.output)
+        assert "Benchmark failed with error" in clean_result
+        assert "Traceback" not in clean_result
     assert len(dispatch) == 1
 
     malformed_seeds = runner.invoke(
@@ -718,8 +783,9 @@ def test_benchmark_cli_dispatch_and_budget_validation(
         ],
     )
     assert malformed_seeds.exit_code == 1
-    assert "Malformed evaluation seed list" in malformed_seeds.output
-    assert "Traceback" not in malformed_seeds.output
+    clean_malformed = _clean(malformed_seeds.output)
+    assert "Malformed evaluation seed list" in clean_malformed
+    assert "Traceback" not in clean_malformed
     assert len(dispatch) == 1
 
     invalid_seed_value = runner.invoke(
@@ -736,5 +802,6 @@ def test_benchmark_cli_dispatch_and_budget_validation(
         ],
     )
     assert invalid_seed_value.exit_code == 1
-    assert "Malformed evaluation seed value: 'foo'" in invalid_seed_value.output
+    clean_invalid = _clean(invalid_seed_value.output)
+    assert "Malformed evaluation seed value: 'foo'" in clean_invalid
     assert len(dispatch) == 1

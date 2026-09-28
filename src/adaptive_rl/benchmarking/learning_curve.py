@@ -527,12 +527,18 @@ def plot_learning_curve(
     plot_target.parent.mkdir(parents=True, exist_ok=True)
 
     budgets = [int(point.budget_timesteps) for point in result.points]
-    success_rates = [point.success_rate for point in result.points]
     rewards = [point.mean_reward for point in result.points]
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 4), constrained_layout=True)
     try:
-        axes[0].plot(budgets, success_rates, marker="o", linewidth=2)
+        valid_success = [
+            (int(point.budget_timesteps), point.success_rate)
+            for point in result.points
+            if point.success_rate is not None
+        ]
+        if valid_success:
+            valid_budgets, valid_rates = zip(*valid_success)
+            axes[0].plot(valid_budgets, valid_rates, marker="o", linewidth=2)
         axes[0].set_title("Success rate vs training budget")
         axes[0].set_xlabel("Training budget (timesteps)")
         axes[0].set_ylabel("Success rate")
