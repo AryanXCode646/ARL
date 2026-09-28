@@ -1,169 +1,162 @@
 # AdaptiveRL Hypothesis and Evaluation Protocol
 
 ## 1. Purpose
-This document specifies a reproducible, statistically sound experimental protocol for evaluating the claimed adaptive capability of AdaptiveRL agents. It is intended solely as a research specification; no code changes are required.
+This document specifies an auditable, pre-specified experimental protocol for evaluating a proposed adaptive capability for RL agents.
+
+> [!WARNING]
+> **Implementation Status**
+> The AdaptiveRL treatment described in this document (online shift adaptation) is a pre-registered experimental specification for a **future** AdaptiveRL implementation. This document does not imply that the complete treatment is currently implemented in the repository. The existing benchmark infrastructure enforces a strictly frozen policy during evaluation.
 
 ## 2. Research Question
-*Does an AdaptiveRL agent equipped with an online environment‑shift adaptation mechanism recover performance faster after a distribution shift than a non‑adaptive baseline (PPO or SAC) trained on the nominal distribution?*
+Does an agent equipped with a future online environment-shift adaptation treatment recover performance faster after a distribution shift than a matched fixed-policy baseline (PPO or SAC) trained on the same nominal distribution?
 
-## 3. Hypothesis
+## 3. Hypotheses
+**Primary endpoint:** Pre-registered recovery time under the moderate shift condition for each environment independently.
+
 ### H0 — Null Hypothesis
-After a distribution shift, the adaptive treatment does **not** achieve a statistically significant reduction in recovery time (or increase in normalized recovery) compared with the fixed‑policy baseline under the same training and evaluation budget.
+The AdaptiveRL treatment has no difference from the matched fixed baseline on the primary endpoint. (The mean paired difference in recovery time is zero).
 
 ### H1 — Alternative Hypothesis
-After a distribution shift, the adaptive treatment achieves a statistically significant **faster** recovery (lower recovery time) and/or higher normalized recovery than the fixed‑policy baseline.
+The AdaptiveRL treatment has a lower recovery time than the matched fixed baseline on the primary endpoint.
 
-## 4. Operational Definition of Adaptation
-* **Pre‑shift performance (P_pre)** – Mean episodic return over the last 20 evaluation episodes **before** the shift.
-* **Immediate post‑shift performance (P₀)** – Mean return over the first 5 evaluation episodes **after** the shift.
-* **Performance at step *t* (P(t))** – Mean return over a moving window of 5 evaluation episodes centered at timestep *t* after the shift.
-* **Recovery metric (R(t))** – Normalized recovery:
-```
-R(t) = (P(t) - P₀) / (P_pre - P₀)
-```
-Values range from 0 (no recovery) to 1 (full return to pre‑shift level).
-* **Recovery time (τ)** – First timestep where R(t) ≥ 0.9.
-* **Final post‑shift performance (P_final)** – Mean return over the last 20 evaluation episodes after a fixed horizon of 10 000 environment steps post‑shift.
+## 4. Treatment Definition
+* **Algorithm**: The base learning algorithm (e.g., PPO or SAC).
+* **Treatment**: Adaptive vs Fixed.
 
-## 5. Variables
-### 5.1 Independent Variables
+Where supported, we compare Adaptive PPO vs Fixed PPO, and Adaptive SAC vs Fixed SAC. The base algorithm and hyperparameters remain identical; the intervention is strictly the presence of the online adaptation mechanism and its associated compute overhead during the post-shift phase.
+
+## 5. Operational Definition of Adaptation
+**Time axis**: **Completed post-shift episode index**. All recovery definitions are evaluated entirely using this single canonical axis. A second researcher must be able to reconstruct the same recovery time from raw episode records.
+
+* **Pre-shift performance ($P_{pre}$)**: Mean episodic return over the 20 pre-shift evaluation episodes.
+* **Immediate post-shift performance ($P_0$)**: Mean return over the first 5 evaluation episodes after shift introduction.
+* **Performance at episode $t$ ($P(t)$)**: Mean return over a **causal trailing window** of 5 evaluation episodes ending at index $t$. The first valid measurement occurs at $t=5$. A future episode is never used to declare recovery at an earlier time.
+* **Recovery metric ($R(t)$)**: 
+  $$ R(t) = \frac{P(t) - P_0}{P_{pre} - P_0} $$
+  *Edge-case handling*: If $P_{pre} \le P_0$ (no post-shift degradation), the recovery time is undefined (invalid metric). If $P(t) < P_0$, $R(t)$ can be negative. If $P(t) > P_{pre}$, $R(t) > 1$.
+* **Recovery time ($\tau$)**: The first episode index $t$ where $R(t) \ge 0.9$ for at least 3 consecutive episodes (persistence rule).
+* **Non-recovery and Censoring**: If the condition $R(t) \ge 0.9$ is not met by the maximum evaluation horizon $H$, the run is designated as **right-censored**. For the primary permutation test, right-censored values are imputed as the maximum horizon $H$.
+
+## 6. Independent Variables
 | Variable | Levels |
 |---|---|
-| **Treatment** (primary) | AdaptiveRL (online shift adaptation) vs Fixed‑policy (PPO / SAC) |
-| **Environment** (secondary) | GridWorld, ContinuousNavigation, TrafficSignal, Drone3D |
-| **Shift type** | Obstacle‑density, Traffic‑arrival‑rate, Wind‑disturbance, Dynamics‑parameter change |
-| **Shift magnitude** | Mild, Moderate, Severe (defined per‑environment in §6) |
-| **Random seed** | Integer seed controlling environment generation, policy initialization, and any stochastic components |
-### 5.2 Dependent Variables
-| Metric | Direction (higher is better) |
-|---|---|
-| **Recovery time (τ)** | lower |
-| **Normalized recovery AUC** (integral of R(t) over the adaptation horizon) | higher |
-| **Final post‑shift return (P_final)** | higher |
-| **Mean episodic return (pre‑shift)** – used only for normalization |
-| **Success rate** – proportion of episodes reaching the goal |
-### 5.3 Controlled Variables
-* Training timestep budget: 200 000 steps for all agents.
-* Evaluation episode budget: 40 deterministic episodes per seed (20 pre‑shift, 20 post‑shift).
-* Network architecture, optimizer, learning‑rate, and SB3 hyper‑parameters are identical between adaptive and baseline agents.
-* Checkpoint selection: Fixed checkpoint at 200 000 steps (no early‑stop based on validation).
-* Seeding policy (see §9).
+| **Algorithm** | PPO, SAC |
+| **Treatment** | Adaptive vs Fixed |
+| **Environment** | `gridworld`, `navigation_2d`, `traffic_signal`, `drone_disturbed` |
+| **Shift magnitude** | Mild, Moderate, Severe |
 
-## 6. Experimental Conditions
-### 6.1 Training Distribution
-All agents are trained on the **nominal** version of each environment (baseline parameters as defined in `configs/*.yaml`).
-### 6.2 Distribution Shifts
-For each environment we define three shift magnitudes:
-* **GridWorld** – obstacle count: nominal = 2, mild = 4, moderate = 6, severe = 8.
-* **ContinuousNavigation** – LiDAR noise σ: nominal = 0.01, mild = 0.05, moderate = 0.10, severe = 0.20.
-* **TrafficSignal** – arrival‑rate λ per lane: nominal = 0.3, mild = 0.5, moderate = 0.7, severe = 1.0.
-* **Drone3D** – wind‑force magnitude: nominal = 0 m/s, mild = 0.5 m/s, moderate = 1.0 m/s, severe = 2.0 m/s.
-The shift is applied **after** the pre‑shift evaluation phase; the agent then continues interacting with the altered environment.
-### 6.3 Adaptation Window
-Agents are allowed the full post‑shift evaluation horizon (10 000 steps) to adapt. No additional training budget is granted beyond the original 200 000 steps.
+## 7. Dependent Variables
+* **Primary**: Recovery time ($\tau$) (lower is better).
+* **Secondary**: Final post-adaptation return, success rate.
 
-## 7. Baselines
-* **Fixed PPO baseline** – PPO agent trained on the nominal distribution, evaluated under the shifted distribution without any adaptation logic.
-* **Fixed SAC baseline** – SAC agent (where the environment has continuous actions) trained nominally, evaluated under shift without adaptation.
-* **Adaptive treatment** – Agent that incorporates the AdaptiveRL curriculum‑wrapper that detects distribution‑shift cues (e.g., sudden drop in reward) and updates its policy online using the same optimizer and network as the baseline.
-The adaptive implementation is assumed to exist as a configurable wrapper (see `src/adaptive_rl/curriculum/`); the protocol does not require code changes.
+## 8. Controlled Variables
+* Identical training timestep budget.
+* Fixed checkpoint selection (final training checkpoint).
+* Shared evaluation seeds for paired testing.
 
-## 8. Evaluation Environments
-We evaluate *all* four environments because they each expose a distinct shift modality. For each environment we report metrics separately; cross‑environment aggregation is performed on the **normalized recovery AUC**.
+## 9. Baselines
+* **Fixed PPO/SAC baseline**: Trained on nominal distribution, evaluated under shifted distribution with a frozen policy.
 
-## 9. Seed and Reproducibility Protocol
-1. **Training seeds** – 10 independent seeds generated by the deterministic rule: `seed_i = 1000 + i` for i∈[0,9].
-2. **Evaluation seeds** – For each training seed, a paired evaluation seed is derived as `eval_seed_i = seed_i + 5000`. The same pair is used for both adaptive and baseline agents to eliminate environment variance.
-3. All seeds are recorded in the experiment manifest (`manifest.json`).
-4. Randomness sources (NumPy, PyTorch, env RNG) are seeded with the same value.
-5. Failed runs (crash, NaN metrics) are logged and excluded from the primary analysis but reported in the failure accounting table.
+## 10. Evaluation Environments
+Environments verified in the ARL registry:
+* `gridworld` (Action space: Discrete, Algorithm: PPO)
+* `navigation_2d` (Action space: Continuous, Algorithm: PPO/SAC)
+* `traffic_signal` (Action space: Discrete, Algorithm: PPO)
+* `drone_disturbed` (Action space: Continuous, Algorithm: PPO/SAC)
 
-## 10. Training and Evaluation Budget
-* **Training budget** – 200 000 environment steps per seed.
-* **Evaluation budget** – 40 deterministic episodes (20 pre‑shift, 20 post‑shift) per seed.
-* No additional environment interactions are granted to the adaptive agent beyond the evaluation budget; adaptation occurs *online* within the allocated episodes.
+## 11. Training Distribution
+All agents train exclusively on the nominal configuration of the environment as defined in the training configs. The training parameters ($P_{train}$) are strictly separated from the shift parameters ($P_{shift}$). Test seeds and shift parameters must not leak into the training phase. Post-hoc scenario selection is strictly prohibited.
 
-## 11. Checkpoint Selection
-A single checkpoint saved at the final training timestep (200 000) is used for both adaptive and baseline agents. No validation‑set checkpoint selection is employed to avoid information leakage.
+## 12. Distribution Shifts
+Shift parameters target verified configuration endpoints.
+* **`gridworld`** — `num_obstacles`: nominal = 2, mild = 4, moderate = 6, severe = 8.
+* **`navigation_2d`** — `lidar_noise`: *[FUTURE PROTOCOL PARAMETER — NOT CURRENTLY IMPLEMENTED IN ARL]*.
+* **`traffic_signal`** — `arrival_rates` (tuple applied to all lanes): nominal = (0.3, 0.3, 0.3, 0.3), mild = (0.5, 0.5, 0.5, 0.5), moderate = (0.7, 0.7, 0.7, 0.7), severe = (1.0, 1.0, 1.0, 1.0).
+* **`drone_disturbed`** — `wind_speed` (m/s) and `gust_sigma`: nominal = (0.5, 0.15), mild = (2.0, 0.3), moderate = (4.0, 0.6), severe = (8.0, 1.2).
 
-## 12. Statistical Analysis Plan
-### 12.1 Experimental Unit
-The unit of analysis is the **paired seed‑level outcome** (τ and normalized‑AUC) for each treatment within a given environment and shift magnitude.
-### 12.2 Primary Comparison
-We conduct a **two‑tailed paired permutation test** (10 000 permutations) comparing adaptive vs baseline recovery time across paired seeds. The test is performed separately for each environment‑shift severity; the pre‑registered primary endpoint is the **average recovery time across environments at the moderate shift level**.
-### 12.3 Effect Size
-Report **Cohen’s d** for the paired differences.
-### 12.4 Confidence Intervals
-Bootstrap (5 000 resamples) 95 % confidence intervals for the mean difference.
-### 12.5 Multiple Comparisons
-Apply the **Holm‑Bonferroni** correction to the family of tests (4 environments × 3 shift magnitudes = 12 comparisons). The pre‑registered primary endpoint (moderate shift) is tested without correction; secondary tests are corrected.
-### 12.6 Significance Threshold
-Family‑wise α = 0.05.
+## 13. Evaluation Procedure
+The evaluation separates cleanly into distinct phases:
+1. **Pre-shift measurement**: 20 episodes on nominal parameters.
+2. **Shift introduction**: Environment parameters are updated.
+3. **Adaptation period**: Agent interacts with the shifted environment (online updates enabled for Adaptive treatment, policy frozen for Baseline).
+4. **Post-adaptation measurement**: Final measurement of adapted performance.
 
-## 13. Failure and Invalid‑Run Handling
-| Status | Definition |
-|---|---|
-| **Planned runs** | 10 training seeds × 2 treatments × 4 environments × 3 shift levels = 240 seed‑level experiments. |
-| **Completed runs** | Runs that finish training, produce a valid checkpoint, and return a non‑NaN evaluation report. |
-| **Failed runs** | Crashes, divergence, or NaN/Inf metrics during evaluation. |
-| **Invalid runs** | Metric violations (e.g., negative episode length) or missing manifest entries. |
-Failed runs are reported but excluded from the primary permutation test; a sensitivity analysis includes them as worst‑case values.
+## 14. Seed Protocol
+* **Training seeds**: 10 independent experimental replicates. This seed count represents a pre-registered computational budget, not a powered sample size from a formal power analysis.
+* **Evaluation seeds**: For each training seed, a paired evaluation seed is used to control environment variance across treatments. 
+* Randomness for NumPy, PyTorch, and environment initialization must be seeded deterministically.
 
-## 14. Reporting Requirements
-Each experiment must output a JSON record containing:
-* `experiment_id`
-* `git_commit_sha`
-* `environment`
-* `algorithm`
-* `treatment`
-* `training_seed`
-* `evaluation_seed`
-* `shift_type` & `shift_magnitude`
-* `pre_shift_return`
-* `post_shift_return`
-* `recovery_time`
-* `normalized_recovery_auc`
-* `final_return`
-* `failure_status`
-* Paths to per‑episode report files (`episodes.json`).
-All records are aggregated into a top‑level `summary.json` for the full benchmark.
+## 15. Training / Adaptation / Evaluation Budget
+* **Training interactions**: Fixed budget (e.g., 200,000 steps).
+* **Adaptation budget**: The Adaptive treatment incurs online computation overhead during the post-shift episodes. This extra computation is an explicit part of the intervention; the baseline receives no such computation. Both methods are evaluated on the exact same budget of environment interactions.
 
-## 15. Pre‑Registered Success Criteria
-H1 is considered supported **only if**:
-1. The paired permutation test for the primary endpoint (moderate shift) yields **p < 0.05** (Holm‑adjusted where applicable).
-2. The 95 % CI for the mean difference in recovery time does **not include zero** and the effect size (Cohen’s d) is ≥ 0.5 (medium).
-Both statistical and practical thresholds must be satisfied.
+## 16. Checkpoint Selection
+Checkpoint selection uses a deterministic pre-declared rule: the **final training checkpoint** at the end of the training budget. Post-shift evaluation performance is never used to select checkpoints. The same selection rule applies to all conditions.
 
-## 16. Negative Results and Inconclusive Results
-* **Supports H1** – criteria in §15 met.
-* **Fails to reject H0** – p ≥ 0.05 or CI includes zero.
-* **Inconclusive** – insufficient valid runs (< 80 % completion) or violation of pre‑registered analysis plan.
-All outcomes are reported transparently.
+## 17. Primary Endpoint
+The single primary endpoint is the **recovery time under the moderate shift condition**, analyzed within each environment. Cross-environment aggregation of raw recovery times is not performed due to scale differences.
 
-## 17. Threats to Validity
-| Threat | Mitigation |
-|---|---|
-| Stochastic training variance | Use ≥ 10 seeds and paired analysis. |
-| Environment stochasticity | Deterministic evaluation seeds; seed‑pairing. |
-| Limited seed count | Power analysis justifies 10 seeds; additional seeds can be added later. |
-| Algorithm‑specific tuning bias | Identical hyper‑parameters for adaptive and baseline agents. |
-| Reward‑scale differences across environments | Primary metric is *recovery time* (a temporal measure) and *normalized AUC* which are scale‑independent. |
-| Distribution‑shift realism | Shifts correspond to documented configurable parameters in each environment. |
-| Adaptive‑overhead confounding | Adaptation budget is limited to the same evaluation steps; no extra timesteps granted. |
-| Checkpoint‑selection bias | Fixed checkpoint at training horizon. |
-| Multiple‑testing inflation | Holm correction; primary endpoint pre‑registered. |
-| External validity | Results are reported per‑environment; cross‑environment generalisation is assessed only via normalized AUC. |
+## 18. Secondary Endpoints
+* Final post-adaptation return.
+* Recovery time under mild and severe shifts.
 
-## 18. Reproducibility Checklist
-* Repository SHA recorded in manifest.
-* Full YAML configuration files (training, evaluation, shift) archived.
-* All random seeds listed.
-* Training budget and checkpoint policy documented.
-* Metric extraction scripts (`adaptive_rl/evaluation/`) unchanged.
-* Artifact files (`summary.json`, per‑seed JSON) uploaded.
+## 19. Statistical Analysis Plan
+### 19.1 Experimental Unit
+The independent experimental unit is the **independent training run / seed**. Evaluation episodes are repeated observations nested inside that experimental unit.
+### 19.2 Estimand
+The paired difference in recovery time between the Adaptive treatment and the Fixed baseline for a given training seed.
+### 19.3 Primary Test
+A **Monte Carlo paired permutation (sign-flip) test** (10,000 sign-flips) at the seed level. The test statistic is the mean paired difference. The test is two-sided.
+### 19.4 Effect Size
+**Cohen's $d_z$** for paired samples (mean of paired differences divided by the standard deviation of paired differences).
+### 19.5 Confidence Interval
+95% Bias-Corrected and Accelerated (BCa) bootstrap interval, resampling the paired seed differences (5,000 resamples). Resampling strictly occurs at the seed level, not the episode level.
+### 19.6 Multiple Comparisons
+**Family**: The set of 4 environments evaluated at the moderate shift level.
+**Correction**: Holm-Bonferroni step-down procedure applied to this primary family of 4 tests to control the Family-Wise Error Rate (FWER) at $\alpha = 0.05$.
 
-## 19. Open Research Questions
-* How does the adaptive mechanism scale with higher‑dimensional observation spaces?
-* Can meta‑learning improve adaptation speed beyond the simple online update used here?
-* What is the impact of curriculum‑based pre‑training on post‑shift recovery?
-* How do different adaptation horizons (short vs long) affect the trade‑off between sample efficiency and robustness?
+## 20. Failure / Invalid / Censored Runs
+Categorization:
+* **Planned**: 10 training seeds per condition.
+* **Completed**: Runs that successfully evaluate without crashing.
+* **Failed**: Training divergence, NaNs, or execution crashes.
+* **Invalid**: Metric undefined (e.g., $P_{pre} \le P_0$).
+* **Censored**: Runs that do not recover within the adaptation horizon.
+
+Failed and invalid runs are excluded from the primary test but reported. A pre-registered sensitivity analysis assigns worst-case values to failed treatment runs to check for hidden attrition bias.
+
+## 21. Reporting Requirements
+The protocol aligns with the existing ARL `ShiftBenchmarkReport` JSON schema.
+The benchmark artifact must contain:
+* `experiment_name`, `environment_name`, `algorithm_name`
+* `training_provenance` and `policy_fingerprint`
+* Detailed `scenario_results` containing per-seed metric records and environment parameters.
+Do not assume external reporting infrastructure (e.g., parallel `manifest.json`) exists unless implemented in the `ShiftBenchmarkReport`.
+
+## 22. Success Criteria
+Statistical evidence requires $p < 0.05$ (Holm-adjusted) on the primary endpoint. Practical significance is assessed independently by evaluating if the effect size $d_z$ is meaningful for the deployment context.
+
+## 23. Negative and Inconclusive Results
+Transparently reported. If completion rate is < 80% due to failures, the result is considered inconclusive.
+
+## 24. Threats to Validity
+| Threat | Why it matters | Mitigation | Remaining limitation |
+|---|---|---|---|
+| **Stochastic training** | High variance obscures effects | Paired evaluation seeds | Limited computational budget (10 seeds) limits precision |
+| **Algorithm confounding** | Treatment might just be a better base algorithm | Compare Adaptive PPO vs Fixed PPO | Base hyperparameters may favor one condition |
+| **Shift realism** | Toy shifts don't reflect real-world | Target documented physical parameters | Simulation-to-reality gap remains |
+| **Adaptation compute** | Adaptive agent uses more compute post-shift | Declare overhead as part of intervention | Deployment latency constraints unmeasured |
+| **Cross-environment** | Aggregating raw recovery times is invalid | Analyze environments independently | Lack of a unified global metric |
+| **Censoring** | Non-recovery skews the mean | Impute max horizon $H$ for test | Test becomes conservative |
+| **Multiple testing** | Inflated false positives | Holm-Bonferroni correction on primary family | Secondary exploratory tests remain uncorrected |
+
+## 25. Reproducibility Checklist
+* Repository SHA recorded in report.
+* YAML configuration files archived.
+* All random seeds logged.
+* Test seeds proven disjoint from train seeds.
+* `ShiftBenchmarkReport` JSON output uploaded.
+
+## 26. Open Research Questions
+* How does the adaptation overhead scale with observation dimensionality?
+* Can representation learning improve the sample efficiency of the online adaptation phase?
