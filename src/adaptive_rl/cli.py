@@ -415,6 +415,7 @@ def evaluate(
         console.print("[bold red]--compare-planner cannot be combined with --seeds.[/bold red]")
         raise typer.Exit(code=1)
 
+    validated_planner: Optional[str] = None
     if compare_planner is not None:
         clean_planner = compare_planner.strip().lower()
         if clean_planner != "astar":
@@ -422,6 +423,7 @@ def evaluate(
                 f"[bold red]Unsupported planner:[/bold red] '{compare_planner}'. Only 'astar' is supported."
             )
             raise typer.Exit(code=1)
+        validated_planner = clean_planner
 
     if split is not None:
         clean_split = split.strip().lower()
@@ -623,14 +625,7 @@ def evaluate(
             console.print("\n")
             console.print(comp_table)
 
-        if compare_planner is not None:
-            p_name = compare_planner.strip().lower()
-            if p_name != "astar":
-                console.print(
-                    f"[bold red]Unsupported planner:[/bold red] '{compare_planner}'. Only 'astar' is supported."
-                )
-                raise typer.Exit(code=1)
-
+        if validated_planner is not None:
             from adaptive_rl.evaluation.evaluator import compare_with_planner
             from adaptive_rl.planners.astar3d import AStar3DPlanner
 
@@ -695,6 +690,10 @@ def evaluate(
 
             console.print("\n")
             console.print(planner_table)
+            console.print(
+                "[dim]Note: PPO and Random Policy evaluate closed-loop dynamic trajectory execution; "
+                "A* evaluates open-loop geometric path feasibility.[/dim]"
+            )
             console.print(
                 f"\n[bold green]Planner comparison report saved to:[/bold green] {planner_report_target}"
             )

@@ -16,7 +16,7 @@ import heapq
 import math
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 import numpy as np
 
@@ -77,6 +77,58 @@ def segment_sphere_distance(
     closest_pt = p0 + t_clamped * d
     dist_to_center = float(np.linalg.norm(closest_pt - center))
     return dist_to_center - radius
+
+
+def compute_path_min_obstacle_clearance(
+    path: Sequence[Union[np.ndarray, Sequence[float]]],
+    obstacles: Sequence[Any],
+    collision_radius: float = 0.0,
+) -> Optional[float]:
+    """Compute the analytical minimum effective obstacle clearance across complete path segments.
+
+    Evaluates the continuous closest Euclidean distance from each 3D line segment to
+    every spherical obstacle center, subtracting the obstacle radius and drone collision radius:
+        effective_clearance = dist(segment, obstacle.center) - obstacle.radius - collision_radius
+
+    Parameters
+    ----------
+    path : Sequence of 3D coordinates
+        Ordered sequence of waypoints along the planned trajectory.
+    obstacles : Sequence of obstacles
+        Spherical obstacles with center [x, y, z] and radius r.
+    collision_radius : float
+        Drone bounding collision sphere radius.
+
+    Returns
+    -------
+    Optional[float]
+        The minimum analytical clearance across all segments and obstacles,
+        or None if path has fewer than 1 point or no obstacles exist.
+    """
+    if not obstacles or len(path) == 0:
+        return None
+
+    path_pts = [np.asarray(p, dtype=np.float64) for p in path]
+    r = float(collision_radius)
+
+    clearances: List[float] = []
+
+    if len(path_pts) == 1:
+        p0 = path_pts[0]
+        for obs in obstacles:
+            center = np.asarray(getattr(obs, "center", obs), dtype=np.float64)
+            radius = float(getattr(obs, "radius", 0.0))
+            dist = float(np.linalg.norm(p0 - center)) - radius - r
+            clearances.append(dist)
+    else:
+        for p0, p1 in zip(path_pts[:-1], path_pts[1:]):
+            for obs in obstacles:
+                center = np.asarray(getattr(obs, "center", obs), dtype=np.float64)
+                radius = float(getattr(obs, "radius", 0.0))
+                dist = segment_sphere_distance(p0, p1, center, radius + r)
+                clearances.append(dist)
+
+    return float(min(clearances)) if clearances else None
 
 
 def check_segment_sphere_collision(
@@ -634,6 +686,7 @@ __all__ = [
     "check_segment_boundary_collision",
     "check_segment_collision",
     "check_segment_sphere_collision",
+    "compute_path_min_obstacle_clearance",
     "is_point_valid",
     "is_segment_valid",
     "segment_sphere_distance",

@@ -24,6 +24,7 @@ from adaptive_rl.planners.astar3d import (
     AStar3DPlanner,
     check_segment_boundary_collision,
     check_segment_sphere_collision,
+    compute_path_min_obstacle_clearance,
     is_segment_valid,
     segment_sphere_distance,
 )
@@ -327,3 +328,61 @@ def test_planner_configuration_validation() -> None:
 
     with pytest.raises(ValueError, match="max_iterations must be >= 1"):
         AStar3DPlanner(max_iterations=0)
+
+
+# =============================================================================
+# 9. Analytical Segment Clearance Tests
+# =============================================================================
+
+
+def test_compute_path_min_obstacle_clearance_segment_vs_waypoint() -> None:
+    """Verify segment clearance detects obstacle proximity along line segments where endpoints are safe."""
+    # Sphere at (10, 0, 0) with radius 2.0
+    obs = ObstacleSphere3D(center=np.array([10.0, 0.0, 0.0]), radius=2.0)
+    # Endpoints at (0, 0, 0) and (20, 0, 0)
+    p0 = np.array([0.0, 0.0, 0.0])
+    p1 = np.array([20.0, 0.0, 0.0])
+    path = [p0, p1]
+
+    # Waypoint-only clearance:
+    # dist(p0, center) = 10.0 - 2.0 = 8.0
+    # dist(p1, center) = 10.0 - 2.0 = 8.0
+    # Analytical segment clearance:
+    # closest point on segment is (10, 0, 0) which is distance 0 from center.
+    # clearance = 0 - 2.0 - 0.0 = -2.0 (penetration)
+    clearance_no_col_radius = compute_path_min_obstacle_clearance(path, [obs], collision_radius=0.0)
+    assert clearance_no_col_radius is not None
+    assert math.isclose(clearance_no_col_radius, -2.0, abs_tol=1e-5)
+
+    clearance_with_col_radius = compute_path_min_obstacle_clearance(
+        path, [obs], collision_radius=0.5
+    )
+    assert clearance_with_col_radius is not None
+    assert math.isclose(clearance_with_col_radius, -2.5, abs_tol=1e-5)
+
+    # Now an obstacle off to the side: center (10, 5, 0), radius 2.0
+    # Closest point on segment is (10, 0, 0), dist to center is 5.0
+    # clearance = 5.0 - 2.0 - 0.8 = 2.2
+    obs_side = ObstacleSphere3D(center=np.array([10.0, 5.0, 0.0]), radius=2.0)
+    clearance_side = compute_path_min_obstacle_clearance(path, [obs_side], collision_radius=0.8)
+    assert clearance_side is not None
+    assert math.isclose(clearance_side, 2.2, abs_tol=1e-5)
+
+
+def test_compute_path_min_obstacle_clearance_empty_and_single_point() -> None:
+    """Verify compute_path_min_obstacle_clearance handles edge cases (empty path/obstacles, single point)."""
+    assert (
+        compute_path_min_obstacle_clearance(
+            [], [ObstacleSphere3D(center=np.array([0, 0, 0]), radius=1.0)]
+        )
+        is None
+    )
+    assert compute_path_min_obstacle_clearance([np.array([1.0, 2.0, 3.0])], []) is None
+
+    # Single point
+    obs = ObstacleSphere3D(center=np.array([5.0, 0.0, 0.0]), radius=1.0)
+    single_pt = [np.array([0.0, 0.0, 0.0])]
+    clearance = compute_path_min_obstacle_clearance(single_pt, [obs], collision_radius=0.5)
+    assert clearance is not None
+    # 5.0 - 1.0 - 0.5 = 3.5
+    assert math.isclose(clearance, 3.5, abs_tol=1e-5)

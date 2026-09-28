@@ -56,4 +56,7 @@ src/adaptive_rl/
   ```bash
   adaptive-rl evaluate --model artifacts/models/drone_ppo_demo_final.zip --compare-planner astar
   ```
-- **Limitations**: Pure geometric kinematics on a discrete spatial lattice. Does not model drone quadrotor attitude dynamics, motor voltage curves, or wind disturbances.
+- **Limitations & Feasibility Paradigms**:
+  - **Dynamic Feasibility (PPO & Random Policy)**: Evaluated through closed-loop physics simulation in `DroneNavigation3DEnv`. The drone must generate continuous acceleration control commands to navigate under inertia, velocity drag, and actuation limits. Success requires dynamically executing the trajectory without colliding.
+  - **Geometric Feasibility (A* Planner)**: Evaluated as open-loop 3D spatial path planning. Success denotes finding an obstacle-free, boundary-clearing geometric path from start to goal on the discretized spatial lattice. The path is not executed through drone attitude dynamics or closed-loop tracking control.
+

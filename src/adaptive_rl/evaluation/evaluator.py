@@ -827,9 +827,16 @@ def evaluate_planner(
         Aggregated benchmark metrics including success rate, collision rate,
         mean planning time in milliseconds, path length, and path efficiency.
     """
+    if num_episodes <= 0:
+        raise ValueError(f"num_episodes must be positive, got {num_episodes}")
+
     import math
 
-    from adaptive_rl.planners.astar3d import AStar3DPlanner, check_segment_collision
+    from adaptive_rl.planners.astar3d import (
+        AStar3DPlanner,
+        check_segment_collision,
+        compute_path_min_obstacle_clearance,
+    )
 
     if planner is None:
         planner = AStar3DPlanner(resolution=0.5, connectivity=26)
@@ -929,7 +936,11 @@ def evaluate_planner(
                 path_len = traj_metrics["path_length"]
                 straight_dist = traj_metrics["straight_line_distance"]
                 path_eff = traj_metrics["path_efficiency"]
-                min_clear = traj_metrics["min_obstacle_clearance"]
+                min_clear = compute_path_min_obstacle_clearance(
+                    path=path,
+                    obstacles=obstacles,
+                    collision_radius=collision_radius,
+                )
             else:
                 is_success = False
                 is_collision = False
@@ -995,7 +1006,18 @@ def evaluate_planner(
                 "mean_planning_time_ms": round(mean_time_ms, 2),
                 "path_efficiency": round(mean_eff, 4) if mean_eff is not None else None,
                 "mean_path_efficiency": round(mean_eff, 4) if mean_eff is not None else None,
+                "straight_line_distance": round(mean_straight, 2)
+                if mean_straight is not None
+                else None,
+                "mean_straight_line_distance": round(mean_straight, 2)
+                if mean_straight is not None
+                else None,
+                "min_obstacle_clearance": round(mean_clear, 2) if mean_clear is not None else None,
+                "mean_min_obstacle_clearance": round(mean_clear, 2)
+                if mean_clear is not None
+                else None,
                 "planning_time": round(mean_time_ms / 1000.0, 5),
+                "feasibility_type": "geometric",
             },
         )
     finally:
@@ -1060,6 +1082,11 @@ def compare_with_planner(
         ]
 
         comparison_data: Dict[str, Any] = {
+            "methodology_note": (
+                "A* planner finds geometrically valid collision-free paths through spatial lattice search "
+                "without simulating drone dynamics. PPO and Random policies execute control actions in closed-loop "
+                "simulation subject to drone inertia, actuation limits, and environment dynamics."
+            ),
             "evaluation_config": {
                 "num_episodes": num_episodes,
                 "base_seed": base_seed,
@@ -1071,9 +1098,11 @@ def compare_with_planner(
                 "connectivity": planner.connectivity,
                 "max_iterations": planner.max_iterations,
                 "tolerance": planner.tolerance,
+                "feasibility_type": "geometric",
             },
             "summary": {
                 "PPO": {
+                    "feasibility_type": "dynamic",
                     "success_rate": round(ppo_metrics.success_rate, 4)
                     if ppo_metrics.success_rate is not None
                     else None,
@@ -1091,6 +1120,11 @@ def compare_with_planner(
                     "mean_steps": round(ppo_metrics.mean_episode_length, 1),
                 },
                 "Classical Planner (A*)": {
+                    "feasibility_type": "geometric",
+                    "feasibility_note": (
+                        "A* success denotes finding a geometrically collision-free path. "
+                        "The planner path is not executed through the drone dynamics."
+                    ),
                     "success_rate": round(planner_metrics.success_rate, 4)
                     if planner_metrics.success_rate is not None
                     else None,
@@ -1108,6 +1142,7 @@ def compare_with_planner(
                     "mean_steps": None,
                 },
                 "Random Policy": {
+                    "feasibility_type": "dynamic",
                     "success_rate": round(rand_metrics.success_rate, 4)
                     if rand_metrics.success_rate is not None
                     else None,

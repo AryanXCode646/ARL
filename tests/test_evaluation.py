@@ -880,12 +880,18 @@ def test_compare_with_planner_structure(tmp_path: Path) -> None:
         output_path=report_target,
     )
 
+    assert "methodology_note" in comp_results
     assert "evaluation_config" in comp_results
     assert "planner_config" in comp_results
+    assert comp_results["planner_config"]["feasibility_type"] == "geometric"
     assert "summary" in comp_results
     assert "PPO" in comp_results["summary"]
+    assert comp_results["summary"]["PPO"]["feasibility_type"] == "dynamic"
     assert "Classical Planner (A*)" in comp_results["summary"]
+    assert comp_results["summary"]["Classical Planner (A*)"]["feasibility_type"] == "geometric"
+    assert "feasibility_note" in comp_results["summary"]["Classical Planner (A*)"]
     assert "Random Policy" in comp_results["summary"]
+    assert comp_results["summary"]["Random Policy"]["feasibility_type"] == "dynamic"
 
     assert comp_results["evaluation_config"]["seeds"] == [100, 101]
 
@@ -898,5 +904,49 @@ def test_compare_with_planner_structure(tmp_path: Path) -> None:
     assert "planner_metrics" in saved_data
     assert "random_policy_metrics" in saved_data
     assert saved_data["summary"]["Classical Planner (A*)"]["mean_planning_time_ms"] is not None
+
+    env.close()
+
+
+def test_from_planner_metrics_preserves_straight_line_and_clearance() -> None:
+    """Verify StandardizedExperimentMetrics preserves all planner metrics including clearance and straight line dist."""
+    planner_m = PlannerEvaluationMetrics(
+        episodes=5,
+        success_rate=0.8,
+        collision_rate=0.0,
+        timeout_rate=0.2,
+        mean_planning_time_ms=12.5,
+        mean_path_length=24.5,
+        mean_path_efficiency=0.92,
+        mean_straight_line_distance=22.54,
+        mean_min_obstacle_clearance=1.75,
+        additional_metrics={
+            "straight_line_distance": 22.54,
+            "min_obstacle_clearance": 1.75,
+            "path_efficiency": 0.92,
+        },
+    )
+
+    std_m = StandardizedExperimentMetrics.from_planner_metrics(planner_m)
+
+    assert std_m.episodes == 5
+    assert std_m.success_rate == 0.8
+    assert std_m.collision_rate == 0.0
+    assert std_m.path_length == 24.5
+    assert std_m.path_efficiency == 0.92
+    assert std_m.straight_line_distance == 22.54
+    assert std_m.min_obstacle_clearance == 1.75
+    assert std_m.planning_time == planner_m.mean_planning_time
+
+
+def test_evaluate_planner_num_episodes_validation() -> None:
+    """Verify evaluate_planner validates num_episodes > 0 explicitly."""
+    env = DroneNavigation3DEnv(bounds=(20.0, 20.0, 10.0), max_steps=10, num_obstacles=1)
+
+    with pytest.raises(ValueError, match="num_episodes must be positive"):
+        evaluate_planner(env=env, num_episodes=0)
+
+    with pytest.raises(ValueError, match="num_episodes must be positive"):
+        evaluate_planner(env=env, num_episodes=-5)
 
     env.close()
