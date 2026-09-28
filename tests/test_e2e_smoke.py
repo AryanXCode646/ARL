@@ -141,14 +141,14 @@ def test_stage1_config_and_environment(smoke_config: tuple[Path, ExperimentConfi
         env.close()
 
 
-def test_stage2_training(trained: Result, smoke_config: tuple[Path, ExperimentConfig]) -> None:
-    """Stage 2: training exits cleanly and reports its summary."""
-    _, cfg = smoke_config
-    output = _clean(trained.output)
-    if "Training Completed Successfully" not in output:
+def test_stage2_training(trained: Result) -> None:
+    """Stage 2: training exits cleanly and reports its summary.
+
+    Artifact paths are checked on disk in Stage 3, not in the output: Rich wraps long paths
+    inside the summary panel depending on terminal width.
+    """
+    if "Training Completed Successfully" not in _clean(trained.output):
         _fail("Stage 2: Training", "`train` did not print its completion summary", trained)
-    if f"{cfg.name}_final.zip" not in output:
-        _fail("Stage 2: Training", "`train` summary does not mention the saved model", trained)
 
 
 def test_stage3_artifacts(trained: Result, smoke_config: tuple[Path, ExperimentConfig]) -> None:
