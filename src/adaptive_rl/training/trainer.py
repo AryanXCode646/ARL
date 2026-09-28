@@ -15,7 +15,10 @@ import gymnasium as gym
 import numpy as np
 import torch
 
+from adaptive_rl.algorithms.base import BaseAlgorithm
 from adaptive_rl.algorithms.ppo import PPOAlgorithm
+from adaptive_rl.algorithms.registry import get_algorithm_factory
+from adaptive_rl.algorithms.sac import SACAlgorithm
 from adaptive_rl.config import ExperimentConfig
 from adaptive_rl.environments.registry import make_env
 from adaptive_rl.training.callbacks import (
@@ -45,8 +48,8 @@ class TrainingResult:
     training_time_seconds: float = 0.0
 
 
-class PPOTrainer:
-    """Trainer orchestrating PPO policy learning on the drone navigation environment."""
+class RLTrainer:
+    """Trainer orchestrating reinforcement learning policy learning on the drone navigation environment."""
 
     def __init__(
         self,
@@ -83,14 +86,37 @@ class PPOTrainer:
         gamma = algo_params.pop("gamma", self.config.algorithm.gamma)
         batch_size = algo_params.pop("batch_size", self.config.algorithm.batch_size)
         seed = algo_params.pop("seed", self.config.seed)
-        self.algorithm = PPOAlgorithm(
-            env=self.env,
-            learning_rate=lr,
-            gamma=gamma,
-            batch_size=batch_size,
-            seed=seed,
-            **algo_params,
-        )
+
+        algo_name = self.config.algorithm.name.lower()
+        self.algorithm: BaseAlgorithm
+        if algo_name == "ppo":
+            self.algorithm = PPOAlgorithm(
+                env=self.env,
+                learning_rate=lr,
+                gamma=gamma,
+                batch_size=batch_size,
+                seed=seed,
+                **algo_params,
+            )
+        elif algo_name == "sac":
+            self.algorithm = SACAlgorithm(
+                env=self.env,
+                learning_rate=lr,
+                gamma=gamma,
+                batch_size=batch_size,
+                seed=seed,
+                **algo_params,
+            )
+        else:
+            factory = get_algorithm_factory(algo_name)
+            self.algorithm = factory(
+                env=self.env,
+                learning_rate=lr,
+                gamma=gamma,
+                batch_size=batch_size,
+                seed=seed,
+                **algo_params,
+            )
 
     @staticmethod
     def _set_deterministic_seed(seed: int) -> None:
@@ -180,10 +206,21 @@ class PPOTrainer:
                 pass
 
 
+PPOTrainer = RLTrainer
+
+
 def get_trainer(
     config: ExperimentConfig,
     env: Optional[gym.Env] = None,
     callbacks: Optional[List[BaseCallback]] = None,
-) -> PPOTrainer:
+) -> RLTrainer:
     """Factory returning the trainer based on configuration."""
-    return PPOTrainer(config=config, env=env, callbacks=callbacks)
+    return RLTrainer(config=config, env=env, callbacks=callbacks)
+
+
+__all__ = [
+    "PPOTrainer",
+    "RLTrainer",
+    "TrainingResult",
+    "get_trainer",
+]

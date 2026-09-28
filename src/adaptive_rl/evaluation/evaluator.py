@@ -752,14 +752,19 @@ def evaluate_ppo_policy(
 
 
 def compare_policies(
-    ppo_algorithm: BaseAlgorithm,
+    ppo_algorithm: Optional[BaseAlgorithm] = None,
     random_policy: Optional[BaseAlgorithm] = None,
     env: Optional[gym.Env] = None,
     num_episodes: int = 20,
     base_seed: Optional[int] = 42,
     split: Optional[str] = None,
+    algorithm: Optional[BaseAlgorithm] = None,
 ) -> Dict[str, EvaluationMetrics]:
-    """Execute head-to-head evaluation between trained PPO and Random baseline under identical seeds."""
+    """Execute head-to-head evaluation between trained policy and Random baseline under identical seeds."""
+    target_algo = algorithm if algorithm is not None else ppo_algorithm
+    if target_algo is None:
+        raise ValueError("Must provide either algorithm or ppo_algorithm.")
+
     close_env = False
     if env is None:
         env = DroneNavigation3DEnv()
@@ -768,8 +773,12 @@ def compare_policies(
         if random_policy is None:
             random_policy = RandomPolicy(action_space=env.action_space, seed=base_seed)
 
-        ppo_eval = Evaluator(algorithm=ppo_algorithm, env=env)
-        ppo_metrics = ppo_eval.evaluate(
+        from adaptive_rl.algorithms.sac import SACAlgorithm
+
+        algo_name = "SAC" if isinstance(target_algo, SACAlgorithm) else "PPO"
+
+        target_eval = Evaluator(algorithm=target_algo, env=env)
+        target_metrics = target_eval.evaluate(
             num_episodes=num_episodes,
             deterministic=True,
             base_seed=base_seed if split is None else None,
@@ -785,7 +794,7 @@ def compare_policies(
         )
 
         return {
-            "PPO": ppo_metrics,
+            algo_name: target_metrics,
             "Random Policy": rand_metrics,
         }
     finally:
