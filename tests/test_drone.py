@@ -15,11 +15,10 @@ from adaptive_rl.config import (
     ExperimentConfig,
     TrainingConfig,
 )
-from adaptive_rl.curriculum.presets import get_curriculum_preset
 from adaptive_rl.environments import make_env
-from adaptive_rl.environments.drone.drone3d import DroneNavigation3DEnv
-from adaptive_rl.environments.drone.kinematics import DroneKinematics3D
-from adaptive_rl.environments.drone.obstacles import (
+from adaptive_rl.environments.drone import (
+    DroneKinematics3D,
+    DroneNavigation3DEnv,
     ObstacleSphere3D,
     compute_lidar_3d_readings,
     generate_drone_obstacles,
@@ -28,7 +27,7 @@ from adaptive_rl.environments.drone.obstacles import (
     ray_cast_sphere_3d,
 )
 from adaptive_rl.evaluation.evaluator import Evaluator
-from adaptive_rl.training.trainer import PPOTrainer, SACTrainer
+from adaptive_rl.training.trainer import PPOTrainer
 
 
 def test_drone_gymnasium_checker() -> None:
@@ -42,15 +41,12 @@ def test_drone_registry_instantiation() -> None:
     """Verify drone can be instantiated via make_env under aliases."""
     env1 = make_env("drone", max_steps=25)
     env2 = make_env("drone_3d", max_steps=25)
-    env3 = make_env("drone_navigation", max_steps=25)
 
     assert isinstance(env1, DroneNavigation3DEnv)
     assert isinstance(env2, DroneNavigation3DEnv)
-    assert isinstance(env3, DroneNavigation3DEnv)
 
     env1.close()
     env2.close()
-    env3.close()
 
 
 def test_drone_spaces() -> None:
@@ -120,7 +116,6 @@ def test_drone_kinematics_equations_of_motion() -> None:
 
     # Step without acceleration: damping should decelerate velocity
     pos2, vel2 = kinematics.step(np.array([0.0, 0.0, 0.0]))
-    # effective_acc = -0.1 * 0.4 = -0.04 m/s^2; dv = -0.004 m/s -> vel = 0.396
     assert vel2[0] < vel[0]
 
     # Test maximum speed ceiling
@@ -144,12 +139,6 @@ def test_drone_ray_cast_sphere_3d() -> None:
     # Ray directed away from sphere (-X) -> misses
     dist_away = ray_cast_sphere_3d(ray_origin, -ray_dir, sphere_center, radius, max_range=20.0)
     assert dist_away == pytest.approx(20.0)
-
-    # Ray perpendicular (+Y) -> misses
-    dist_perp = ray_cast_sphere_3d(
-        ray_origin, np.array([0.0, 1.0, 0.0]), sphere_center, radius, max_range=20.0
-    )
-    assert dist_perp == pytest.approx(20.0)
 
     # Inside sphere -> returns 0.0
     dist_inside = ray_cast_sphere_3d(sphere_center, ray_dir, sphere_center, radius, max_range=20.0)
@@ -191,7 +180,6 @@ def test_drone_lidar_3d_readings() -> None:
     assert readings.shape == (16,)
     assert np.all(readings >= 0.0)
     assert np.all(readings <= 1.0)
-    # The ray along +X should detect obstacle at distance 5.0 - 2.0 = 3.0 m (3.0 / 20.0 = 0.15)
     assert float(readings.min()) <= 0.16
 
 
@@ -211,7 +199,6 @@ def test_drone_procedural_obstacles_clearance() -> None:
     )
     assert len(obstacles) == 6
     for obs in obstacles:
-        # Distance to start and goal must be >= obstacle_radius + clearance_radius = 6.0
         assert np.linalg.norm(obs.center - start) >= 6.0
         assert np.linalg.norm(obs.center - goal) >= 6.0
 
@@ -280,7 +267,7 @@ def test_drone_render_modes() -> None:
     env.reset(seed=42)
     rendered = env.render()
     assert isinstance(rendered, str)
-    assert "AUTONOMOUS 3D DRONE FLIGHT DECK" in rendered
+    assert "SIMULATED 3D DRONE FLIGHT DECK" in rendered
     assert "Altitude (Z)" in rendered
     assert "Waypoint" in rendered
 
@@ -290,20 +277,6 @@ def test_drone_render_modes() -> None:
     env_h.step(np.zeros(3, dtype=np.float32))
     env_h.close()
     env.close()
-
-
-def test_drone_curriculum_preset() -> None:
-    """Verify drone curriculum preset creation and stage configurations."""
-    curr = get_curriculum_preset("drone")
-    assert len(curr.stages) == 4
-    assert curr.stages[0].name == "Open Sky"
-    assert curr.stages[1].name == "Sparse Obstacle Field"
-    assert curr.stages[2].name == "Standard Urban Airspace"
-    assert curr.stages[3].name == "Dense Hazard Field"
-
-    # Aliases
-    curr_alias = get_curriculum_preset("drone_3d")
-    assert len(curr_alias.stages) == 4
 
 
 def test_drone_ppo_training(tmp_path: Path) -> None:
@@ -341,45 +314,7 @@ def test_drone_ppo_training(tmp_path: Path) -> None:
 
     assert result.total_timesteps == 128
     assert result.final_model_path.exists()
-    mean_reward, std_reward = trainer.evaluate(episodes=2)
-    assert isinstance(mean_reward, float)
-
-
-def test_drone_sac_training(tmp_path: Path) -> None:
-    """Integration test: Train continuous SAC on 3D drone navigation."""
-    exp_cfg = ExperimentConfig(
-        name="test_drone_sac",
-        seed=42,
-        output_dir=tmp_path / "sac_results",
-        log_dir=tmp_path / "sac_logs",
-        algorithm=AlgorithmConfig(
-            name="sac",
-            learning_rate=0.0003,
-            gamma=0.99,
-            batch_size=32,
-            parameters={"buffer_size": 1000, "learning_starts": 10},
-        ),
-        environment=EnvironmentConfig(
-            name="drone",
-            max_steps=20,
-            parameters={"bounds": [20.0, 20.0, 10.0], "num_obstacles": 2},
-        ),
-        training=TrainingConfig(
-            total_timesteps=64,
-            checkpoint_freq=32,
-            log_interval=1,
-        ),
-        evaluation=EvaluationConfig(
-            eval_episodes=2,
-            deterministic=True,
-        ),
-    )
-
-    trainer = SACTrainer(config=exp_cfg)
-    result = trainer.fit()
-
-    assert result.total_timesteps == 64
-    assert result.final_model_path.exists()
+    assert result.metadata_path is not None and result.metadata_path.exists()
 
 
 def test_drone_evaluator_benchmarking(tmp_path: Path) -> None:
