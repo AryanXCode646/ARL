@@ -294,7 +294,6 @@ def benchmark_budgets(
     except ConfigError as err:
         console.print(f"[bold red]Configuration error:[/bold red] {err}")
         raise typer.Exit(code=1)
-
     x_axis = plot_x_axis.strip().lower()
     if x_axis not in ("trained", "requested"):
         console.print(
@@ -434,6 +433,11 @@ def evaluate(
         "--compare-random",
         help="Compare PPO against random action baseline under identical conditions",
     ),
+    compare_planner: Optional[str] = typer.Option(
+        None,
+        "--compare-planner",
+        help="Compare PPO against a classical planner (e.g., 'astar') under identical seeds",
+    ),
     split: Optional[str] = typer.Option(
         None, "--split", help="Environment dataset split ('train' or 'test')"
     ),
@@ -483,6 +487,19 @@ def evaluate(
     if seeds is not None and compare_random:
         console.print("[bold red]--compare-random cannot be combined with --seeds.[/bold red]")
         raise typer.Exit(code=1)
+    if seeds is not None and compare_planner is not None:
+        console.print("[bold red]--compare-planner cannot be combined with --seeds.[/bold red]")
+        raise typer.Exit(code=1)
+
+    validated_planner: Optional[str] = None
+    if compare_planner is not None:
+        clean_planner = compare_planner.strip().lower()
+        if clean_planner != "astar":
+            console.print(
+                f"[bold red]Unsupported planner:[/bold red] '{compare_planner}'. Only 'astar' is supported."
+            )
+            raise typer.Exit(code=1)
+        validated_planner = clean_planner
 
     if split is not None:
         clean_split = split.strip().lower()
@@ -687,6 +704,82 @@ def evaluate(
                 )
             console.print("\n")
             console.print(comp_table)
+
+        if validated_planner is not None:
+            from adaptive_rl.evaluation.evaluator import compare_with_planner
+            from adaptive_rl.planners.astar3d import AStar3DPlanner
+
+            planner = AStar3DPlanner(resolution=0.5, connectivity=26)
+            planner_report_target = Path("artifacts/evaluation_planner_comparison.json")
+
+            comp_data = compare_with_planner(
+                ppo_algorithm=algo,
+                planner=planner,
+                env=env,
+                num_episodes=num_episodes,
+                base_seed=(exp_config.seed if seed is None else seed)
+                if clean_split is None
+                else None,
+                output_path=planner_report_target,
+                split=clean_split,
+            )
+
+            planner_table = Table(
+                title=f"Benchmark Comparison: PPO vs Classical Planner vs Random ({num_episodes} episodes)"
+            )
+            planner_table.add_column("Policy / Planner", style="cyan")
+            planner_table.add_column("Success Rate", justify="right")
+            planner_table.add_column("Collision Rate", justify="right")
+            planner_table.add_column("Planning Time (ms)", justify="right")
+            planner_table.add_column("Mean Path Length", justify="right")
+            planner_table.add_column("Path Efficiency", justify="right")
+
+            summary = comp_data["summary"]
+            for method_name, s in summary.items():
+                s_pct = (
+                    f"{s['success_rate'] * 100:.1f}%"
+                    if s.get("success_rate") is not None
+                    else "N/A"
+                )
+                c_pct = (
+                    f"{s['collision_rate'] * 100:.1f}%"
+                    if s.get("collision_rate") is not None
+                    else "N/A"
+                )
+                ptime = (
+                    f"{s['mean_planning_time_ms']:.1f} ms"
+                    if s.get("mean_planning_time_ms") is not None
+                    else "N/A"
+                )
+                plen = (
+                    f"{s['mean_path_length']:.2f} m"
+                    if s.get("mean_path_length") is not None
+                    else "N/A"
+                )
+                peff = (
+                    f"{s['mean_path_efficiency'] * 100:.1f}%"
+                    if s.get("mean_path_efficiency") is not None
+                    else "N/A"
+                )
+
+                planner_table.add_row(
+                    method_name,
+                    s_pct,
+                    c_pct,
+                    ptime,
+                    plen,
+                    peff,
+                )
+
+            console.print("\n")
+            console.print(planner_table)
+            console.print(
+                "[dim]Note: PPO and Random Policy evaluate closed-loop dynamic trajectory execution; "
+                "A* evaluates open-loop geometric path feasibility.[/dim]"
+            )
+            console.print(
+                f"\n[bold green]Planner comparison report saved to:[/bold green] {planner_report_target}"
+            )
 
         if metrics is not None:
             report_target = output_report or (exp_config.output_dir / "evaluation.json")
