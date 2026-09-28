@@ -637,8 +637,11 @@ def evaluate(
                 planner=planner,
                 env=env,
                 num_episodes=num_episodes,
-                base_seed=(exp_config.seed if seed is None else seed),
+                base_seed=(exp_config.seed if seed is None else seed)
+                if clean_split is None
+                else None,
                 output_path=planner_report_target,
+                split=clean_split,
             )
 
             planner_table = Table(

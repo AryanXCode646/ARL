@@ -571,6 +571,7 @@ def test_evaluator_trajectory_metrics_and_csv_export(tmp_path: Path) -> None:
 
     env.close()
 
+
 def test_train_test_seeds_disjoint() -> None:
     """Verify that the train and test seed sets are strictly disjoint (zero intersection)."""
     from adaptive_rl.evaluation.generalization import get_split_seeds
@@ -948,5 +949,43 @@ def test_evaluate_planner_num_episodes_validation() -> None:
 
     with pytest.raises(ValueError, match="num_episodes must be positive"):
         evaluate_planner(env=env, num_episodes=-5)
+
+    env.close()
+
+
+def test_evaluate_planner_with_generalization_split() -> None:
+    """Verify evaluate_planner operates correctly under generalization train and test splits."""
+    env = DroneNavigation3DEnv(bounds=(20.0, 20.0, 10.0), max_steps=10, num_obstacles=1)
+
+    # Test split evaluation draws seeds from test range [1000, 1200)
+    test_metrics = evaluate_planner(env=env, num_episodes=2, split="test")
+    assert test_metrics.episodes == 2
+    assert [r["seed"] for r in test_metrics.episode_records] == [1000, 1001]
+
+    # Train split evaluation draws seeds from train range [0, 1000)
+    train_metrics = evaluate_planner(env=env, num_episodes=2, split="train")
+    assert train_metrics.episodes == 2
+    assert [r["seed"] for r in train_metrics.episode_records] == [0, 1]
+
+    env.close()
+
+
+def test_compare_with_planner_with_split(tmp_path: Path) -> None:
+    """Verify compare_with_planner respects dataset split and records split in JSON."""
+    env = DroneNavigation3DEnv(bounds=(20.0, 20.0, 10.0), max_steps=10, num_obstacles=1)
+    algo = PPOAlgorithm(env=env, n_steps=32, batch_size=16, seed=42)
+    report_target = tmp_path / "split_planner_comp.json"
+
+    comp_results = compare_with_planner(
+        ppo_algorithm=algo,
+        env=env,
+        num_episodes=2,
+        split="test",
+        output_path=report_target,
+    )
+
+    assert comp_results["evaluation_config"]["split"] == "test"
+    assert comp_results["evaluation_config"]["seeds"] == [1000, 1001]
+    assert report_target.exists()
 
     env.close()

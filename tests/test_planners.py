@@ -386,3 +386,42 @@ def test_compute_path_min_obstacle_clearance_empty_and_single_point() -> None:
     assert clearance is not None
     # 5.0 - 1.0 - 0.5 = 3.5
     assert math.isclose(clearance, 3.5, abs_tol=1e-5)
+
+
+def test_planner_invalid_bounds_and_radius() -> None:
+    """Planner rejects non-positive bounds and negative collision radius with invalid_inputs."""
+    planner = AStar3DPlanner()
+    start = np.array([5.0, 5.0, 5.0])
+    goal = np.array([10.0, 10.0, 5.0])
+
+    # Non-positive bounds
+    res_bounds = planner.plan_detailed(
+        start, goal, bounds=(30.0, 30.0, 0.0), obstacles=[], collision_radius=0.8
+    )
+    assert res_bounds.success is False
+    assert res_bounds.status == "invalid_inputs"
+    assert res_bounds.path is None
+
+    # Negative collision radius
+    res_radius = planner.plan_detailed(
+        start, goal, bounds=(30.0, 30.0, 15.0), obstacles=[], collision_radius=-0.5
+    )
+    assert res_radius.success is False
+    assert res_radius.status == "invalid_inputs"
+
+
+def test_planner_identical_start_and_goal() -> None:
+    """Planner handles coincident start and goal points as immediate zero-distance path."""
+    planner = AStar3DPlanner()
+    start = np.array([5.0, 5.0, 5.0])
+    res = planner.plan_detailed(
+        start, start, bounds=(30.0, 30.0, 15.0), obstacles=[], collision_radius=0.8
+    )
+    assert res.success is True
+    assert res.status == "success"
+    assert res.path is not None
+    assert len(res.path) == 2
+    assert np.allclose(res.path[0], start)
+    assert np.allclose(res.path[1], start)
+    assert res.path_length == pytest.approx(0.0)
+    assert res.straight_line_distance == pytest.approx(0.0)

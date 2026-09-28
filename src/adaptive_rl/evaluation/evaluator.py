@@ -799,6 +799,7 @@ def evaluate_planner(
     env: Optional[gym.Env] = None,
     num_episodes: int = 20,
     base_seed: Optional[int] = 42,
+    split: Optional[str] = None,
 ) -> PlannerEvaluationMetrics:
     """Benchmark AStar3DPlanner on procedural drone navigation environments.
 
@@ -820,6 +821,9 @@ def evaluate_planner(
         Number of evaluation benchmark episodes.
     base_seed: Optional[int]
         Base seed for procedural environment generation.
+    split: Optional[str]
+        Environment dataset split ('train' or 'test'). When set, procedural seeds
+        are drawn from the standardized split range.
 
     Returns
     -------
@@ -861,9 +865,19 @@ def evaluate_planner(
         collision_radius = getattr(unwrapped, "collision_radius", 0.8)
         target_radius = getattr(unwrapped, "target_radius", 1.5)
 
+        if split is not None:
+            from adaptive_rl.evaluation.generalization import get_split_seeds
+
+            seeds: Sequence[Optional[int]] = get_split_seeds(split, num_episodes=num_episodes)
+        else:
+            seeds = [
+                (base_seed + ep) if base_seed is not None else None for ep in range(num_episodes)
+            ]
+
         for ep in range(num_episodes):
-            seed = (base_seed + ep) if base_seed is not None else None
-            obs, info = env.reset(seed=seed)
+            seed = seeds[ep]
+            reset_options = {"split": split} if split is not None else None
+            obs, info = env.reset(seed=seed, options=reset_options)
             info = info or {}
 
             start = info.get("position")
@@ -1033,6 +1047,7 @@ def compare_with_planner(
     num_episodes: int = 20,
     base_seed: Optional[int] = 42,
     output_path: Optional[str | Path] = None,
+    split: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute fair head-to-head comparison across PPO, Classical Planner, and Random Policy.
 
@@ -1047,17 +1062,19 @@ def compare_with_planner(
     try:
         from adaptive_rl.planners.astar3d import AStar3DPlanner
 
+        effective_base_seed = base_seed if split is None else None
         if planner is None:
             planner = AStar3DPlanner(resolution=0.5, connectivity=26)
         if random_policy is None:
-            random_policy = RandomPolicy(action_space=env.action_space, seed=base_seed)
+            random_policy = RandomPolicy(action_space=env.action_space, seed=effective_base_seed)
 
         # 1. PPO Policy evaluation
         ppo_eval = Evaluator(algorithm=ppo_algorithm, env=env)
         ppo_metrics = ppo_eval.evaluate(
             num_episodes=num_episodes,
             deterministic=True,
-            base_seed=base_seed,
+            base_seed=effective_base_seed,
+            split=split,
         )
 
         # 2. Random Policy baseline evaluation
@@ -1065,7 +1082,8 @@ def compare_with_planner(
         rand_metrics = rand_eval.evaluate(
             num_episodes=num_episodes,
             deterministic=False,
-            base_seed=base_seed,
+            base_seed=effective_base_seed,
+            split=split,
         )
 
         # 3. Classical A* Planner evaluation
@@ -1073,13 +1091,20 @@ def compare_with_planner(
             planner=planner,
             env=env,
             num_episodes=num_episodes,
-            base_seed=base_seed,
+            base_seed=effective_base_seed,
+            split=split,
         )
 
         # Build comparison summary
-        seeds_used = [
-            (base_seed + i) if base_seed is not None else None for i in range(num_episodes)
-        ]
+        seeds_used: List[Optional[int]]
+        if split is not None:
+            from adaptive_rl.evaluation.generalization import get_split_seeds
+
+            seeds_used = list(get_split_seeds(split, num_episodes=num_episodes))
+        else:
+            seeds_used = [
+                (base_seed + i) if base_seed is not None else None for i in range(num_episodes)
+            ]
 
         comparison_data: Dict[str, Any] = {
             "methodology_note": (
@@ -1089,8 +1114,9 @@ def compare_with_planner(
             ),
             "evaluation_config": {
                 "num_episodes": num_episodes,
-                "base_seed": base_seed,
+                "base_seed": effective_base_seed,
                 "seeds": seeds_used,
+                "split": split,
             },
             "planner_config": {
                 "name": "AStar3DPlanner",

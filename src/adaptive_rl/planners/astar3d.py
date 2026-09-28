@@ -380,7 +380,12 @@ class AStar3DPlanner:
         dist_sg = float(np.linalg.norm(goal - start))
 
         # 1. Input dimension and bounds sanity check
-        if start.shape != (3,) or goal.shape != (3,):
+        if (
+            start.shape != (3,)
+            or goal.shape != (3,)
+            or any(b <= 0.0 for b in bounds_tuple)
+            or r < 0.0
+        ):
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
             return PlanningResult(
                 success=False,

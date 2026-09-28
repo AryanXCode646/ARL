@@ -348,6 +348,7 @@ log_dir: "{tmp_path / "logs"}"
     assert demo_res.exit_code == 0
     assert ("SUCCESS" in demo_res.output) or ("FAILED" in demo_res.output)
 
+
 def test_cli_split_options_and_generalization_benchmark(tmp_path: Path) -> None:
     """Verify CLI commands accept --split train/test and evaluate-generalization works."""
     import json
@@ -596,3 +597,61 @@ def test_cli_evaluate_unsupported_planner(tmp_path: Path) -> None:
     )
     assert res.exit_code == 1
     assert "Unsupported planner" in res.output
+
+
+def test_cli_evaluate_planner_with_split(tmp_path: Path) -> None:
+    """Verify CLI evaluate supports --compare-planner combined with --split."""
+    test_config = tmp_path / "test_drone_cli.yaml"
+    test_config.write_text(
+        f"""
+name: "cli_planner_split_test"
+seed: 42
+algorithm:
+  name: "ppo"
+  learning_rate: 0.0003
+  gamma: 0.99
+  batch_size: 32
+  parameters:
+    n_steps: 64
+environment:
+  name: "drone"
+  max_steps: 10
+  parameters:
+    bounds: [20.0, 20.0, 10.0]
+    num_obstacles: 1
+training:
+  total_timesteps: 32
+  checkpoint_freq: 0
+  log_interval: 10
+evaluation:
+  eval_episodes: 1
+output_dir: "{tmp_path / "artifacts"}"
+log_dir: "{tmp_path / "logs"}"
+""",
+        encoding="utf-8",
+    )
+
+    train_res = runner.invoke(app, ["train", "--config", str(test_config), "--timesteps", "32"])
+    assert train_res.exit_code == 0
+    model_file = tmp_path / "artifacts" / "models" / "cli_planner_split_test_final.zip"
+    assert model_file.exists()
+
+    res = runner.invoke(
+        app,
+        [
+            "evaluate",
+            "--config",
+            str(test_config),
+            "--model",
+            str(model_file),
+            "--episodes",
+            "1",
+            "--split",
+            "test",
+            "--compare-planner",
+            "astar",
+        ],
+    )
+    assert res.exit_code == 0
+    assert "Benchmark Comparison" in res.output
+    assert "Classical Planner" in res.output
