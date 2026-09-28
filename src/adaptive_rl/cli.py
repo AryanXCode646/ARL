@@ -418,5 +418,45 @@ def demo_drone(
         console.print("\n[bold red]FAILED / COLLISION[/bold red]")
 
 
+@app.command()
+def gui(
+    port: int = typer.Option(8501, "--port", "-p", help="Port for the Streamlit server."),
+    host: str = typer.Option("localhost", "--host", "-h", help="Host address for the server."),
+) -> None:
+    """Launch the interactive browser-based 3D drone demonstration GUI."""
+    import subprocess
+    import sys
+
+    app_path = Path(__file__).resolve().parent.parent.parent / "app.py"
+    if not app_path.exists():
+        app_path = Path("app.py").resolve()
+
+    console.print(
+        Panel.fit(
+            f"[bold cyan]Launching AdaptiveRL Flight Deck GUI...[/bold cyan]\n\n"
+            f"• App Path: {app_path}\n"
+            f"• Server URL: http://{host}:{port}\n\n"
+            f"[dim]Press Ctrl+C to terminate the server.[/dim]",
+            title="Interactive 3D Drone Demonstration",
+            border_style="cyan",
+        )
+    )
+    cmd = [
+        sys.executable,
+        "-m",
+        "streamlit",
+        "run",
+        str(app_path),
+        "--server.port",
+        str(port),
+        "--server.address",
+        host,
+    ]
+    try:
+        subprocess.run(cmd, check=True)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]GUI server stopped.[/yellow]")
+
+
 if __name__ == "__main__":
     app()

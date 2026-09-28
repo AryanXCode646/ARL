@@ -45,6 +45,10 @@ rl = [
     "stable-baselines3>=2.3.0",
     "torch>=2.2.0",
 ]
+gui = [
+    "streamlit>=1.30.0",
+    "plotly>=5.18.0",
+]
 dev = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
@@ -55,6 +59,8 @@ all = [
     "gymnasium>=1.0.0",
     "stable-baselines3>=2.3.0",
     "torch>=2.2.0",
+    "streamlit>=1.30.0",
+    "plotly>=5.18.0",
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
     "ruff>=0.1.0",
