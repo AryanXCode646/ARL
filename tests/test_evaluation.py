@@ -4,6 +4,7 @@ import csv
 import json
 import math
 from pathlib import Path
+from typing import Any
 
 import gymnasium as gym
 import numpy as np
@@ -14,10 +15,16 @@ from adaptive_rl.environments.drone import DroneNavigation3DEnv, ObstacleSphere3
 from adaptive_rl.evaluation.evaluator import (
     Evaluator,
     compare_policies,
+    compare_with_planner,
+    evaluate_planner,
     evaluate_random_policy,
     run_obstacle_density_experiment,
 )
-from adaptive_rl.evaluation.metrics import compute_trajectory_metrics
+from adaptive_rl.evaluation.metrics import (
+    PlannerEvaluationMetrics,
+    StandardizedExperimentMetrics,
+    compute_trajectory_metrics,
+)
 from adaptive_rl.evaluation.statistics import (
     student_t_critical_value,
     summarize_seed_values,
@@ -450,7 +457,7 @@ def test_obstacle_vs_boundary_collision_separation() -> None:
             self.episode = 0
             self.action_space = None
             self.observation_space = None
-            self.obstacles = []
+            self.obstacles: list[Any] = []
 
         def reset(self, seed: int | None = None) -> tuple[np.ndarray, dict]:
             self.episode += 1
@@ -564,7 +571,6 @@ def test_evaluator_trajectory_metrics_and_csv_export(tmp_path: Path) -> None:
 
     env.close()
 
-
 def test_train_test_seeds_disjoint() -> None:
     """Verify that the train and test seed sets are strictly disjoint (zero intersection)."""
     from adaptive_rl.evaluation.generalization import get_split_seeds
@@ -612,8 +618,6 @@ def test_same_test_seeds_produce_reproducible_layouts() -> None:
     for (c1, r1), (c2, r2) in zip(obstacles_run1, obstacles_run2):
         np.testing.assert_allclose(c1, c2, rtol=1e-6)
         assert r1 == pytest.approx(r2)
-
-    env.close()
 
 
 def test_train_and_test_representative_layouts_are_distinct() -> None:
@@ -836,5 +840,63 @@ def test_evaluate_generalization_workflow_and_json_export(tmp_path: Path) -> Non
     assert data["test"]["seeds"] == [1000, 1001]
     assert "success" in data["generalization_gap"]
     assert "reward" in data["generalization_gap"]
+
+    env.close()
+
+
+def test_evaluate_planner_basic() -> None:
+    """Verify evaluate_planner generates valid benchmark metrics over procedural seeds."""
+    env = DroneNavigation3DEnv(bounds=(20.0, 20.0, 10.0), max_steps=20, num_obstacles=2)
+    planner_metrics = evaluate_planner(env=env, num_episodes=3, base_seed=42)
+
+    assert isinstance(planner_metrics, PlannerEvaluationMetrics)
+    assert planner_metrics.episodes == 3
+    assert 0.0 <= planner_metrics.success_rate <= 1.0
+    assert 0.0 <= planner_metrics.collision_rate <= 1.0
+    assert planner_metrics.mean_planning_time_ms >= 0.0
+    assert len(planner_metrics.episode_records) == 3
+
+    # Check conversion to StandardizedExperimentMetrics
+    std_metrics = StandardizedExperimentMetrics.from_planner_metrics(planner_metrics)
+    assert std_metrics.episodes == 3
+    assert std_metrics.planning_time == planner_metrics.mean_planning_time
+    assert std_metrics.success_rate == planner_metrics.success_rate
+    assert std_metrics.collision_rate == planner_metrics.collision_rate
+
+    env.close()
+
+
+def test_compare_with_planner_structure(tmp_path: Path) -> None:
+    """Verify compare_with_planner executes fair 3-way evaluation under identical seeds."""
+    env = DroneNavigation3DEnv(bounds=(20.0, 20.0, 10.0), max_steps=10, num_obstacles=1)
+    algo = PPOAlgorithm(env=env, n_steps=32, batch_size=16, seed=42)
+    report_target = tmp_path / "evaluation_planner_comparison.json"
+
+    comp_results = compare_with_planner(
+        ppo_algorithm=algo,
+        env=env,
+        num_episodes=2,
+        base_seed=100,
+        output_path=report_target,
+    )
+
+    assert "evaluation_config" in comp_results
+    assert "planner_config" in comp_results
+    assert "summary" in comp_results
+    assert "PPO" in comp_results["summary"]
+    assert "Classical Planner (A*)" in comp_results["summary"]
+    assert "Random Policy" in comp_results["summary"]
+
+    assert comp_results["evaluation_config"]["seeds"] == [100, 101]
+
+    # Verify JSON file structure
+    assert report_target.exists()
+    with open(report_target, "r", encoding="utf-8") as f:
+        saved_data = json.load(f)
+
+    assert "ppo_metrics" in saved_data
+    assert "planner_metrics" in saved_data
+    assert "random_policy_metrics" in saved_data
+    assert saved_data["summary"]["Classical Planner (A*)"]["mean_planning_time_ms"] is not None
 
     env.close()

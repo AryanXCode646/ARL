@@ -290,6 +290,26 @@ log_dir: "{tmp_path / "logs"}"
     assert eval_report.exists()
     assert eval_csv.exists()
 
+    # 2c. Evaluate with --compare-planner astar
+    eval_planner_res = runner.invoke(
+        app,
+        [
+            "evaluate",
+            "--config",
+            str(test_config),
+            "--model",
+            str(model_file),
+            "--episodes",
+            "1",
+            "--compare-planner",
+            "astar",
+        ],
+    )
+    assert eval_planner_res.exit_code == 0
+    assert "Benchmark Comparison" in eval_planner_res.output
+    assert "Classical Planner" in eval_planner_res.output
+    assert Path("artifacts/evaluation_planner_comparison.json").exists()
+
     # 2b. Experiment-density command
     density_report = tmp_path / "density_test.json"
     dense_res = runner.invoke(
@@ -325,7 +345,6 @@ log_dir: "{tmp_path / "logs"}"
     )
     assert demo_res.exit_code == 0
     assert ("SUCCESS" in demo_res.output) or ("FAILED" in demo_res.output)
-
 
 def test_cli_split_options_and_generalization_benchmark(tmp_path: Path) -> None:
     """Verify CLI commands accept --split train/test and evaluate-generalization works."""
@@ -485,3 +504,25 @@ def test_cli_experiment_ablation_smoke(tmp_path: Path) -> None:
     assert "Reward-Function Ablation Benchmark Results" in res.output
     assert json_rep.exists()
     assert csv_rep.exists()
+
+
+def test_cli_evaluate_unsupported_planner(tmp_path: Path) -> None:
+    """Verify CLI rejects unsupported classical planner names with exit code 1."""
+    config_path = Path(__file__).resolve().parent.parent / "configs" / "drone_ppo.yaml"
+    dummy_model = tmp_path / "dummy.zip"
+    dummy_model.touch()
+
+    res = runner.invoke(
+        app,
+        [
+            "evaluate",
+            "--config",
+            str(config_path),
+            "--model",
+            str(dummy_model),
+            "--compare-planner",
+            "unsupported_planner_name",
+        ],
+    )
+    assert res.exit_code == 1
+    assert "Unsupported planner" in res.output

@@ -284,6 +284,47 @@ class EvaluationMetrics(BaseModel):
     )
 
 
+class PlannerEvaluationMetrics(BaseModel):
+    """Container for classical 3D motion planner evaluation results."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    episodes: int = Field(..., gt=0, description="Total evaluation episodes executed")
+    success_rate: Optional[float] = Field(
+        None, ge=0.0, le=1.0, description="Fraction of queries reaching target without collision"
+    )
+    collision_rate: Optional[float] = Field(
+        None, ge=0.0, le=1.0, description="Fraction of queries violating clearance"
+    )
+    mean_planning_time_ms: float = Field(
+        0.0, ge=0.0, description="Mean planning wall-clock time in milliseconds"
+    )
+    mean_planning_time: float = Field(
+        0.0, ge=0.0, description="Mean planning wall-clock time in seconds (for standardization)"
+    )
+    mean_path_length: Optional[float] = Field(
+        None, ge=0.0, description="Mean cumulative 3D path length in meters"
+    )
+    std_path_length: Optional[float] = Field(
+        None, ge=0.0, description="Standard deviation of path length in meters"
+    )
+    mean_straight_line_distance: Optional[float] = Field(
+        None, ge=0.0, description="Mean straight-line start-to-goal distance in meters"
+    )
+    mean_path_efficiency: Optional[float] = Field(
+        None, ge=0.0, le=1.0, description="Mean ratio of straight-line distance to path length"
+    )
+    mean_min_obstacle_clearance: Optional[float] = Field(
+        None, description="Mean minimum obstacle surface clearance in meters"
+    )
+    episode_records: List[Dict[str, Any]] = Field(
+        default_factory=list, description="Per-episode planning query records and telemetry"
+    )
+    additional_metrics: Dict[str, Any] = Field(
+        default_factory=dict, description="Additional domain-specific metrics"
+    )
+
+
 class StandardizedExperimentMetrics(BaseModel):
     """Standardized cross-paradigm evaluation metrics schema for AdaptiveRL.
 
@@ -614,6 +655,7 @@ class StandardizedExperimentMetrics(BaseModel):
 
 __all__ = [
     "EvaluationMetrics",
+    "PlannerEvaluationMetrics",
     "StandardizedExperimentMetrics",
     "compute_trajectory_metrics",
 ]
