@@ -87,27 +87,74 @@ adaptive-rl experiment-density --model artifacts/models/drone_ppo_demo_final.zip
 
 ---
 
+### Experiment 3: Unseen-Environment Generalization Benchmark
+
+#### Why Train/Test Separation Exists
+In standard reinforcement learning for continuous drone navigation, procedural obstacles are placed in `reset()` based on whatever random seed is active. Without strict partitioning between training and evaluation environments, an agent risks memorizing specific obstacle layouts and flight trajectories rather than mastering a generalized obstacle-avoidance policy.
+
+To scientifically evaluate out-of-distribution transfer and prevent test contamination, AdaptiveRL establishes a strict, reproducible seed-space partitioning protocol.
+
+#### Seed-Space Partitioning Protocol
+Random seed space is partitioned into two disjoint, non-overlapping deterministic intervals:
+- **Training Split (`train`)**: Seeds $[0, 1000)$ ($0 \le \text{seed} < 1000$, 1000 unique layouts).
+- **Unseen Test Split (`test`)**: Seeds $[1000, 1200)$ ($1000 \le \text{seed} < 1200$, 200 unique held-out layouts).
+
+The boundary is enforced at the environment level:
+- When initialized with `--split train`, the environment only ever draws episode seeds from $[0, 1000)$ and rejects any seed outside this partition with an immediate `ValueError`.
+- When evaluated with `--split test`, the environment only ever draws episode seeds from $[1000, 1200)$ and rejects training seeds.
+- Zero test configurations are ever encountered during training rollouts, guaranteeing zero data leakage.
+
+#### Metrics and Generalization Gaps
+The generalization benchmark runs the frozen policy on both distributions ($N=20$ episodes each) and computes:
+- **`train_success_rate` / `test_success_rate`**: Target reach rate on seen training vs unseen test distributions.
+- **`train_collision_rate` / `test_collision_rate`**: Obstacle or boundary collision rate on seen vs unseen layouts.
+- **`train_mean_reward` / `test_mean_reward`**: Mean cumulative episodic reward on seen vs unseen distributions.
+- **Success Generalization Gap**:
+  $$\Delta_{\text{success}} = \text{train\_success\_rate} - \text{test\_success\_rate}$$
+  A small gap indicates strong generalization to novel obstacle configurations; a large positive gap signals policy overfitting/memorization.
+- **Reward Generalization Gap**:
+  $$\Delta_{\text{reward}} = \text{train\_mean\_reward} - \text{test\_mean\_reward}$$
+
+---
+
 ## 5. Reproducibility Guarantee
 
-To independently reproduce the identical metrics on any student laptop:
+To independently reproduce the benchmark and empirical results:
 ```bash
 # 1. Clean environment install
 pip install -e ".[all]"
 
-# 2. Train with seed 42 (25k timesteps, ~25s on CPU)
-adaptive-rl train --config configs/drone_ppo_demo.yaml
+# 2. Train with the dedicated training split (seed-partitioned)
+adaptive-rl train --config configs/drone_ppo.yaml --split train
 
-# 3. Evaluate PPO vs Random Baseline
+# 3. Evaluate exclusively on unseen held-out test environments
+adaptive-rl evaluate \
+  --config configs/drone_ppo.yaml \
+  --model artifacts/models/drone_ppo_final.zip \
+  --split test \
+  --episodes 20
+
+# 4. Run the full Unseen-Environment Generalization Benchmark
+adaptive-rl evaluate-generalization \
+  --model artifacts/models/drone_ppo_final.zip \
+  --episodes 20 \
+  --output-report artifacts/generalization_benchmark.json
+
+# 5. Evaluate PPO vs Random Baseline
 adaptive-rl evaluate \
   --config configs/drone_ppo_demo.yaml \
   --model artifacts/models/drone_ppo_demo_final.zip \
   --episodes 20 \
   --compare-random
 
-# 4. Run Obstacle-Density Experiment
+# 6. Run Obstacle-Density Experiment
 adaptive-rl experiment-density \
   --model artifacts/models/drone_ppo_demo_final.zip \
   --episodes 10 \
   --seed 42
 ```
-All outputs are saved directly to `artifacts/evaluation.json` and `artifacts/obstacle_density_experiment.json`.
+All benchmark results and metrics are exported directly to structured JSON in `artifacts/`:
+- `artifacts/generalization_benchmark.json`: Train/test distributions, episode seeds, performance metrics, and computed $\Delta_{\text{success}}$ and $\Delta_{\text{reward}}$.
+- `artifacts/evaluation.json`: Single-run evaluation telemetry.
+- `artifacts/obstacle_density_experiment.json`: Multi-density progression results.
+
