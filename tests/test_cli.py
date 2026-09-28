@@ -17,8 +17,17 @@ def test_cli_help() -> None:
     assert "train" in result.output
     assert "evaluate" in result.output
     assert "demo-drone" in result.output
+    assert "gui" in result.output
     assert "config" in result.output
     assert "env" in result.output
+
+
+def test_cli_gui_help() -> None:
+    """Verify adaptive-rl gui --help displays options."""
+    result = runner.invoke(app, ["gui", "--help"])
+    assert result.exit_code == 0
+    assert "--port" in result.output
+    assert "--host" in result.output
 
 
 def test_cli_version() -> None:
