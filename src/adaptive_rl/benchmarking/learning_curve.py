@@ -1,4 +1,11 @@
-"""Benchmark orchestration for PPO learning curves across training budgets."""
+"""Benchmark orchestration for PPO learning curves across training budgets.
+
+The benchmark is PPO-specific (issue #245): it trains a fresh model for each
+requested budget under a fixed training seed, evaluates every budget with
+identical evaluation conditions, and serializes provenance-rich JSON/CSV
+artifacts. Evaluation and cross-seed statistics are delegated to
+:mod:`adaptive_rl.evaluation` rather than reimplemented here.
+"""
 
 from __future__ import annotations
 
@@ -7,9 +14,81 @@ import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Literal, Sequence
 
 from adaptive_rl.config import BenchmarkConfig, ExperimentConfig
+
+if TYPE_CHECKING:
+    from adaptive_rl.evaluation.statistics import DescriptiveMetrics
+
+__all__ = [
+    "BenchmarkRunError",
+    "LearningCurveBenchmarkResult",
+    "LearningCurvePoint",
+    "PLOT_X_AXES",
+    "plot_learning_curve",
+    "run_learning_curve_benchmark",
+    "validate_budgets",
+]
+
+#: Supported x-axis semantics for :func:`plot_learning_curve`.
+PLOT_X_AXES: tuple[str, ...] = ("trained", "requested")
+
+#: Stable CSV header for the per-budget benchmark table.
+CSV_FIELDNAMES: tuple[str, ...] = (
+    "budget_timesteps",
+    "trained_timesteps",
+    "success_rate",
+    "collision_rate",
+    "timeout_rate",
+    "mean_reward",
+    "std_reward",
+    "mean_episode_length",
+    "training_time_seconds",
+    "model_path",
+    "training_seed",
+    "evaluation_seeds",
+    "evaluation_episodes",
+    "deterministic",
+)
+
+
+class BenchmarkRunError(RuntimeError):
+    """A budget run failed; carries the partial benchmark result.
+
+    Successful budget artifacts are already on disk when this is raised, and
+    ``result`` describes exactly which budgets completed and which failed.
+    """
+
+    def __init__(self, message: str, result: LearningCurveBenchmarkResult) -> None:
+        super().__init__(message)
+        self.result = result
+
+
+def _validate_strict_json_payload(payload: Any, path: str = "$") -> None:
+    """Reject values that ``json.dumps(..., allow_nan=False)`` cannot encode.
+
+    Non-finite floats, numpy scalars that are not float subclasses, ``Path``
+    objects, and any other non-JSON-native type raise ``ValueError`` with the
+    offending location instead of leaking into benchmark artifacts.
+    """
+    if payload is None or isinstance(payload, (str, bool, int)):
+        return
+    if isinstance(payload, float):
+        if not math.isfinite(payload):
+            raise ValueError(f"Non-finite number at {path}: {payload!r}.")
+        return
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if not isinstance(key, str):
+                raise ValueError(f"Non-string object key at {path}: {key!r}.")
+            _validate_strict_json_payload(value, f"{path}.{key}")
+        return
+    if isinstance(payload, (list, tuple)):
+        for index, value in enumerate(payload):
+            _validate_strict_json_payload(value, f"{path}[{index}]")
+        return
+    raise ValueError(f"Value at {path} is not JSON-serializable: {type(payload).__name__}.")
 
 
 def validate_budgets(
@@ -67,7 +146,24 @@ def validate_budgets(
 
 @dataclass(frozen=True)
 class LearningCurvePoint:
-    """Performance record for a single training-budget evaluation point."""
+    """Performance record for a single training-budget evaluation point.
+
+    Three metric layers are kept distinct and must not be conflated:
+
+    * ``descriptive_metrics`` (and the identically valued legacy top-level
+      ``success_rate``/``collision_rate``/``timeout_rate``/``mean_reward``/
+      ``std_reward``/``mean_episode_length`` fields) pools every evaluated
+      episode for this budget — descriptive values only;
+    * ``per_seed_summaries`` holds exactly one summary per evaluation seed
+      group, where the group seed is the statistical unit;
+    * ``cross_seed_statistics`` holds Student's t statistics computed *across*
+      those seed-level summaries, never across pooled episodes.
+
+    ``training_metadata`` records how the model behind this point was trained
+    and evaluated. ``budget_timesteps`` is the requested budget while
+    ``trained_timesteps`` is what Stable-Baselines3 actually collected; the
+    two differ whenever the budget is not aligned to a rollout boundary.
+    """
 
     budget_timesteps: int
     trained_timesteps: int
@@ -88,10 +184,62 @@ class LearningCurvePoint:
     per_seed_summaries: list[dict[str, int | float | None]] = field(default_factory=list)
     cross_seed_statistics: dict[str, dict[str, float | int | None]] = field(default_factory=dict)
 
+    @property
+    def evaluation_group_seeds(self) -> list[int]:
+        """Evaluation seed groups (the statistical grouping unit) for this point."""
+        return list(self.evaluation_seeds)
+
+    @property
+    def episodes_per_seed(self) -> int:
+        """Episodes evaluated inside each evaluation seed group."""
+        return self.evaluation_episodes
+
+    @property
+    def descriptive_metrics(self) -> dict[str, float | int | None]:
+        """Pooled episode-level descriptive statistics for this budget.
+
+        These values summarize the evaluated episodes as one sample and are
+        generally *not* equal to the means stored in ``cross_seed_statistics``
+        when seed groups contribute unequal numbers of episodes.
+        """
+        return {
+            "episodes": len(self.evaluation_seeds) * self.evaluation_episodes,
+            "success_rate": self.success_rate,
+            "collision_rate": self.collision_rate,
+            "timeout_rate": self.timeout_rate,
+            "mean_reward": self.mean_reward,
+            "std_reward": self.std_reward,
+            "mean_episode_length": self.mean_episode_length,
+        }
+
+    @property
+    def training_metadata(self) -> dict[str, Any]:
+        """Provenance for how this budget's model was trained and evaluated."""
+        return {
+            "budget_timesteps": self.budget_timesteps,
+            "trained_timesteps": self.trained_timesteps,
+            "training_seed": self.training_seed,
+            "training_time_seconds": self.training_time_seconds,
+            "algorithm": self.algorithm,
+            "environment": self.environment,
+            "model_path": self.model_path,
+            "deterministic": self.deterministic,
+            "evaluation_group_seeds": list(self.evaluation_seeds),
+            "episodes_per_seed": self.evaluation_episodes,
+        }
+
 
 @dataclass
 class LearningCurveBenchmarkResult:
-    """Top-level container for the ordered learning-curve benchmark output."""
+    """Top-level container for the ordered learning-curve benchmark output.
+
+    ``status`` makes partial execution explicit: ``"completed"`` means every
+    requested budget trained and evaluated, while ``"failed"`` means the run
+    stopped at ``failed_budget`` after ``completed_budgets`` finished.
+    ``completed_budgets``, ``failed_budget``, and ``error`` (a sanitized
+    ``TypeName: message`` string, never a traceback) are always serialized so
+    artifact consumers can tell a partial benchmark from a complete one.
+    """
 
     benchmark_name: str
     algorithm: str
@@ -107,34 +255,61 @@ class LearningCurveBenchmarkResult:
     json_path: Path | None = None
     csv_path: Path | None = None
     plot_path: Path | None = None
+    status: str = "completed"
+    failed_budget: int | None = None
+    error: str | None = None
+    plot_error: str | None = None
+
+    @property
+    def completed_budgets(self) -> list[int]:
+        """Budgets that trained and evaluated successfully, in run order."""
+        return [point.budget_timesteps for point in self.points]
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize the benchmark result to a JSON-friendly dictionary."""
+        """Serialize the benchmark result to a strict JSON-friendly dictionary."""
         payload: dict[str, Any] = {
+            "status": self.status,
+            "completed_budgets": list(self.completed_budgets),
+            "failed_budget": self.failed_budget,
+            "error": self.error,
             "benchmark": {
                 "name": self.benchmark_name,
                 "algorithm": self.algorithm,
                 "environment": self.environment,
                 "training_seed": self.training_seed,
                 "evaluation_seeds": self.evaluation_seeds,
+                "evaluation_group_seeds": list(self.evaluation_seeds),
                 "evaluation_episodes": self.evaluation_episodes,
+                "episodes_per_seed": self.evaluation_episodes,
                 "deterministic": self.deterministic,
                 "budgets": self.budgets,
+                "seed_semantics": (
+                    "evaluation_seeds are evaluation group seeds (the statistical grouping "
+                    "unit); each group evaluates episodes_per_seed episodes"
+                ),
                 "metric_semantics": {
-                    "aggregation": "pooled episode-level descriptive statistics",
+                    "aggregation": (
+                        "descriptive_metrics (and the legacy top-level metric fields) pool "
+                        "every evaluated episode and are descriptive only"
+                    ),
                     "success_rate": "pooled over episodes with available success metadata",
                     "collision_rate": "pooled over episodes with available collision metadata",
                     "timeout_rate": "fraction of all evaluated episodes with truncated=True",
                     "mean_reward": "mean of pooled episode returns",
                     "std_reward": "sample standard deviation across pooled episode returns",
                     "mean_episode_length": "mean of pooled episode lengths",
+                    "per_seed_summaries": (
+                        "one summary per evaluation seed group, keyed by the group seed"
+                    ),
                     "cross_seed_statistics": (
-                        "Student's t summaries across evaluator per-seed summaries; "
-                        "within-seed reward and length standard deviations use evaluator semantics"
+                        "Student's t summaries across evaluator per-seed summaries, not across "
+                        "pooled episodes; within-seed reward and length standard deviations use "
+                        "evaluator semantics"
                     ),
                 },
                 "training_time_semantics": (
-                    "monotonic elapsed time inside PPOAlgorithm.train() only"
+                    "monotonic elapsed time inside PPOAlgorithm.train() only; excludes model "
+                    "serialization, metadata writing, evaluation, and artifact export"
                 ),
             },
             "results": [
@@ -155,13 +330,21 @@ class LearningCurveBenchmarkResult:
                     "deterministic": point.deterministic,
                     "algorithm": point.algorithm,
                     "environment": point.environment,
+                    "descriptive_metrics": point.descriptive_metrics,
                     "per_seed_summaries": point.per_seed_summaries,
                     "cross_seed_statistics": point.cross_seed_statistics,
+                    "training_metadata": point.training_metadata,
                 }
                 for point in self.points
             ],
+            "plot": {
+                "requested": self.plot_path is not None,
+                "path": str(self.plot_path) if self.plot_path is not None else None,
+                "error": self.plot_error,
+            },
             "plot_data": self.plot_data,
         }
+        _validate_strict_json_payload(payload)
         return payload
 
 
@@ -214,15 +397,17 @@ def _evaluate_model(
     evaluation_episodes: int,
     deterministic: bool,
 ) -> tuple[
-    float | None,
-    float | None,
-    float | None,
-    float,
-    float | None,
-    float,
+    DescriptiveMetrics,
     list[dict[str, Any]],
     dict[str, dict[str, float | int | None]],
 ]:
+    """Evaluate one trained model under fixed evaluation conditions.
+
+    Returns pooled descriptive metrics, one summary per evaluation seed
+    group, and cross-seed statistics — three deliberately distinct layers.
+    """
+    from adaptive_rl.evaluation.statistics import summarize_descriptive_episodes
+
     env = _make_env(env_name, **env_kwargs)
     try:
         _, evaluator = _load_evaluator(model_path, env)
@@ -234,38 +419,15 @@ def _evaluate_model(
         records = evaluation.episodes
         if not records:
             raise RuntimeError("Evaluation produced no episodes.")
-        all_rewards = [record.return_value for record in records]
-        all_lengths = [record.episode_length for record in records]
-        successes = [record.success for record in records if record.success is not None]
-        collisions = [record.collision for record in records if record.collision is not None]
-        timeout_count = sum(record.truncated for record in records)
-        total_episodes = len(records)
-
-        mean_reward = float(sum(all_rewards) / len(all_rewards))
-        std_reward = (
-            float(
-                (
-                    sum((reward - mean_reward) ** 2 for reward in all_rewards)
-                    / max(1, len(all_rewards) - 1)
-                )
-                ** 0.5
-            )
-            if len(all_rewards) > 1
-            else None
+        descriptive = summarize_descriptive_episodes(
+            rewards=[record.return_value for record in records],
+            episode_lengths=[float(record.episode_length) for record in records],
+            successes=[record.success for record in records],
+            collisions=[record.collision for record in records],
+            truncations=[record.truncated for record in records],
         )
-        mean_episode_length = float(sum(all_lengths) / len(all_lengths))
-
-        success_rate = float(sum(successes) / len(successes)) if successes else None
-        collision_rate = float(sum(collisions) / len(collisions)) if collisions else None
-        timeout_rate = float(timeout_count / total_episodes) if total_episodes else None
-
         return (
-            success_rate,
-            collision_rate,
-            timeout_rate,
-            mean_reward,
-            std_reward,
-            mean_episode_length,
+            descriptive,
             [summary.to_dict() for summary in evaluation.per_seed],
             {name: stats.to_dict() for name, stats in evaluation.aggregate.items()},
         )
@@ -302,7 +464,8 @@ def _run_single_budget(
     try:
         trainer = _make_trainer(config_copy, env)
         result = trainer.fit()
-        training_time_seconds = result.training_time_seconds
+        training_time_seconds = float(result.training_time_seconds)
+        trained_timesteps = int(trainer.algorithm.num_timesteps)
     finally:
         if trainer is not None:
             trainer.close()
@@ -314,24 +477,12 @@ def _run_single_budget(
         raise FileNotFoundError(
             f"Training budget {budget} did not create model artifact: {model_path}"
         )
-    if trainer is None:
-        raise RuntimeError("Training did not create a PPO trainer.")
-    trained_timesteps = trainer.algorithm.num_timesteps
     if not math.isfinite(training_time_seconds) or training_time_seconds < 0:
         raise RuntimeError(
             f"Invalid training duration for budget {budget}: {training_time_seconds}"
         )
 
-    (
-        success_rate,
-        collision_rate,
-        timeout_rate,
-        mean_reward,
-        std_reward,
-        mean_episode_length,
-        per_seed_summaries,
-        cross_seed_statistics,
-    ) = _evaluate_model(
+    descriptive, per_seed_summaries, cross_seed_statistics = _evaluate_model(
         model_path,
         env_name=config_copy.environment.name,
         env_kwargs=config_copy.environment.parameters,
@@ -343,13 +494,13 @@ def _run_single_budget(
     return LearningCurvePoint(
         budget_timesteps=budget,
         trained_timesteps=trained_timesteps,
-        success_rate=success_rate,
-        collision_rate=collision_rate,
-        timeout_rate=timeout_rate,
-        mean_reward=mean_reward,
-        std_reward=std_reward,
-        mean_episode_length=mean_episode_length,
-        training_time_seconds=float(training_time_seconds),
+        success_rate=descriptive.success_rate,
+        collision_rate=descriptive.collision_rate,
+        timeout_rate=descriptive.timeout_rate,
+        mean_reward=descriptive.mean_reward,
+        std_reward=descriptive.std_reward,
+        mean_episode_length=descriptive.mean_episode_length,
+        training_time_seconds=training_time_seconds,
         model_path=str(model_path),
         training_seed=training_seed,
         evaluation_seeds=list(evaluation_seeds),
@@ -362,6 +513,48 @@ def _run_single_budget(
     )
 
 
+def _write_json(result: LearningCurveBenchmarkResult) -> None:
+    """Write the strict JSON artifact for a (possibly partial) benchmark."""
+    if result.json_path is None:
+        raise ValueError("A JSON output path is required to serialize the benchmark.")
+    result.json_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = result.to_dict()
+    with result.json_path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, allow_nan=False)
+
+
+def _csv_row(point: LearningCurvePoint) -> dict[str, str | float | int | None]:
+    """Build one stable CSV row, including evaluation provenance."""
+    return {
+        "budget_timesteps": point.budget_timesteps,
+        "trained_timesteps": point.trained_timesteps,
+        "success_rate": point.success_rate,
+        "collision_rate": point.collision_rate,
+        "timeout_rate": point.timeout_rate,
+        "mean_reward": point.mean_reward,
+        "std_reward": point.std_reward,
+        "mean_episode_length": point.mean_episode_length,
+        "training_time_seconds": point.training_time_seconds,
+        "model_path": point.model_path,
+        "training_seed": point.training_seed,
+        "evaluation_seeds": ";".join(str(seed) for seed in point.evaluation_seeds),
+        "evaluation_episodes": point.evaluation_episodes,
+        "deterministic": str(bool(point.deterministic)),
+    }
+
+
+def _write_csv(result: LearningCurveBenchmarkResult) -> None:
+    """Write one CSV row per completed budget with fixed headers."""
+    if result.csv_path is None:
+        raise ValueError("A CSV output path is required to serialize the benchmark.")
+    result.csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with result.csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=CSV_FIELDNAMES)
+        writer.writeheader()
+        for point in result.points:
+            writer.writerow(_csv_row(point))
+
+
 def run_learning_curve_benchmark(
     config: ExperimentConfig,
     budgets: Sequence[int] | str | None = None,
@@ -372,12 +565,36 @@ def run_learning_curve_benchmark(
     deterministic: bool | None = None,
     output_dir: str | Path | None = None,
     plot: bool = False,
+    plot_x_axis: Literal["trained", "requested"] = "trained",
 ) -> LearningCurveBenchmarkResult:
-    """Train a model for each budget, evaluate it, and serialize benchmark artifacts."""
-    if config.algorithm.name.lower() != "ppo":
-        raise ValueError("The learning-curve benchmark currently supports only PPO.")
+    """Run the PPO learning-curve benchmark across training budgets.
+
+    Each budget trains a fresh PPO model from the same base configuration and
+    a fixed training seed, then is evaluated under identical conditions
+    (same evaluation seed groups, episodes per seed, deterministic setting,
+    and environment configuration). Only the training budget changes.
+
+    ``training_time_seconds`` on each point measures PPO optimization only
+    (see :class:`~adaptive_rl.training.trainer.TrainingResult`).
+
+    If a budget fails, the JSON/CSV artifacts are still written with
+    ``status="failed"``, ``completed_budgets``, ``failed_budget``, and a
+    sanitized ``error`` message, and :class:`BenchmarkRunError` is raised with
+    the partial result attached. Plotting happens only after JSON/CSV are on
+    disk, so a plot failure cannot corrupt benchmark data; the failure is
+    recorded in ``plot_error`` and the result is still returned.
+    """
+    algorithm_name = str(config.algorithm.name).strip().lower()
+    if algorithm_name != "ppo":
+        raise ValueError(
+            f"The learning-curve benchmark supports only PPO, got "
+            f"{config.algorithm.name!r}. Set algorithm.name to 'ppo' in the "
+            "experiment configuration."
+        )
     if config.training is None:
         raise ValueError("A training section is required to run the learning-curve benchmark.")
+    if plot_x_axis not in PLOT_X_AXES:
+        raise ValueError(f"plot_x_axis must be one of {list(PLOT_X_AXES)}, got {plot_x_axis!r}.")
 
     benchmark_cfg = _resolve_benchmark_config(config, None)
     normalized = validate_budgets(benchmark_cfg.budgets if budgets is None else budgets)
@@ -435,17 +652,27 @@ def run_learning_curve_benchmark(
     plot_path = target_dir / "learning_curve_budget.png" if plot else None
 
     bench_points: list[LearningCurvePoint] = []
+    status = "completed"
+    failed_budget: int | None = None
+    error: str | None = None
     for budget in normalized:
-        point = _run_single_budget(
-            config,
-            budget,
-            training_seed=final_training_seed,
-            evaluation_seeds=final_eval_seeds,
-            evaluation_episodes=final_eval_episodes,
-            deterministic=final_deterministic,
-            output_base_dir=target_dir,
-        )
-        bench_points.append(point)
+        try:
+            bench_points.append(
+                _run_single_budget(
+                    config,
+                    budget,
+                    training_seed=final_training_seed,
+                    evaluation_seeds=final_eval_seeds,
+                    evaluation_episodes=final_eval_episodes,
+                    deterministic=final_deterministic,
+                    output_base_dir=target_dir,
+                )
+            )
+        except Exception as exc:
+            status = "failed"
+            failed_budget = budget
+            error = f"{type(exc).__name__}: {exc}"
+            break
 
     result = LearningCurveBenchmarkResult(
         benchmark_name="ppo_learning_curve",
@@ -459,6 +686,7 @@ def run_learning_curve_benchmark(
         points=bench_points,
         plot_data={
             "budgets": [int(point.budget_timesteps) for point in bench_points],
+            "trained_timesteps": [int(point.trained_timesteps) for point in bench_points],
             "success_rate": [point.success_rate for point in bench_points],
             "mean_reward": [point.mean_reward for point in bench_points],
         },
@@ -466,51 +694,53 @@ def run_learning_curve_benchmark(
         json_path=json_path,
         csv_path=csv_path,
         plot_path=plot_path,
+        status=status,
+        failed_budget=failed_budget,
+        error=error,
+        plot_error=(
+            "plot not attempted because the benchmark failed" if status == "failed" else None
+        ),
     )
 
-    with json_path.open("w", encoding="utf-8") as handle:
-        json.dump(result.to_dict(), handle, indent=2, allow_nan=False)
+    # Artifacts are written before any plotting so a rendering failure can
+    # never corrupt or truncate valid JSON/CSV benchmark data.
+    _write_json(result)
+    _write_csv(result)
 
-    fieldnames = [
-        "budget_timesteps",
-        "trained_timesteps",
-        "success_rate",
-        "collision_rate",
-        "timeout_rate",
-        "mean_reward",
-        "std_reward",
-        "mean_episode_length",
-        "training_time_seconds",
-        "model_path",
-    ]
-    with csv_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        for point in bench_points:
-            row = {
-                "budget_timesteps": point.budget_timesteps,
-                "trained_timesteps": point.trained_timesteps,
-                "success_rate": point.success_rate,
-                "collision_rate": point.collision_rate,
-                "timeout_rate": point.timeout_rate,
-                "mean_reward": point.mean_reward,
-                "std_reward": point.std_reward,
-                "mean_episode_length": point.mean_episode_length,
-                "training_time_seconds": point.training_time_seconds,
-                "model_path": point.model_path,
-            }
-            writer.writerow(row)
+    if status == "failed":
+        raise BenchmarkRunError(f"Benchmark failed at budget {failed_budget}: {error}", result)
 
     if plot:
-        plot_learning_curve(result, plot_path)
+        try:
+            plot_learning_curve(result, plot_path, x_axis=plot_x_axis)
+        except Exception as exc:
+            result.plot_error = f"{type(exc).__name__}: {exc}"
+            _write_json(result)
 
     return result
 
 
 def plot_learning_curve(
-    result: LearningCurveBenchmarkResult, output_path: str | Path | None = None
+    result: LearningCurveBenchmarkResult,
+    output_path: str | Path | None = None,
+    *,
+    x_axis: Literal["trained", "requested"] = "trained",
 ) -> Path:
-    """Render a lightweight learning curve plot for success rate and mean reward."""
+    """Render a lightweight learning curve for success rate and mean reward.
+
+    Args:
+        result: Completed benchmark result to plot.
+        output_path: Destination PNG path (defaults to ``result.plot_path``).
+        x_axis: ``"trained"`` (default) plots against the actual timesteps
+            Stable-Baselines3 collected, ``"requested"`` plots against the
+            requested budget. The two differ when a budget is rounded up to a
+            rollout boundary; the axis label always states which is used.
+
+    Requires the optional ``plot`` extra (matplotlib); the figure is always
+    closed before returning.
+    """
+    if x_axis not in PLOT_X_AXES:
+        raise ValueError(f"x_axis must be one of {list(PLOT_X_AXES)}, got {x_axis!r}.")
     try:
         import matplotlib
 
@@ -518,7 +748,8 @@ def plot_learning_curve(
         import matplotlib.pyplot as plt
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise RuntimeError(
-            "Plotting requires matplotlib. Install optional visualization dependencies to enable --plot."
+            "Plotting requires matplotlib. Install the optional 'plot' extra "
+            '(pip install -e ".[plot]") to enable --plot.'
         ) from exc
 
     plot_target = Path(output_path) if output_path is not None else result.plot_path
@@ -526,27 +757,33 @@ def plot_learning_curve(
         raise ValueError("An output path is required for plotting.")
     plot_target.parent.mkdir(parents=True, exist_ok=True)
 
-    budgets = [int(point.budget_timesteps) for point in result.points]
+    if x_axis == "trained":
+        x_values = [int(point.trained_timesteps) for point in result.points]
+        x_label = "Actual trained timesteps"
+    else:
+        x_values = [int(point.budget_timesteps) for point in result.points]
+        x_label = "Requested training budget (timesteps)"
+    success_rates = [point.success_rate for point in result.points]
     rewards = [point.mean_reward for point in result.points]
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 4), constrained_layout=True)
     try:
         valid_success = [
-            (int(point.budget_timesteps), point.success_rate)
-            for point in result.points
-            if point.success_rate is not None
+            (x_value, success_rate)
+            for x_value, success_rate in zip(x_values, success_rates)
+            if success_rate is not None
         ]
         if valid_success:
-            valid_budgets, valid_rates = zip(*valid_success)
-            axes[0].plot(valid_budgets, valid_rates, marker="o", linewidth=2)
+            valid_x, valid_rates = zip(*valid_success)
+            axes[0].plot(valid_x, valid_rates, marker="o", linewidth=2)
         axes[0].set_title("Success rate vs training budget")
-        axes[0].set_xlabel("Training budget (timesteps)")
+        axes[0].set_xlabel(x_label)
         axes[0].set_ylabel("Success rate")
         axes[0].set_ylim(-0.05, 1.05)
 
-        axes[1].plot(budgets, rewards, marker="s", linewidth=2, color="tab:orange")
+        axes[1].plot(x_values, rewards, marker="s", linewidth=2, color="tab:orange")
         axes[1].set_title("Mean reward vs training budget")
-        axes[1].set_xlabel("Training budget (timesteps)")
+        axes[1].set_xlabel(x_label)
         axes[1].set_ylabel("Mean reward")
 
         fig.savefig(plot_target, dpi=160, metadata={"Software": "AdaptiveRL"})

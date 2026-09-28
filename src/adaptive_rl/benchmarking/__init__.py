@@ -1,9 +1,16 @@
-"""Benchmarking and experimental evaluation modules for AdaptiveRL."""
+"""Benchmarking and experimental evaluation modules for AdaptiveRL.
+
+``run_learning_curve_benchmark`` is the PPO learning-curve benchmark (issue
+#245); it delegates evaluation and cross-seed statistics to
+``adaptive_rl.evaluation`` (issue #244). Optional RL libraries are imported
+only when a benchmark actually executes.
+"""
 
 from importlib import import_module
 from typing import Any
 
 from adaptive_rl.benchmarking.learning_curve import (
+    BenchmarkRunError,
     LearningCurveBenchmarkResult,
     LearningCurvePoint,
     plot_learning_curve,
@@ -36,6 +43,7 @@ __all__ = [
     "export_ablation_json",
     "get_ablation_variant",
     "run_reward_ablation_experiment",
+    "BenchmarkRunError",
     "LearningCurveBenchmarkResult",
     "LearningCurvePoint",
     "plot_learning_curve",
