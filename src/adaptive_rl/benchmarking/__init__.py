@@ -17,6 +17,12 @@ from adaptive_rl.benchmarking.learning_curve import (
     run_learning_curve_benchmark,
     validate_budgets,
 )
+from adaptive_rl.benchmarking.comparison import (
+    export_comparison_csv,
+    export_comparison_json,
+    get_default_algorithm_config,
+    run_algorithm_comparison,
+)
 
 _ABLATION_EXPORTS = {
     "REWARD_ABLATION_VARIANTS",
@@ -41,7 +47,12 @@ __all__ = [
     "RewardAblationVariant",
     "export_ablation_csv",
     "export_ablation_json",
+    "export_comparison_csv",
+    "export_comparison_json",
     "get_ablation_variant",
+    "get_default_algorithm_config",
+    "run_ablation_experiment",
+    "run_algorithm_comparison",
     "run_reward_ablation_experiment",
     "BenchmarkRunError",
     "LearningCurveBenchmarkResult",
