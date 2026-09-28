@@ -20,6 +20,7 @@ from adaptive_rl.evaluation.evaluator import (
 from adaptive_rl.evaluation.metrics import compute_trajectory_metrics
 from adaptive_rl.evaluation.statistics import (
     student_t_critical_value,
+    summarize_descriptive_episodes,
     summarize_seed_values,
 )
 
@@ -68,6 +69,15 @@ class _ZeroPolicy:
         self, observation: np.ndarray, deterministic: bool = True
     ) -> tuple[np.ndarray, None]:
         return np.zeros(1, dtype=np.float32), None
+
+
+class _ZeroDronePolicy:
+    """Zero-action policy for the 3-D drone action space."""
+
+    def predict(
+        self, observation: np.ndarray, deterministic: bool = True
+    ) -> tuple[np.ndarray, None]:
+        return np.zeros(3, dtype=np.float32), None
 
 
 def test_evaluator_deterministic_evaluation(tmp_path: Path) -> None:
@@ -196,7 +206,12 @@ def test_evaluate_seeds_preserves_per_seed_records_and_metrics(tmp_path: Path) -
     json.dumps(document, allow_nan=False)
     assert document["metadata"] == {
         "seeds": [10, 20],
+        "evaluation_group_seeds": [10, 20],
         "seed_count": 2,
+        "seed_semantics": (
+            "seeds are evaluation group seeds (the statistical grouping unit); "
+            "episodes within a group use derived episode_reset_seed values"
+        ),
         "episodes_per_seed": 2,
         "total_episodes": 4,
         "deterministic": True,
@@ -838,3 +853,195 @@ def test_evaluate_generalization_workflow_and_json_export(tmp_path: Path) -> Non
     assert "reward" in data["generalization_gap"]
 
     env.close()
+
+
+def test_student_t_critical_value_validates_inputs() -> None:
+    for confidence in (0.0, 1.0, -0.5, 1.5):
+        with pytest.raises(ValueError, match="Confidence must be between 0 and 1"):
+            student_t_critical_value(confidence, 5)
+    for degrees_of_freedom in (0, -3):
+        with pytest.raises(ValueError, match="degrees of freedom must be positive"):
+            student_t_critical_value(0.95, degrees_of_freedom)
+
+
+def test_summarize_descriptive_episodes_pools_every_episode() -> None:
+    metrics = summarize_descriptive_episodes(
+        rewards=[1.0, 2.0, 3.0],
+        episode_lengths=[4.0, 6.0, 8.0],
+        successes=[True, False, None],
+        collisions=[None, None, None],
+        truncations=[False, True, True],
+    )
+    assert metrics.episodes == 3
+    assert metrics.mean_reward == pytest.approx(2.0)
+    assert metrics.std_reward == pytest.approx(1.0)
+    assert metrics.mean_episode_length == pytest.approx(6.0)
+    # Success/collision rates exclude episodes without that outcome, and a
+    # rate with no observed outcomes is None, never 0.0.
+    assert metrics.success_rate == pytest.approx(0.5)
+    assert metrics.collision_rate is None
+    # The truncation flag is always available, so it uses every episode.
+    assert metrics.timeout_rate == pytest.approx(2.0 / 3.0)
+    assert metrics.to_dict()["episodes"] == 3
+
+    single = summarize_descriptive_episodes(
+        rewards=[5.0],
+        episode_lengths=[2.0],
+        successes=[True],
+        collisions=[False],
+        truncations=[False],
+    )
+    assert single.episodes == 1
+    assert single.std_reward is None
+
+
+def test_summarize_descriptive_episodes_validates_inputs() -> None:
+    with pytest.raises(ValueError, match="aligned"):
+        summarize_descriptive_episodes([1.0], [1.0, 2.0], [True], [False], [False])
+    with pytest.raises(ValueError, match="At least one episode"):
+        summarize_descriptive_episodes([], [], [], [], [])
+    for bad_reward in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="finite"):
+            summarize_descriptive_episodes([bad_reward], [1.0], [True], [False], [False])
+
+
+def test_pooled_and_seed_level_statistics_use_different_sample_units() -> None:
+    """Pooled episodes and seed summaries are different statistical layers."""
+    seed_zero = [1.0, 2.0]  # seed mean 1.5
+    seed_one = [10.0, 10.0, 10.0, 10.0]  # seed mean 10.0, four episodes
+
+    pooled = summarize_descriptive_episodes(
+        rewards=seed_zero + seed_one,
+        episode_lengths=[1.0] * 6,
+        successes=[True, False, True, True, True, True],
+        collisions=[False] * 6,
+        truncations=[False] * 6,
+    )
+    across_seeds = summarize_seed_values([1.5, 10.0])
+
+    assert pooled.episodes == 6
+    assert across_seeds.sample_count == 2
+    assert pooled.mean_reward == pytest.approx((1.0 + 2.0 + 40.0) / 6.0)
+    assert across_seeds.mean == pytest.approx(5.75)
+    # Unequal episode counts per seed make the two layers differ.
+    assert pooled.mean_reward != pytest.approx(across_seeds.mean)
+
+    # With equal episode counts the values coincide, but the layers are still
+    # computed independently with different sample units.
+    equal_pooled = summarize_descriptive_episodes(
+        rewards=[1.0, 2.0, 10.0, 20.0],
+        episode_lengths=[1.0] * 4,
+        successes=[True, False, True, True],
+        collisions=[False] * 4,
+        truncations=[False] * 4,
+    )
+    equal_across = summarize_seed_values([1.5, 15.0])
+    assert equal_pooled.episodes == 4
+    assert equal_across.sample_count == 2
+    assert equal_pooled.mean_reward == pytest.approx(equal_across.mean)
+
+
+def test_episode_records_expose_group_and_reset_seed_naming(tmp_path: Path) -> None:
+    evaluator = Evaluator(algorithm=_ZeroPolicy(), env=_SeedOutcomeEnv())  # type: ignore[arg-type]
+    result = evaluator.evaluate_seeds([10, 20], episodes_per_seed=2)
+    records = result.episodes
+
+    assert [record.evaluation_group_seed for record in records] == [10, 10, 20, 20]
+    assert [record.episode_reset_seed for record in records] == [20, 21, 40, 41]
+    # Legacy names keep their documented meanings: seed is the group seed and
+    # episode_seed is the per-episode reset seed.
+    assert [record.seed for record in records] == [10, 10, 20, 20]
+    assert [record.episode_seed for record in records] == [20, 21, 40, 41]
+
+    payload = records[0].to_dict()
+    assert payload["evaluation_group_seed"] == 10
+    assert payload["episode_reset_seed"] == 20
+    assert payload["seed"] == 10
+    assert payload["episode_seed"] == 20
+
+    assert [summary.evaluation_group_seed for summary in result.per_seed] == [10, 20]
+    assert [summary.seed for summary in result.per_seed] == [10, 20]
+
+    document = result.to_dict()
+    assert document["metadata"]["evaluation_group_seeds"] == [10, 20]
+    assert "evaluation group seeds" in document["metadata"]["seed_semantics"]
+
+    saved_json, saved_csv = evaluator.save_multiseed_report(
+        result,
+        tmp_path / "seed_naming.json",
+        tmp_path / "seed_naming.csv",
+    )
+    exported = json.loads(saved_json.read_text(encoding="utf-8"))
+    json.dumps(exported, allow_nan=False)
+    assert exported["episodes"][0]["evaluation_group_seed"] == 10
+    assert exported["episodes"][0]["episode_reset_seed"] == 20
+    assert saved_csv.is_file()
+    evaluator.close()
+
+
+def test_path_length_is_unavailable_without_position_telemetry() -> None:
+    class _NoPositionEnv(gym.Env):
+        observation_space = gym.spaces.Box(-1000.0, 1000.0, shape=(1,), dtype=np.float32)
+        action_space = gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32)
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.current_seed = 0
+            self.steps = 0
+
+        def reset(
+            self, *, seed: int | None = None, options: dict | None = None
+        ) -> tuple[np.ndarray, dict]:
+            super().reset(seed=seed)
+            self.current_seed = 0 if seed is None else seed
+            self.steps = 0
+            return np.zeros(1, dtype=np.float32), {"success": True, "collision": False}
+
+        def step(self, action: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict]:
+            self.steps += 1
+            info = {"success": True, "collision": False}
+            terminated = self.steps >= 2
+            return np.zeros(1, dtype=np.float32), 1.0, terminated, False, info
+
+    evaluator = Evaluator(algorithm=_ZeroPolicy(), env=_NoPositionEnv())  # type: ignore[arg-type]
+    result = evaluator.evaluate_seeds([5], episodes_per_seed=1)
+    record = result.episodes[0]
+
+    assert record.path_length is None
+    assert "path_length" not in record.to_dict()
+    assert result.per_seed[0].path_length is None
+    document = result.to_dict()
+    assert "path_length" not in document["episodes"][0]
+    evaluator.close()
+
+
+def test_evaluator_falls_back_to_private_obstacle_attribute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = DroneNavigation3DEnv(bounds=(20.0, 20.0, 10.0), max_steps=10, num_obstacles=2)
+    env.reset(seed=5)
+    monkeypatch.delattr(type(env), "obstacles")
+
+    evaluator = Evaluator(algorithm=_ZeroDronePolicy(), env=env)  # type: ignore[arg-type]
+    result = evaluator.evaluate_seeds([5], episodes_per_seed=1)
+    assert result.episodes[0].min_obstacle_clearance is not None
+    evaluator.close()
+
+
+def test_evaluator_reads_obstacle_geometry_from_public_interface(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = DroneNavigation3DEnv(bounds=(20.0, 20.0, 10.0), max_steps=10, num_obstacles=2)
+    env.reset(seed=5)
+    public_obstacles = env.obstacles
+    assert public_obstacles
+
+    # Shadow the private attribute while the public interface keeps exposing
+    # the real geometry: the evaluator must use ``unwrapped.obstacles``.
+    monkeypatch.setattr(type(env), "obstacles", property(lambda self: list(public_obstacles)))
+    env._obstacles = []
+
+    evaluator = Evaluator(algorithm=_ZeroDronePolicy(), env=env)  # type: ignore[arg-type]
+    result = evaluator.evaluate_seeds([5], episodes_per_seed=1)
+    assert result.episodes[0].min_obstacle_clearance is not None
+    evaluator.close()

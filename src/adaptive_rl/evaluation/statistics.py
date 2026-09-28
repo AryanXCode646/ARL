@@ -1,4 +1,17 @@
-"""Statistical summaries for independent-seed evaluation results."""
+"""Statistical summaries for multi-seed evaluation results.
+
+Two distinct kinds of quantity are produced here and must not be confused:
+
+* :class:`DescriptiveMetrics` (``summarize_descriptive_episodes``) pools every
+  evaluated episode into a single sample. These are *descriptive* values for
+  the episodes that happened to run.
+* :class:`MetricStatistics` (``summarize_seed_values``) treats one seed-level
+  summary as one independent observation and is the basis for cross-seed
+  means, standard deviations, and confidence intervals.
+
+Because the two use different sample units, a pooled mean and the mean of the
+per-seed means differ whenever seeds contribute unequal episode counts.
+"""
 
 from __future__ import annotations
 
@@ -147,4 +160,98 @@ def summarize_seed_values(values: Sequence[float | None]) -> MetricStatistics:
     return MetricStatistics(mean, std, mean - margin, mean + margin, count)
 
 
-__all__ = ["MetricStatistics", "student_t_critical_value", "summarize_seed_values"]
+@dataclass(frozen=True)
+class DescriptiveMetrics:
+    """Pooled episode-level descriptive statistics for one evaluation run.
+
+    Every evaluated episode contributes exactly one observation, so these
+    values describe the sampled episodes rather than an across-seed
+    population. They are deliberately distinct from :class:`MetricStatistics`,
+    which summarizes independent seed-level observations.
+    """
+
+    episodes: int
+    success_rate: float | None
+    collision_rate: float | None
+    timeout_rate: float | None
+    mean_reward: float
+    std_reward: float | None
+    mean_episode_length: float
+
+    def to_dict(self) -> dict[str, float | int | None]:
+        return asdict(self)
+
+
+def _pooled_rate(flags: Sequence[bool | None]) -> float | None:
+    observed = [bool(flag) for flag in flags if flag is not None]
+    if not observed:
+        return None
+    return float(sum(observed) / len(observed))
+
+
+def summarize_descriptive_episodes(
+    rewards: Sequence[float],
+    episode_lengths: Sequence[float],
+    successes: Sequence[bool | None],
+    collisions: Sequence[bool | None],
+    truncations: Sequence[bool],
+) -> DescriptiveMetrics:
+    """Pool episode-level observations into descriptive statistics.
+
+    Semantics:
+      - all inputs must describe the same episodes and be non-empty;
+      - rewards must be finite and are summarized with the sample standard
+        deviation (``None`` when fewer than two episodes exist);
+      - success and collision rates exclude episodes where the outcome is
+        unavailable (``None``); the rate itself is ``None`` when no episode
+        reports that outcome, never ``0.0``;
+      - the timeout rate uses every evaluated episode as its denominator,
+        because the Gymnasium truncation flag is always available.
+    """
+    counts = {
+        len(rewards),
+        len(episode_lengths),
+        len(successes),
+        len(collisions),
+        len(truncations),
+    }
+    if len(counts) != 1:
+        raise ValueError(f"Episode inputs must be aligned, got lengths {sorted(counts)}.")
+    episodes = counts.pop()
+    if episodes == 0:
+        raise ValueError("At least one episode is required for descriptive metrics.")
+
+    finite_rewards: list[float] = []
+    for reward in rewards:
+        if not math.isfinite(reward):
+            raise ValueError(f"Episode rewards must be finite, got {reward!r}.")
+        finite_rewards.append(float(reward))
+
+    mean_reward = math.fsum(finite_rewards) / episodes
+    if episodes > 1:
+        variance = math.fsum((reward - mean_reward) ** 2 for reward in finite_rewards) / (
+            episodes - 1
+        )
+        std_reward: float | None = math.sqrt(variance)
+    else:
+        std_reward = None
+
+    mean_episode_length = math.fsum(float(length) for length in episode_lengths) / episodes
+    return DescriptiveMetrics(
+        episodes=episodes,
+        success_rate=_pooled_rate(successes),
+        collision_rate=_pooled_rate(collisions),
+        timeout_rate=float(sum(bool(flag) for flag in truncations) / episodes),
+        mean_reward=mean_reward,
+        std_reward=std_reward,
+        mean_episode_length=mean_episode_length,
+    )
+
+
+__all__ = [
+    "DescriptiveMetrics",
+    "MetricStatistics",
+    "student_t_critical_value",
+    "summarize_descriptive_episodes",
+    "summarize_seed_values",
+]

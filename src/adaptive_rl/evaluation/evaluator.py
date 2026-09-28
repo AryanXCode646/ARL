@@ -26,7 +26,21 @@ from adaptive_rl.evaluation.statistics import MetricStatistics, summarize_seed_v
 
 @dataclass(frozen=True)
 class EpisodeEvaluationRecord:
-    """Record for a single evaluation episode."""
+    """Record for a single evaluation episode.
+
+    Seed semantics:
+        ``evaluation_group_seed`` is the requested evaluation seed and is the
+        statistical grouping unit used by :meth:`Evaluator.evaluate_seeds`.
+        It is ``None`` for single-seed :meth:`Evaluator.evaluate` runs, which
+        are not organized into seed groups. ``episode_reset_seed`` is the value
+        actually passed to ``env.reset(seed=...)`` for this episode.
+
+    Legacy fields:
+        ``seed`` and ``episode_seed`` are retained for backward compatibility.
+        ``episode_seed`` mirrors ``episode_reset_seed``. ``seed`` holds the
+        reset seed for single-seed runs and the group seed for multi-seed runs;
+        prefer the explicit accessors above when interpreting results.
+    """
 
     episode_index: int
     seed: Optional[int]
@@ -36,6 +50,7 @@ class EpisodeEvaluationRecord:
     collision: Optional[bool]
     truncated: bool
     episode_seed: Optional[int] = None
+    evaluation_group_seed: Optional[int] = None
     collision_type: Optional[str] = None
     path_length: Optional[float] = None
     straight_line_distance: Optional[float] = None
@@ -45,9 +60,16 @@ class EpisodeEvaluationRecord:
     max_acceleration: Optional[float] = None
     timeout: bool = False
 
+    @property
+    def episode_reset_seed(self) -> Optional[int]:
+        """Actual ``env.reset(seed=...)`` value for this episode."""
+        return self.episode_seed
+
     def to_dict(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {
             "episode_index": self.episode_index,
+            "evaluation_group_seed": self.evaluation_group_seed,
+            "episode_reset_seed": self.episode_reset_seed,
             "seed": self.seed,
             "return": self.return_value,
             "episode_length": self.episode_length,
@@ -76,7 +98,12 @@ class EpisodeEvaluationRecord:
 
 @dataclass(frozen=True)
 class SeedEvaluationSummary:
-    """Episode-level summary for a single evaluation seed."""
+    """Episode-level summary for one evaluation seed group.
+
+    ``seed`` is the requested evaluation seed (the statistical grouping unit),
+    not an episode reset seed. :attr:`evaluation_group_seed` exposes the same
+    value under an explicit name.
+    """
 
     seed: int
     episodes: int
@@ -89,9 +116,15 @@ class SeedEvaluationSummary:
     std_episode_length: float
     path_length: float | None
 
+    @property
+    def evaluation_group_seed(self) -> int:
+        """Requested evaluation seed; the unit used for cross-seed statistics."""
+        return self.seed
+
     def to_dict(self) -> dict[str, int | float | None]:
         return {
             "seed": self.seed,
+            "evaluation_group_seed": self.evaluation_group_seed,
             "episodes": self.episodes,
             "success_rate": self.success_rate,
             "collision_rate": self.collision_rate,
@@ -106,7 +139,12 @@ class SeedEvaluationSummary:
 
 @dataclass(frozen=True)
 class MultiSeedEvaluationResult:
-    """Complete multi-seed result retaining episodes and seed-level identity."""
+    """Complete multi-seed result retaining episodes and seed-level identity.
+
+    ``seeds`` are evaluation group seeds; each group runs
+    ``episodes_per_seed`` episodes whose actual reset seeds are derived from
+    the group seed and recorded per episode as ``episode_reset_seed``.
+    """
 
     seeds: list[int]
     episodes_per_seed: int
@@ -120,11 +158,21 @@ class MultiSeedEvaluationResult:
     def total_episodes(self) -> int:
         return len(self.episodes)
 
+    @property
+    def evaluation_group_seeds(self) -> list[int]:
+        """Requested evaluation seeds; the grouping unit for cross-seed statistics."""
+        return list(self.seeds)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "metadata": {
                 "seeds": list(self.seeds),
+                "evaluation_group_seeds": list(self.seeds),
                 "seed_count": len(self.seeds),
+                "seed_semantics": (
+                    "seeds are evaluation group seeds (the statistical grouping unit); "
+                    "episodes within a group use derived episode_reset_seed values"
+                ),
                 "episodes_per_seed": self.episodes_per_seed,
                 "total_episodes": self.total_episodes,
                 "deterministic": self.deterministic,
@@ -142,7 +190,26 @@ class MultiSeedEvaluationResult:
 
 
 class Evaluator:
-    """Standardized multi-episode evaluation engine for drone navigation."""
+    """Standardized multi-episode evaluation engine for drone navigation.
+
+    Environment telemetry contract:
+        Every episode always records return, length, and the Gymnasium
+        truncation flag. Additional outcomes come from the environment ``info``
+        dict and are optional: ``success``/``is_success``, ``collision``,
+        ``collision_type``, ``position``, ``velocity``, ``acceleration``.
+        When an environment does not report an outcome, the metric is
+        ``None`` (never ``0.0``), so non-spatial environments remain valid
+        evaluation targets.
+
+    Drone-specific telemetry:
+        Collision typing, obstacle clearance, path length, and path
+        efficiency describe the 3D drone navigation task and are only
+        available when the environment exposes positions and obstacles.
+        They must not be read as universal environment metrics. Obstacle
+        geometry is read from the public ``unwrapped.obstacles`` interface
+        when available, falling back to the private ``_obstacles`` attribute
+        for environments that predate it.
+    """
 
     def __init__(
         self,
@@ -254,9 +321,9 @@ class Evaluator:
 
             goal = last_info.get("goal")
             unwrapped_env = getattr(self.env, "unwrapped", self.env)
-            obstacles = getattr(unwrapped_env, "_obstacles", None)
+            obstacles = getattr(unwrapped_env, "obstacles", None)
             if obstacles is None:
-                obstacles = getattr(unwrapped_env, "obstacles", None)
+                obstacles = getattr(unwrapped_env, "_obstacles", None)
 
             while not done:
                 if self.algorithm is not None:
@@ -473,7 +540,13 @@ class Evaluator:
         episodes_per_seed: int,
         deterministic: bool = True,
     ) -> MultiSeedEvaluationResult:
-        """Evaluate a policy independently for each explicit seed.
+        """Evaluate a policy independently for each explicit seed group.
+
+        ``seeds`` are evaluation group seeds: the statistical grouping unit
+        for cross-seed summaries. Each group runs ``episodes_per_seed``
+        episodes whose actual ``env.reset`` seeds are the disjoint block
+        ``seed * episodes_per_seed + episode_index``; both values are recorded
+        per episode as ``evaluation_group_seed`` and ``episode_reset_seed``.
 
         Duplicate seeds are rejected because repeated entries do not represent
         independent test conditions and would over-weight that environment.
@@ -504,7 +577,7 @@ class Evaluator:
                 base_seed=episode_seed_base,
             )
             records = [
-                replace(record, seed=seed, episode_index=index)
+                replace(record, seed=seed, evaluation_group_seed=seed, episode_index=index)
                 for index, record in enumerate(self.last_episode_records)
             ]
             all_records.extend(records)
