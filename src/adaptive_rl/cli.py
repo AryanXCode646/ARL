@@ -8,7 +8,7 @@ a target, evaluate the trained agent, and visualize the flight demonstration.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import typer
 from rich.console import Console
@@ -142,6 +142,9 @@ def train(
     seed: Optional[int] = typer.Option(
         None, "--seed", "-s", help="Override experiment random seed"
     ),
+    split: Optional[str] = typer.Option(
+        None, "--split", help="Environment dataset split ('train' or 'test')"
+    ),
 ) -> None:
     """Train a reinforcement learning agent using PPO."""
     if config is None:
@@ -170,6 +173,17 @@ def train(
     if seed is not None:
         exp_config.seed = seed
 
+    clean_split: Optional[str] = None
+    if split is not None:
+        clean_split = split.strip().lower()
+        if clean_split not in ("train", "test"):
+            console.print(
+                f"[bold red]Invalid split:[/bold red] '{split}'. Expected 'train' or 'test'."
+            )
+            raise typer.Exit(code=1)
+        exp_config.environment.parameters["split"] = clean_split
+
+    split_info = f"\n• [bold]Split:[/bold] {clean_split}" if clean_split is not None else ""
     console.print(
         Panel.fit(
             f"[bold green]Starting Drone RL Training: {exp_config.name}[/bold green]\n\n"
@@ -178,7 +192,8 @@ def train(
             f"• [bold]Total Timesteps:[/bold] {exp_config.training.total_timesteps:,}\n"
             f"• [bold]Checkpoint Freq:[/bold] {exp_config.training.checkpoint_freq}\n"
             f"• [bold]Seed:[/bold] {exp_config.seed}\n"
-            f"• [bold]Output Dir:[/bold] {exp_config.output_dir}",
+            f"• [bold]Output Dir:[/bold] {exp_config.output_dir}"
+            f"{split_info}",
             title="PPO Drone Training Pipeline",
             border_style="cyan",
         )
@@ -232,6 +247,9 @@ def evaluate(
         "--compare-random",
         help="Compare PPO against random action baseline under identical conditions",
     ),
+    split: Optional[str] = typer.Option(
+        None, "--split", help="Environment dataset split ('train' or 'test')"
+    ),
 ) -> None:
     """Evaluate a trained agent over multiple benchmark episodes."""
     if config is None:
@@ -251,6 +269,16 @@ def evaluate(
         console.print(f"[bold red]Configuration error:[/bold red] {err}")
         raise typer.Exit(code=1)
 
+    clean_split: Optional[str] = None
+    if split is not None:
+        clean_split = split.strip().lower()
+        if clean_split not in ("train", "test"):
+            console.print(
+                f"[bold red]Invalid split:[/bold red] '{split}'. Expected 'train' or 'test'."
+            )
+            raise typer.Exit(code=1)
+        exp_config.environment.parameters["split"] = clean_split
+
     num_episodes = episodes or exp_config.evaluation.eval_episodes
 
     # Resolve model path
@@ -264,13 +292,15 @@ def evaluate(
             )
             raise typer.Exit(code=1)
 
+    split_info = f"\n• [bold]Split:[/bold] {clean_split}" if clean_split is not None else ""
     console.print(
         Panel.fit(
             f"[bold green]Starting Evaluation: {exp_config.name}[/bold green]\n\n"
             f"• [bold]Model:[/bold] {model}\n"
             f"• [bold]Environment:[/bold] {exp_config.environment.name}\n"
             f"• [bold]Episodes:[/bold] {num_episodes}\n"
-            f"• [bold]Deterministic:[/bold] {deterministic}",
+            f"• [bold]Deterministic:[/bold] {deterministic}"
+            f"{split_info}",
             title="Evaluation Engine",
             border_style="cyan",
         )
@@ -290,7 +320,8 @@ def evaluate(
         metrics = evaluator.evaluate(
             num_episodes=num_episodes,
             deterministic=deterministic,
-            base_seed=exp_config.seed,
+            base_seed=exp_config.seed if clean_split is None else None,
+            split=clean_split,
         )
 
         success_pct = (
@@ -368,7 +399,8 @@ def evaluate(
                 ppo_algorithm=algo,
                 env=env,
                 num_episodes=num_episodes,
-                base_seed=exp_config.seed,
+                base_seed=exp_config.seed if clean_split is None else None,
+                split=clean_split,
             )
             comp_table = Table(title=f"Policy Comparison ({num_episodes} episodes)")
             comp_table.add_column("Policy", style="cyan")
@@ -402,6 +434,164 @@ def evaluate(
     except Exception as err:
         console.print(f"[bold red]Evaluation failed with error:[/bold red] {err}")
         raise typer.Exit(code=1)
+
+
+@app.command(name="evaluate-generalization")
+def evaluate_generalization_cmd(
+    model: Path = typer.Option(..., "--model", "-m", help="Path to trained model weights (.zip)"),
+    config: Optional[Path] = typer.Option(
+        None, "--config", "-c", help="Path to experiment configuration YAML"
+    ),
+    episodes: int = typer.Option(
+        20, "--episodes", "-e", help="Number of evaluation episodes per split"
+    ),
+    deterministic: bool = typer.Option(
+        True, "--deterministic/--stochastic", help="Use deterministic action selection"
+    ),
+    output_report: Optional[Path] = typer.Option(
+        Path("artifacts/generalization_benchmark.json"),
+        "--output-report",
+        "-o",
+        help="Path to export structured JSON benchmark report",
+    ),
+) -> None:
+    """Evaluate trained policy on train and unseen test distributions and compute generalization gaps."""
+    if not model.exists():
+        console.print(f"[bold red]Model file does not exist:[/bold red] {model}")
+        raise typer.Exit(code=1)
+
+    if episodes <= 0:
+        console.print(f"[bold red]Episodes must be positive:[/bold red] got {episodes}")
+        raise typer.Exit(code=1)
+
+    if config is None:
+        for candidate in [Path("configs/drone_ppo.yaml"), Path("configs/drone_ppo_demo.yaml")]:
+            if candidate.exists():
+                config = candidate
+                break
+
+    env_name = "drone"
+    env_params: Dict[str, Any] = {}
+    exp_name = "drone_generalization"
+    if config is not None and config.exists():
+        try:
+            exp_config = load_config(config)
+            env_name = exp_config.environment.name
+            env_params = exp_config.environment.parameters
+            exp_name = exp_config.name
+        except ConfigError as err:
+            console.print(f"[bold red]Configuration error:[/bold red] {err}")
+            raise typer.Exit(code=1)
+
+    console.print(
+        Panel.fit(
+            f"[bold cyan]Running Unseen-Environment Generalization Benchmark[/bold cyan]\n\n"
+            f"• [bold]Model:[/bold] {model}\n"
+            f"• [bold]Environment:[/bold] {env_name}\n"
+            f"• [bold]Episodes per Split:[/bold] {episodes}\n"
+            f"• [bold]Deterministic:[/bold] {deterministic}\n"
+            f"• [bold]Benchmark Report:[/bold] {output_report}",
+            title="Generalization Evaluation",
+            border_style="cyan",
+        )
+    )
+
+    from adaptive_rl.algorithms.ppo import PPOAlgorithm
+    from adaptive_rl.evaluation.generalization import evaluate_generalization
+
+    try:
+        env = make_env(env_name, **env_params)
+        algo = PPOAlgorithm.from_pretrained(model, env=env)
+
+        benchmark_result = evaluate_generalization(
+            algorithm=algo,
+            env=env,
+            num_episodes=episodes,
+            deterministic=deterministic,
+            output_path=output_report,
+            metadata={
+                "model": str(model),
+                "config": str(config) if config else None,
+                "experiment_name": exp_name,
+            },
+        )
+
+        train_res = benchmark_result.train
+        test_res = benchmark_result.test
+        gap_res = benchmark_result.generalization_gap
+
+        table = Table(title=f"Generalization Benchmark Results ({episodes} episodes per split)")
+        table.add_column("Distribution", style="cyan")
+        table.add_column("Success Rate", justify="right")
+        table.add_column("Collision Rate", justify="right")
+        table.add_column("Mean Reward", justify="right")
+        table.add_column("Mean Steps", justify="right")
+
+        t_succ = (
+            f"{train_res['success_rate'] * 100:.1f}%"
+            if train_res.get("success_rate") is not None
+            else "N/A"
+        )
+        t_coll = (
+            f"{train_res['collision_rate'] * 100:.1f}%"
+            if train_res.get("collision_rate") is not None
+            else "N/A"
+        )
+        table.add_row(
+            "TRAIN (seen seeds)",
+            t_succ,
+            t_coll,
+            f"{train_res['mean_reward']:.2f}",
+            f"{train_res['mean_episode_length']:.1f}",
+        )
+
+        e_succ = (
+            f"{test_res['success_rate'] * 100:.1f}%"
+            if test_res.get("success_rate") is not None
+            else "N/A"
+        )
+        e_coll = (
+            f"{test_res['collision_rate'] * 100:.1f}%"
+            if test_res.get("collision_rate") is not None
+            else "N/A"
+        )
+        table.add_row(
+            "TEST (unseen seeds)",
+            e_succ,
+            e_coll,
+            f"{test_res['mean_reward']:.2f}",
+            f"{test_res['mean_episode_length']:.1f}",
+        )
+
+        console.print("\n")
+        console.print(table)
+
+        gap_table = Table(title="Generalization Gaps (Train − Test)")
+        gap_table.add_column("Metric Gap", style="cyan")
+        gap_table.add_column("Delta (Train − Test)", style="green", justify="right")
+
+        succ_gap = gap_res.get("success")
+        gap_table.add_row(
+            "Success Generalization Gap (Δ_success)",
+            f"{succ_gap * 100:+.1f}%" if succ_gap is not None else "N/A",
+        )
+        rew_gap = gap_res.get("reward")
+        gap_table.add_row(
+            "Reward Generalization Gap (Δ_reward)",
+            f"{rew_gap:+.2f}" if rew_gap is not None else "N/A",
+        )
+        console.print("\n")
+        console.print(gap_table)
+
+        if output_report is not None:
+            console.print(f"\n[bold green]Benchmark report saved to:[/bold green] {output_report}")
+
+    except Exception as err:
+        console.print(f"[bold red]Generalization evaluation failed with error:[/bold red] {err}")
+        raise typer.Exit(code=1)
+    finally:
+        if "env" in locals():
+            env.close()
 
 
 @app.command(name="experiment-density")

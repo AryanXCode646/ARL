@@ -94,8 +94,32 @@ class Evaluator:
         num_episodes: int = 10,
         deterministic: bool = True,
         base_seed: Optional[int] = None,
+        seeds: Optional[Sequence[int]] = None,
+        split: Optional[str] = None,
     ) -> EvaluationMetrics:
-        """Execute evaluation rollouts and compute aggregated metrics."""
+        """Execute evaluation rollouts and compute aggregated metrics.
+
+        Args:
+            num_episodes: Number of episodes to run (overridden by len(seeds) if seeds is given).
+            deterministic: Whether to use deterministic policy actions.
+            base_seed: Starting seed for sequential seed generation (seed = base_seed + ep).
+            seeds: Explicit sequence of integer seeds to evaluate against.
+            split: Benchmark split ('train' or 'test'). When supplied without seeds,
+                seeds are deterministically derived from the split partition.
+        """
+        if split is not None:
+            from adaptive_rl.evaluation.generalization import get_split_seeds, validate_split_seed
+
+            if seeds is None:
+                seeds = get_split_seeds(split, num_episodes=num_episodes)
+            else:
+                for s in seeds:
+                    validate_split_seed(s, split)
+
+        if seeds is not None:
+            seeds = list(seeds)
+            num_episodes = len(seeds)
+
         if num_episodes <= 0:
             raise ValueError(f"num_episodes must be positive, got {num_episodes}")
 
@@ -116,8 +140,21 @@ class Evaluator:
         max_accelerations: List[float] = []
 
         for ep in range(num_episodes):
-            seed = (base_seed + ep) if base_seed is not None else None
-            obs, info = self.env.reset(seed=seed)
+            if seeds is not None:
+                seed = seeds[ep]
+            elif base_seed is not None:
+                seed = base_seed + ep
+            else:
+                seed = None
+
+            reset_options = {"split": split} if split is not None else None
+            if reset_options is not None:
+                try:
+                    obs, info = self.env.reset(seed=seed, options=reset_options)
+                except TypeError:
+                    obs, info = self.env.reset(seed=seed)
+            else:
+                obs, info = self.env.reset(seed=seed)
             ep_reward = 0.0
             ep_length = 0
             done = False
@@ -291,6 +328,8 @@ class Evaluator:
                 "all_lengths": lengths,
                 "deterministic": deterministic,
                 "base_seed": base_seed,
+                "split": split,
+                "seeds": list(seeds) if seeds is not None else None,
                 "mean_path_length": mean_path_len,
                 "path_length": mean_path_len,
                 "std_path_length": std_path_len,
@@ -476,6 +515,7 @@ def compare_policies(
     env: Optional[gym.Env] = None,
     num_episodes: int = 20,
     base_seed: Optional[int] = 42,
+    split: Optional[str] = None,
 ) -> Dict[str, EvaluationMetrics]:
     """Execute head-to-head evaluation between trained PPO and Random baseline under identical seeds."""
     close_env = False
@@ -490,14 +530,16 @@ def compare_policies(
         ppo_metrics = ppo_eval.evaluate(
             num_episodes=num_episodes,
             deterministic=True,
-            base_seed=base_seed,
+            base_seed=base_seed if split is None else None,
+            split=split,
         )
 
         rand_eval = Evaluator(algorithm=random_policy, env=env)
         rand_metrics = rand_eval.evaluate(
             num_episodes=num_episodes,
             deterministic=False,
-            base_seed=base_seed,
+            base_seed=base_seed if split is None else None,
+            split=split,
         )
 
         return {

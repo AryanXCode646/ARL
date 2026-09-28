@@ -200,6 +200,138 @@ log_dir: "{tmp_path / "logs"}"
     assert ("SUCCESS" in demo_res.output) or ("FAILED" in demo_res.output)
 
 
+def test_cli_split_options_and_generalization_benchmark(tmp_path: Path) -> None:
+    """Verify CLI commands accept --split train/test and evaluate-generalization works."""
+    import json
+
+    test_config = tmp_path / "test_drone_split.yaml"
+    test_config.write_text(
+        f"""
+name: "cli_split_test"
+seed: 42
+algorithm:
+  name: "ppo"
+  learning_rate: 0.0003
+  gamma: 0.99
+  batch_size: 32
+  parameters:
+    n_steps: 64
+environment:
+  name: "drone"
+  max_steps: 15
+  parameters:
+    bounds: [20.0, 20.0, 10.0]
+    num_obstacles: 2
+training:
+  total_timesteps: 32
+  checkpoint_freq: 0
+  log_interval: 10
+evaluation:
+  eval_episodes: 2
+output_dir: "{tmp_path / "artifacts"}"
+log_dir: "{tmp_path / "logs"}"
+""",
+        encoding="utf-8",
+    )
+
+    # 1. Train with --split train
+    train_res = runner.invoke(
+        app,
+        ["train", "--config", str(test_config), "--timesteps", "32", "--split", "train"],
+    )
+    assert train_res.exit_code == 0
+    assert "Split: train" in train_res.output
+
+    # 2. Train with invalid split fails
+    bad_train = runner.invoke(
+        app,
+        ["train", "--config", str(test_config), "--timesteps", "32", "--split", "invalid_split"],
+    )
+    assert bad_train.exit_code == 1
+    assert "Invalid split" in bad_train.output
+
+    model_file = tmp_path / "artifacts" / "models" / "cli_split_test_final.zip"
+    assert model_file.exists()
+
+    # 3. Evaluate with --split test
+    eval_res = runner.invoke(
+        app,
+        [
+            "evaluate",
+            "--config",
+            str(test_config),
+            "--model",
+            str(model_file),
+            "--episodes",
+            "2",
+            "--split",
+            "test",
+        ],
+    )
+    assert eval_res.exit_code == 0
+    assert "Split: test" in eval_res.output
+
+    # 4. Evaluate with invalid split fails
+    bad_eval = runner.invoke(
+        app,
+        [
+            "evaluate",
+            "--config",
+            str(test_config),
+            "--model",
+            str(model_file),
+            "--split",
+            "invalid_split",
+        ],
+    )
+    assert bad_eval.exit_code == 1
+    assert "Invalid split" in bad_eval.output
+
+    # 5. Evaluate-generalization command
+    bench_report = tmp_path / "generalization_benchmark.json"
+    gen_res = runner.invoke(
+        app,
+        [
+            "evaluate-generalization",
+            "--model",
+            str(model_file),
+            "--config",
+            str(test_config),
+            "--episodes",
+            "2",
+            "--output-report",
+            str(bench_report),
+        ],
+    )
+    assert gen_res.exit_code == 0
+    assert "Generalization Benchmark Results" in gen_res.output
+    assert "Generalization Gaps" in gen_res.output
+    assert bench_report.exists()
+
+    with open(bench_report, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    assert "train" in data
+    assert "test" in data
+    assert "generalization_gap" in data
+    assert data["train"]["seeds"] == [0, 1]
+    assert data["test"]["seeds"] == [1000, 1001]
+    assert "success" in data["generalization_gap"]
+    assert "reward" in data["generalization_gap"]
+
+    # 6. Evaluate-generalization missing model fails
+    missing_res = runner.invoke(
+        app,
+        [
+            "evaluate-generalization",
+            "--model",
+            str(tmp_path / "nonexistent.zip"),
+        ],
+    )
+    assert missing_res.exit_code == 1
+    assert "Model file does not exist" in missing_res.output
+
+
 def test_cli_experiment_ablation_smoke(tmp_path: Path) -> None:
     """Verify adaptive-rl experiment-ablation executes end-to-end and outputs results."""
     json_rep = tmp_path / "ablation.json"
