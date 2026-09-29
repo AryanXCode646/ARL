@@ -69,9 +69,9 @@ that cannot provide the required PPO behavior quantities or recorded transition
 data without extra environment interaction.
 # AdaptiveRL Treatment Card: Online Fine-Tuning Specification
 
-**Protocol Version**: 2.0  
-**Status**: Preregistered & Frozen  
-**Governing Protocol**: [`docs/research/adaptive_rl_hypothesis.md`](file:///home/ux0/ARL/docs/research/adaptive_rl_hypothesis.md)  
+**Protocol Version**: 2.0<br>
+**Status**: Preregistered & Frozen<br>
+**Governing Protocol**: [`docs/research/adaptive_rl_hypothesis.md`](file:///home/ux0/ARL/docs/research/adaptive_rl_hypothesis.md)<br>
 **Target Milestone**: Issue #265 (`[Research] Online adaptation after a distribution shift: Adaptive policy vs Fixed policy`)
 
 ---
