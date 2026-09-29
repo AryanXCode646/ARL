@@ -24,16 +24,24 @@ analysis plan. The treatment is specified by
 The `adaptive-rl benchmark adaptation --study prereg-v1 --run-id RUN_ID`
 entrypoint runs all ten training seeds in preregistered order, rejects subsets
 and smoke mode, requires a clean committed tree, and writes into an immutable
-run directory. A repeated completed run ID is refused. `--resume` accepts only
-terminal per-replicate records whose SHA-256 sidecar verifies; it never trusts
-partial training directories. An interrupted seed without a complete checkpoint
-is recorded as failed, and remaining unstarted seeds continue. The JSON stores
+run directory. Before training, `study_manifest.json` records the canonical
+configuration, the frozen treatment and seed schedule, source revision, and
+runtime identity. Its stable JSON representation is SHA-256 hashed. Prereg-v1
+also rejects any config or treatment-card hash that differs from the values
+frozen here. `--resume` recomputes that identity and accepts only terminal
+per-replicate records whose digest, study hash, protocol hash, and seed identity
+verify; it never trusts partial training directories. An interrupted seed
+without a complete checkpoint is recorded as failed, and remaining unstarted
+seeds continue. Repeating resume after finalization validates and returns the
+same immutable result. The JSON stores
 the raw trajectories, protocol analysis, seed schedule, outcomes, runtime
 invariants, and run status.
 The CSV has one row per replicate and arm, with finite-horizon `T_H`, status,
 per-episode return vectors, and seed vectors. `manifest.json` checksums every
-file in the run directory; `validate_study_manifest()` detects missing or
-modified files.
+file in the run directory, including the pre-execution study manifest and
+replicate checkpoints; `validate_study_manifest()` detects missing, changed,
+malformed, or path-escaping entries. Result files are written atomically and
+are not overwritten.
 
 The fixed arm has a prediction-only interface. Exact equality of its initial,
 per-episode, and final policy fingerprints establishes a zero weight delta; the
@@ -93,6 +101,23 @@ The intended single execution command is:
 The runner enables Torch deterministic algorithms in warn-only mode and cuDNN
 deterministic settings for the study, while recording that cross-hardware and
 cross-library bitwise reproducibility is not claimed.
+
+## Scientific validity audit finding
+
+The frozen config sets `evaluation.deterministic: true`, and
+`evaluate_episode()` passes that setting to PPO while collecting the post-shift
+transitions later supplied to PPO's native clipped update. PPO's update assumes
+actions were sampled from the recorded behavior distribution. A deterministic
+mean action with its Gaussian density recorded as `behavior_log_prob` does not
+have that sampling distribution, so the stored rollout is not a valid on-policy
+PPO sample. The current preregistration does not define an action-sampling rule
+that resolves this conflict. No treatment or analysis change is made here; the
+prereg-v1 runner now rejects the frozen deterministic PPO configuration before
+training. The PPO treatment must not be described as scientifically validated
+until a prospective protocol amendment resolves the action-selection contract.
+This limitation does not change the previously recorded artifact or its
+descriptive statistics; its `COMPLETE` status describes harness execution, not
+valid on-policy PPO evidence.
 
 * Run ID: `issue271-prereg-v1-20260929-01`
 * Run status: `COMPLETE`; 10 completed, 0 failed, ordered seeds 31001–31010.

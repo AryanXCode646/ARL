@@ -9,13 +9,21 @@ import numpy as np
 import pytest
 
 from adaptive_rl.benchmarking.adaptation_artifacts import (
+    canonical_json_bytes,
+    make_study_manifest,
     read_replicate_checkpoint,
     sha256_file,
     validate_study_manifest,
     write_adaptation_artifacts,
     write_adaptive_vs_fixed_artifacts,
+    write_or_verify_study_manifest,
     write_replicate_checkpoint,
     write_study_manifest,
+)
+from adaptive_rl.config import compute_config_sha256, load_config
+from adaptive_rl.protocol.constants import (
+    ISSUE271_CONFIG_SHA256,
+    ISSUE271_TREATMENT_CARD_SHA256,
 )
 
 
@@ -117,6 +125,70 @@ def test_manifest_hashes_all_artifacts_and_detects_tampering(tmp_path) -> None:
         validate_study_manifest(manifest_path)
 
 
+def test_completed_manifest_binds_preexecution_study_hash(tmp_path) -> None:
+    spec_path = tmp_path / "study_manifest.json"
+    study_hash = write_or_verify_study_manifest(
+        {"protocol": "prereg-v1", "seed": 31001}, spec_path, resume=False
+    )
+    json_path, csv_path = write_adaptation_artifacts(
+        _artifact(), tmp_path, stem="adaptive_vs_fixed"
+    )
+    manifest_path = tmp_path / "manifest.json"
+    write_study_manifest(
+        json_path,
+        csv_path,
+        manifest_path,
+        run_id="bound-study",
+        command="adaptive-rl benchmark adaptation --study prereg-v1",
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["study_hash"] == study_hash
+    validate_study_manifest(manifest_path)
+
+    changed_spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    changed_spec["inputs"]["seed"] = 31002
+    spec_path.write_text(json.dumps(changed_spec), encoding="utf-8")
+    manifest["artifacts"]["study_manifest.json"] = sha256_file(spec_path)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="does not match its pre-execution spec"):
+        validate_study_manifest(manifest_path)
+
+
+def test_manifest_rejects_path_escape_and_unsupported_schema(tmp_path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps({"schema_version": "1.0", "artifacts": {"../outside": "0" * 64}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="escapes the run directory"):
+        validate_study_manifest(manifest_path)
+    manifest_path.write_text(
+        json.dumps({"schema_version": "2.0", "artifacts": {"x": "0" * 64}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="unsupported or malformed"):
+        validate_study_manifest(manifest_path)
+
+
+def test_manifest_rejects_symlinked_artifact_outside_run_directory(tmp_path) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.write_bytes(b"outside")
+    link = tmp_path / "external.bin"
+    link.symlink_to(outside)
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "artifacts": {"external.bin": sha256_file(outside)},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="escapes the run directory"):
+        validate_study_manifest(manifest_path)
+
+
 def test_study_csv_has_one_row_per_arm_and_preserves_finite_censoring(tmp_path) -> None:
     data = {
         "replicates": [
@@ -145,18 +217,99 @@ def test_study_csv_has_one_row_per_arm_and_preserves_finite_censoring(tmp_path) 
 
 def test_replicate_checkpoint_is_terminal_hashed_and_tamper_evident(tmp_path) -> None:
     checkpoint = tmp_path / "replicate_state" / "seed_31001.json"
+    study_hash = "study-hash"
+    protocol_hash = "protocol-hash"
+    replicate = {"training_seed": 31001, "status": "failed", "failure_reason": "crash"}
     write_replicate_checkpoint(
-        {"training_seed": 31001, "status": "failed", "failure_reason": "crash"},
+        replicate,
         checkpoint,
+        study_hash=study_hash,
+        protocol_hash=protocol_hash,
     )
-    assert read_replicate_checkpoint(checkpoint)["failure_reason"] == "crash"
+    assert read_replicate_checkpoint(
+        checkpoint,
+        study_hash=study_hash,
+        protocol_hash=protocol_hash,
+        training_seed=31001,
+    )["failure_reason"] == "crash"
     original = checkpoint.read_bytes()
     with pytest.raises(FileExistsError):
         write_replicate_checkpoint(
             {"training_seed": 31001, "status": "failed", "failure_reason": "other"},
             checkpoint,
+            study_hash=study_hash,
+            protocol_hash=protocol_hash,
         )
     assert checkpoint.read_bytes() == original
+    with pytest.raises(ValueError, match="study hash mismatch"):
+        read_replicate_checkpoint(
+            checkpoint,
+            study_hash="different-study",
+            protocol_hash=protocol_hash,
+            training_seed=31001,
+        )
+    with pytest.raises(ValueError, match="protocol hash mismatch"):
+        read_replicate_checkpoint(
+            checkpoint,
+            study_hash=study_hash,
+            protocol_hash="different-protocol",
+            training_seed=31001,
+        )
+    with pytest.raises(ValueError, match="identity mismatch"):
+        read_replicate_checkpoint(
+            checkpoint,
+            study_hash=study_hash,
+            protocol_hash=protocol_hash,
+            training_seed=31002,
+        )
     checkpoint.write_text('{"training_seed":31001,"status":"completed"}', encoding="utf-8")
     with pytest.raises(ValueError, match="checksum mismatch"):
-        read_replicate_checkpoint(checkpoint)
+        read_replicate_checkpoint(
+            checkpoint,
+            study_hash=study_hash,
+            protocol_hash=protocol_hash,
+            training_seed=31001,
+        )
+
+
+def test_canonical_study_hash_ignores_mapping_order_and_json_formatting(tmp_path) -> None:
+    left = {"config": {"seed": 31001, "lr": 0.001}, "schedule": [1, 2, 3]}
+    right = {"schedule": [1, 2, 3], "config": {"lr": 0.001, "seed": 31001}}
+    assert canonical_json_bytes(left) == canonical_json_bytes(right)
+    assert make_study_manifest(left)["study_hash"] == make_study_manifest(right)["study_hash"]
+
+    path = tmp_path / "study_manifest.json"
+    digest = write_or_verify_study_manifest(left, path, resume=False)
+    path.write_text(json.dumps(json.loads(path.read_text()), indent=4), encoding="utf-8")
+    assert write_or_verify_study_manifest(right, path, resume=True) == digest
+
+
+def test_study_manifest_material_change_and_tampered_hash_fail_resume(tmp_path) -> None:
+    path = tmp_path / "study_manifest.json"
+    inputs = {"config": {"gamma": 0.99}, "seeds": [1, 2]}
+    write_or_verify_study_manifest(inputs, path, resume=False)
+    with pytest.raises(ValueError, match="study hash mismatch"):
+        write_or_verify_study_manifest(
+            {"config": {"gamma": 0.98}, "seeds": [1, 2]}, path, resume=True
+        )
+
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["study_hash"] = "0" * 64
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(ValueError, match="hash is invalid"):
+        write_or_verify_study_manifest(inputs, path, resume=True)
+
+
+def test_resume_rejects_missing_or_malformed_study_manifest(tmp_path) -> None:
+    path = tmp_path / "study_manifest.json"
+    with pytest.raises(ValueError, match="valid immutable study manifest"):
+        write_or_verify_study_manifest({"a": 1}, path, resume=True)
+    path.write_text("{broken", encoding="utf-8")
+    with pytest.raises(ValueError, match="valid immutable study manifest"):
+        write_or_verify_study_manifest({"a": 1}, path, resume=True)
+
+
+def test_issue271_preregistered_inputs_match_frozen_hashes() -> None:
+    config = load_config("configs/drone_distribution_shift.yaml")
+    assert compute_config_sha256(config) == ISSUE271_CONFIG_SHA256
+    assert sha256_file("docs/research/TREATMENT_CARD.md") == ISSUE271_TREATMENT_CARD_SHA256

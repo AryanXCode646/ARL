@@ -5,9 +5,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
+from adaptive_rl.benchmarking.adaptation_runner import run_adaptation_benchmark
 from adaptive_rl.cli import app
+from adaptive_rl.config import load_config
 from adaptive_rl.protocol.constants import TRAINING_SEEDS
 from adaptive_rl.protocol.seeds import frozen_schedule, schedule_fingerprint
 
@@ -70,3 +73,46 @@ def test_preregistered_study_rejects_subset_before_training(tmp_path: Path) -> N
     )
     assert result.exit_code == 1
     assert "all ten seeds in order" in " ".join(result.output.split())
+
+
+def test_preregistered_study_rejects_changed_scientific_config_before_training() -> None:
+    config = load_config("configs/drone_distribution_shift.yaml")
+    algorithm = config.algorithm.model_copy(update={"learning_rate": 0.0002}, deep=True)
+    changed = config.model_copy(update={"algorithm": algorithm}, deep=True)
+    with pytest.raises(ValueError, match="frozen Issue #271 configuration"):
+        run_adaptation_benchmark(
+            changed,
+            study_run_id="changed-config",
+            training_seeds=TRAINING_SEEDS,
+        )
+
+
+def test_preregistered_study_rejects_deterministic_ppo_rollout_before_training() -> None:
+    with pytest.raises(ValueError, match="not sampled from the behavior distribution"):
+        run_adaptation_benchmark(
+            load_config("configs/drone_distribution_shift.yaml"),
+            study_run_id="deterministic-ppo-rejection",
+            training_seeds=TRAINING_SEEDS,
+        )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"output_dir": Path("/tmp/absolute-study-output")}, "must be relative"),
+        (
+            {"config_path": Path.cwd() / "configs/drone_distribution_shift.yaml"},
+            "config path must be repository-relative",
+        ),
+    ],
+)
+def test_preregistered_study_rejects_nonreproducible_paths_before_training(
+    kwargs: dict[str, Path], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        run_adaptation_benchmark(
+            load_config("configs/drone_distribution_shift.yaml"),
+            study_run_id="invalid-path",
+            training_seeds=TRAINING_SEEDS,
+            **kwargs,
+        )

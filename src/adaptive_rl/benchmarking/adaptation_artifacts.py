@@ -257,6 +257,71 @@ def sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def canonical_json_bytes(value: Any) -> bytes:
+    """Serialize JSON data canonically for semantic study identity."""
+    return json.dumps(
+        _plain(value),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
+
+
+def make_study_manifest(inputs: Mapping[str, Any]) -> dict[str, Any]:
+    """Build the immutable, pre-execution study identity document."""
+    plain_inputs = _plain(inputs)
+    if not isinstance(plain_inputs, dict):
+        raise TypeError("study manifest inputs must be a mapping")
+    return {
+        "schema_version": "1.0",
+        "study_hash": hashlib.sha256(canonical_json_bytes(plain_inputs)).hexdigest(),
+        "inputs": plain_inputs,
+    }
+
+
+def write_or_verify_study_manifest(
+    inputs: Mapping[str, Any], manifest_path: str | Path, *, resume: bool
+) -> str:
+    """Persist the expected study identity or fail closed when resuming."""
+    manifest_path = Path(manifest_path)
+    expected = make_study_manifest(inputs)
+    if resume:
+        try:
+            existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("cannot resume without a valid immutable study manifest") from exc
+        if (
+            not isinstance(existing, dict)
+            or existing.get("schema_version") != "1.0"
+            or not isinstance(existing.get("inputs"), dict)
+        ):
+            raise ValueError("study manifest has an invalid structure")
+        actual_hash = hashlib.sha256(canonical_json_bytes(existing["inputs"])).hexdigest()
+        if existing.get("study_hash") != actual_hash:
+            raise ValueError("study manifest hash is invalid")
+        if actual_hash != expected["study_hash"]:
+            raise ValueError("resume study hash mismatch: execution inputs changed")
+        return actual_hash
+    if manifest_path.exists():
+        raise FileExistsError(f"refusing to overwrite study manifest: {manifest_path}")
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = (json.dumps(expected, indent=2, sort_keys=True, allow_nan=False) + "\n").encode(
+        "utf-8"
+    )
+    fd, temp_name = tempfile.mkstemp(prefix=".study-manifest-", dir=manifest_path.parent)
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(temp_path, manifest_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    return str(expected["study_hash"])
+
+
 def write_study_manifest(
     artifact_path: str | Path,
     csv_path: str | Path,
@@ -306,9 +371,12 @@ def write_study_manifest(
             for name in ("adaptive-rl", "gymnasium", "stable-baselines3", "torch", "numpy")
         },
         "determinism": {
-            "pythonhashseed_env_recorded": False,
+            "pythonhashseed_env": os.environ.get("PYTHONHASHSEED"),
             "torch_deterministic_algorithms": _torch_deterministic_algorithms(),
             "torch_cudnn_deterministic": _torch_cudnn_deterministic(),
+            "torch_num_threads": _torch_num_threads(),
+            "cuda_available": _torch_cuda_available(),
+            "cuda_device_count": _torch_cuda_device_count(),
             "protocol_seed_schedule": "SHA-256 derived seeds; see adaptive_vs_fixed.json",
         },
         "artifacts": {
@@ -317,6 +385,10 @@ def write_study_manifest(
             if path.is_file() and path != manifest_path
         },
     }
+    study_spec_path = manifest_path.parent / "study_manifest.json"
+    if study_spec_path.is_file():
+        study_spec = json.loads(study_spec_path.read_text(encoding="utf-8"))
+        manifest["study_hash"] = study_spec.get("study_hash")
     plain = _plain(manifest)
     encoded = json.dumps(plain, indent=2, allow_nan=False) + "\n"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -337,25 +409,68 @@ def validate_study_manifest(manifest_path: str | Path) -> None:
     """Raise when a listed immutable run artifact is missing or has changed."""
     manifest_path = Path(manifest_path)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != "1.0":
+        raise ValueError("unsupported or malformed study artifact manifest")
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict) or not artifacts:
         raise ValueError("manifest must list at least one artifact checksum")
     for relative_path, expected in artifacts.items():
-        path = manifest_path.parent / relative_path
+        if (
+            not isinstance(relative_path, str)
+            or not isinstance(expected, str)
+            or len(expected) != 64
+            or any(character not in "0123456789abcdef" for character in expected)
+        ):
+            raise ValueError("manifest contains an invalid artifact path or SHA-256 digest")
+        relative = Path(relative_path)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"manifest artifact path escapes the run directory: {relative_path}")
+        path = manifest_path.parent / relative
+        try:
+            path.resolve().relative_to(manifest_path.parent.resolve())
+        except (OSError, ValueError) as exc:
+            raise ValueError(
+                f"manifest artifact path escapes the run directory: {relative_path}"
+            ) from exc
         if not path.is_file():
             raise ValueError(f"manifest artifact is missing: {relative_path}")
         actual = sha256_file(path)
         if actual != expected:
             raise ValueError(f"manifest checksum mismatch: {relative_path}")
+    if "study_hash" in manifest:
+        spec_path = manifest_path.parent / "study_manifest.json"
+        if not spec_path.is_file() or "study_manifest.json" not in artifacts:
+            raise ValueError("study artifact manifest does not bind its pre-execution study spec")
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        if not isinstance(spec, dict) or not isinstance(spec.get("inputs"), dict):
+            raise ValueError("pre-execution study manifest is malformed")
+        actual_study_hash = hashlib.sha256(canonical_json_bytes(spec["inputs"])).hexdigest()
+        if spec.get("study_hash") != actual_study_hash or manifest.get("study_hash") != actual_study_hash:
+            raise ValueError("study artifact manifest hash does not match its pre-execution spec")
 
 
-def write_replicate_checkpoint(replicate: Mapping[str, Any], checkpoint_path: str | Path) -> None:
-    """Persist one terminal replicate result and a digest without overwriting."""
+def write_replicate_checkpoint(
+    replicate: Mapping[str, Any],
+    checkpoint_path: str | Path,
+    *,
+    study_hash: str,
+    protocol_hash: str,
+) -> None:
+    """Persist a terminal replicate bound to its study and replicate identity."""
     checkpoint_path = Path(checkpoint_path)
     if replicate.get("status") not in {"completed", "failed"}:
         raise ValueError("only terminal replicate states may be checkpointed")
     plain = _plain(dict(replicate))
-    encoded = (json.dumps(plain, indent=2, allow_nan=False) + "\n").encode("utf-8")
+    envelope = {
+        "schema_version": "1.0",
+        "study_hash": study_hash,
+        "protocol_hash": protocol_hash,
+        "replicate_id": plain.get("training_seed"),
+        "replicate": plain,
+    }
+    encoded = (json.dumps(envelope, indent=2, sort_keys=True, allow_nan=False) + "\n").encode(
+        "utf-8"
+    )
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=".replicate-", dir=checkpoint_path.parent)
     temp_path = Path(temp_name)
@@ -389,8 +504,14 @@ def write_replicate_checkpoint(replicate: Mapping[str, Any], checkpoint_path: st
         temp_path.unlink(missing_ok=True)
 
 
-def read_replicate_checkpoint(checkpoint_path: str | Path) -> dict[str, Any]:
-    """Read only a terminal checkpoint whose adjacent digest verifies."""
+def read_replicate_checkpoint(
+    checkpoint_path: str | Path,
+    *,
+    study_hash: str,
+    protocol_hash: str,
+    training_seed: int,
+) -> dict[str, Any]:
+    """Read a terminal checkpoint after digest, study, protocol, and ID checks."""
     checkpoint_path = Path(checkpoint_path)
     digest_path = checkpoint_path.with_suffix(checkpoint_path.suffix + ".sha256")
     payload = checkpoint_path.read_bytes()
@@ -400,7 +521,21 @@ def read_replicate_checkpoint(checkpoint_path: str | Path) -> dict[str, Any]:
     actual = hashlib.sha256(payload).hexdigest()
     if actual != expected:
         raise ValueError(f"replicate checkpoint checksum mismatch: {checkpoint_path.name}")
-    result = json.loads(payload)
+    envelope = json.loads(payload)
+    if (
+        not isinstance(envelope, dict)
+        or envelope.get("schema_version") != "1.0"
+        or not isinstance(envelope.get("replicate"), dict)
+    ):
+        raise ValueError("replicate checkpoint envelope is malformed")
+    if envelope.get("study_hash") != study_hash:
+        raise ValueError("replicate checkpoint study hash mismatch")
+    if envelope.get("protocol_hash") != protocol_hash:
+        raise ValueError("replicate checkpoint protocol hash mismatch")
+    replicate = envelope["replicate"]
+    if envelope.get("replicate_id") != training_seed or replicate.get("training_seed") != training_seed:
+        raise ValueError("replicate checkpoint identity mismatch")
+    result = replicate
     if result.get("status") not in {"completed", "failed"}:
         raise ValueError("replicate checkpoint is not terminal")
     return cast(dict[str, Any], result)
@@ -431,6 +566,33 @@ def _torch_cudnn_deterministic() -> bool | None:
         return None
 
 
+def _torch_num_threads() -> int | None:
+    try:
+        import torch
+
+        return int(torch.get_num_threads())
+    except ImportError:
+        return None
+
+
+def _torch_cuda_available() -> bool | None:
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available())
+    except ImportError:
+        return None
+
+
+def _torch_cuda_device_count() -> int | None:
+    try:
+        import torch
+
+        return int(torch.cuda.device_count())
+    except ImportError:
+        return None
+
+
 def _write_csv(handle: Any, artifact: Mapping[str, Any]) -> None:
     writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS, extrasaction="raise")
     writer.writeheader()
@@ -440,11 +602,14 @@ def _write_csv(handle: Any, artifact: Mapping[str, Any]) -> None:
 __all__ = [
     "CSV_FIELDS",
     "STUDY_CSV_FIELDS",
+    "canonical_json_bytes",
+    "make_study_manifest",
     "sha256_file",
     "read_replicate_checkpoint",
     "validate_study_manifest",
     "write_adaptation_artifacts",
     "write_adaptive_vs_fixed_artifacts",
     "write_replicate_checkpoint",
+    "write_or_verify_study_manifest",
     "write_study_manifest",
 ]

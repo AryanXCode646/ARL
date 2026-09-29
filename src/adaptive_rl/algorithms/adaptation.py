@@ -52,9 +52,17 @@ def _logger_ready(model: Any) -> Iterator[None]:
     old_logger = getattr(model, "_logger", None)
     if not had_logger:
         model.set_logger(Logger(folder=None, output_formats=[]))
+    logger = getattr(model, "logger", None)
+    old_values = dict(getattr(logger, "name_to_value", {}))
+    recorded_values = getattr(logger, "name_to_value", None)
+    if isinstance(recorded_values, dict):
+        recorded_values.clear()
     try:
         yield
     finally:
+        if isinstance(recorded_values, dict):
+            recorded_values.clear()
+            recorded_values.update(old_values)
         if had_logger:
             model._logger = old_logger
         else:

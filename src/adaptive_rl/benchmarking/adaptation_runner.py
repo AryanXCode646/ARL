@@ -6,6 +6,7 @@ import hashlib
 import importlib.metadata
 import json
 import logging
+import os
 import platform
 import subprocess
 import sys
@@ -24,9 +25,12 @@ from adaptive_rl.algorithms.adaptation import (
     run_adaptation_update,
 )
 from adaptive_rl.benchmarking.adaptation_artifacts import (
+    canonical_json_bytes,
     read_replicate_checkpoint,
+    validate_study_manifest,
     write_adaptation_artifacts,
     write_adaptive_vs_fixed_artifacts,
+    write_or_verify_study_manifest,
     write_replicate_checkpoint,
     write_study_manifest,
 )
@@ -40,7 +44,14 @@ from adaptive_rl.protocol.adaptation import (
     build_update_batch,
     validate_block_sequence,
 )
-from adaptive_rl.protocol.constants import K_PRE, N_POST, PRIMARY_CELLS, TRAINING_SEEDS
+from adaptive_rl.protocol.constants import (
+    ISSUE271_CONFIG_SHA256,
+    ISSUE271_TREATMENT_CARD_SHA256,
+    K_PRE,
+    N_POST,
+    PRIMARY_CELLS,
+    TRAINING_SEEDS,
+)
 from adaptive_rl.protocol.fork import fork_adaptive_and_fixed, model_fingerprint
 from adaptive_rl.protocol.recovery import compute_recovery
 from adaptive_rl.protocol.seeds import frozen_schedule, schedule_fingerprint
@@ -76,7 +87,34 @@ def _repository_metadata() -> dict[str, Any]:
             versions[distribution] = importlib.metadata.version(distribution)
         except importlib.metadata.PackageNotFoundError:
             versions[distribution] = None
-    return {"repository_commit": commit, "working_tree_dirty": dirty, "runtime_versions": versions}
+    runtime_settings: dict[str, Any] = {
+        name: os.environ.get(name)
+        for name in (
+            "PYTHONHASHSEED",
+            "CUBLAS_WORKSPACE_CONFIG",
+            "CUDA_VISIBLE_DEVICES",
+            "OMP_NUM_THREADS",
+            "MKL_NUM_THREADS",
+            "OPENBLAS_NUM_THREADS",
+        )
+    }
+    runtime_settings.update(
+        {
+            "torch_num_threads": torch.get_num_threads(),
+            "cuda_available": torch.cuda.is_available(),
+            "cuda_device_count": torch.cuda.device_count(),
+            "cuda_device_names": [
+                torch.cuda.get_device_name(index)
+                for index in range(torch.cuda.device_count())
+            ],
+        }
+    )
+    return {
+        "repository_commit": commit,
+        "working_tree_dirty": dirty,
+        "runtime_versions": versions,
+        "runtime_settings": runtime_settings,
+    }
 
 
 def _sha256_file(path: Path) -> str:
@@ -569,6 +607,16 @@ def run_adaptation_benchmark(
         raise ValueError("Issue #265 supports only PPO and SAC")
     if config.training is None:
         raise ValueError("Issue #265 requires a training section")
+    card = _card_path()
+    if not card.is_file():
+        raise FileNotFoundError(f"Treatment Card is required before experiment execution: {card}")
+    card_sha = _sha256_file(card)
+    repository_root = Path.cwd().resolve()
+    config_arg = (
+        Path(config_path).as_posix()
+        if config_path is not None
+        else "configs/drone_distribution_shift.yaml"
+    )
     schedule = frozen_schedule()
     schedule_fp = schedule_fingerprint(schedule)
     if training_seeds is None:
@@ -588,6 +636,30 @@ def run_adaptation_benchmark(
             raise ValueError("prereg-v1 requires one non-smoke attempt of all ten seeds in order")
         if output_dir is not None and Path(output_dir).is_absolute():
             raise ValueError("prereg-v1 artifact output_dir must be relative to the repository")
+        selected_output_dir = Path(output_dir) if output_dir is not None else Path(config.output_dir)
+        try:
+            selected_output_dir.resolve().relative_to(repository_root)
+        except ValueError as exc:
+            raise ValueError("prereg-v1 artifact output_dir must stay inside the repository") from exc
+        if Path(config_arg).is_absolute():
+            raise ValueError("prereg-v1 config path must be repository-relative")
+        try:
+            (repository_root / config_arg).resolve().relative_to(repository_root)
+        except ValueError as exc:
+            raise ValueError("prereg-v1 config path must stay inside the repository") from exc
+        if config.algorithm.name.strip().lower() != "ppo":
+            raise ValueError("prereg-v1 is frozen to the drone_disturbed/ppo cell")
+        if config.environment.name != "drone_disturbed" or benchmark.scenario != "TEST-B":
+            raise ValueError("prereg-v1 is frozen to drone_disturbed under TEST-B")
+        if compute_config_sha256(config) != ISSUE271_CONFIG_SHA256:
+            raise ValueError("prereg-v1 config differs from the frozen Issue #271 configuration")
+        if card_sha != ISSUE271_TREATMENT_CARD_SHA256:
+            raise ValueError("prereg-v1 Treatment Card differs from the frozen treatment")
+        if config.evaluation.deterministic:
+            raise ValueError(
+                "prereg-v1 cannot run native PPO adaptation with deterministic mean actions; "
+                "the recorded actions are not sampled from the behavior distribution"
+            )
         try:
             dirty = subprocess.check_output(
                 ["git", "status", "--porcelain"], text=True, stderr=subprocess.DEVNULL
@@ -602,10 +674,6 @@ def run_adaptation_benchmark(
     else:
         determinism = None
 
-    card = _card_path()
-    if not card.is_file():
-        raise FileNotFoundError(f"Treatment Card is required before experiment execution: {card}")
-    card_sha = _sha256_file(card)
     config_file = Path(config_path).resolve() if config_path is not None else None
     config_file_sha = _sha256_file(config_file) if config_file is not None else None
 
@@ -615,9 +683,63 @@ def run_adaptation_benchmark(
     target_dir.mkdir(parents=True, exist_ok=True)
     stem = "adaptive_vs_fixed" if study_run_id is not None else "adaptation"
     suffixes = (f"{stem}.json", f"{stem}.csv")
-    for suffix in (*suffixes, "manifest.json"):
-        if (target_dir / suffix).exists():
-            raise FileExistsError(f"refusing to overwrite existing artifact: {target_dir / suffix}")
+    study_hash: str | None = None
+    protocol_hash: str | None = None
+    if study_run_id is not None:
+        runtime_identity = _repository_metadata()
+        study_inputs = {
+            "study": "adaptive-vs-fixed/prereg-v1",
+            "study_config": config.model_dump(
+                mode="json", exclude={"output_dir", "log_dir"}
+            ),
+            "canonical_config_sha256": compute_config_sha256(config),
+            "treatment_card_sha256": card_sha,
+            "protocol_version": benchmark.protocol_version,
+            "protocol_constants": {
+                "pre_episodes": K_PRE,
+                "post_episodes": N_POST,
+                "training_seeds": list(TRAINING_SEEDS),
+                "schedule": schedule,
+                "schedule_fingerprint": schedule_fp,
+            },
+            "source_identity": runtime_identity,
+            "runtime_determinism": determinism,
+        }
+        study_hash = write_or_verify_study_manifest(
+            study_inputs, target_dir / "study_manifest.json", resume=resume
+        )
+        protocol_hash = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "protocol_version": benchmark.protocol_version,
+                    "treatment_card_sha256": card_sha,
+                    "protocol_constants": study_inputs["protocol_constants"],
+                }
+            )
+        ).hexdigest()
+        final_paths = [target_dir / suffix for suffix in (*suffixes, "manifest.json")]
+        if resume and all(path.is_file() for path in final_paths):
+            validate_study_manifest(final_paths[-1])
+            try:
+                completed_artifact = json.loads(final_paths[0].read_text(encoding="utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError("completed study artifact is malformed") from exc
+            if (
+                not isinstance(completed_artifact, dict)
+                or completed_artifact.get("run_id") != study_run_id
+                or completed_artifact.get("study_hash") != study_hash
+            ):
+                raise ValueError("completed study artifact does not match the expected study hash")
+            return completed_artifact
+        for path in final_paths:
+            if path.exists():
+                raise FileExistsError(
+                    f"refusing to overwrite existing artifact or partial completion: {path}"
+                )
+    else:
+        for suffix in (*suffixes, "manifest.json"):
+            if (target_dir / suffix).exists():
+                raise FileExistsError(f"refusing to overwrite existing artifact: {target_dir / suffix}")
     training_root = target_dir / "training"
     state_root = target_dir / "replicate_state"
     if study_run_id is not None and state_root.exists() and not resume:
@@ -633,9 +755,13 @@ def run_adaptation_benchmark(
         checkpoint_path = state_root / f"seed_{seed}.json"
         if study_run_id is not None and resume and checkpoint_path.exists():
             try:
-                checkpoint = read_replicate_checkpoint(checkpoint_path)
-                if checkpoint.get("training_seed") != seed:
-                    raise ValueError("replicate checkpoint seed does not match schedule position")
+                assert study_hash is not None and protocol_hash is not None
+                checkpoint = read_replicate_checkpoint(
+                    checkpoint_path,
+                    study_hash=study_hash,
+                    protocol_hash=protocol_hash,
+                    training_seed=seed,
+                )
                 results.append(_restore_replicate(checkpoint))
             except (OSError, TypeError, ValueError, KeyError) as exc:
                 failed = ReplicateResult(
@@ -668,7 +794,13 @@ def run_adaptation_benchmark(
         )
         results.append(replicate)
         if study_run_id is not None:
-            write_replicate_checkpoint(replicate.to_dict(), state_root / f"seed_{seed}.json")
+            assert study_hash is not None and protocol_hash is not None
+            write_replicate_checkpoint(
+                replicate.to_dict(),
+                state_root / f"seed_{seed}.json",
+                study_hash=study_hash,
+                protocol_hash=protocol_hash,
+            )
 
     vectors: dict[str, tuple[list[Optional[float]], list[Optional[float]]]] = {}
     for cell in PRIMARY_CELLS:
@@ -728,6 +860,7 @@ def run_adaptation_benchmark(
     artifact: dict[str, Any] = {
         "schema_version": "1.0",
         "run_id": study_run_id,
+        "study_hash": study_hash,
         "run_status": run_status if study_run_id is not None else None,
         "protocol_version": benchmark.protocol_version,
         "issue": "271" if study_run_id is not None else "265",
@@ -804,13 +937,6 @@ def run_adaptation_benchmark(
         **({"manifest": str(target_dir / "manifest.json")} if study_run_id else {}),
     }
     if study_run_id is not None:
-        config_arg = (
-            Path(config_path).as_posix()
-            if config_path is not None
-            else "configs/drone_distribution_shift.yaml"
-        )
-        if Path(config_arg).is_absolute():
-            raise ValueError("prereg-v1 config path must be repository-relative")
         output_arg = f"--output-dir {Path(output_dir)} " if output_dir is not None else ""
         executable = Path(sys.argv[0])
         try:
