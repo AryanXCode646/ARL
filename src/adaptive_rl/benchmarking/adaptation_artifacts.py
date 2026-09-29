@@ -12,7 +12,7 @@ import platform
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, cast
 
 import numpy as np
 
@@ -349,6 +349,63 @@ def validate_study_manifest(manifest_path: str | Path) -> None:
             raise ValueError(f"manifest checksum mismatch: {relative_path}")
 
 
+def write_replicate_checkpoint(replicate: Mapping[str, Any], checkpoint_path: str | Path) -> None:
+    """Persist one terminal replicate result and a digest without overwriting."""
+    checkpoint_path = Path(checkpoint_path)
+    if replicate.get("status") not in {"completed", "failed"}:
+        raise ValueError("only terminal replicate states may be checkpointed")
+    plain = _plain(dict(replicate))
+    encoded = (json.dumps(plain, indent=2, allow_nan=False) + "\n").encode("utf-8")
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=".replicate-", dir=checkpoint_path.parent)
+    temp_path = Path(temp_name)
+    digest_path = checkpoint_path.with_suffix(checkpoint_path.suffix + ".sha256")
+    installed_checkpoint = False
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(temp_path, checkpoint_path)
+        installed_checkpoint = True
+        digest = hashlib.sha256(encoded).hexdigest()
+        digest_temp_fd, digest_temp_name = tempfile.mkstemp(
+            prefix=".replicate-digest-", dir=checkpoint_path.parent
+        )
+        digest_temp_path = Path(digest_temp_name)
+        try:
+            with os.fdopen(digest_temp_fd, "w", encoding="ascii") as handle:
+                handle.write(f"{digest}\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.link(digest_temp_path, digest_path)
+        finally:
+            digest_temp_path.unlink(missing_ok=True)
+    except BaseException:
+        if installed_checkpoint:
+            checkpoint_path.unlink(missing_ok=True)
+        raise
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def read_replicate_checkpoint(checkpoint_path: str | Path) -> dict[str, Any]:
+    """Read only a terminal checkpoint whose adjacent digest verifies."""
+    checkpoint_path = Path(checkpoint_path)
+    digest_path = checkpoint_path.with_suffix(checkpoint_path.suffix + ".sha256")
+    payload = checkpoint_path.read_bytes()
+    if not digest_path.is_file():
+        raise ValueError(f"replicate checkpoint digest is missing: {checkpoint_path.name}")
+    expected = digest_path.read_text(encoding="ascii").strip()
+    actual = hashlib.sha256(payload).hexdigest()
+    if actual != expected:
+        raise ValueError(f"replicate checkpoint checksum mismatch: {checkpoint_path.name}")
+    result = json.loads(payload)
+    if result.get("status") not in {"completed", "failed"}:
+        raise ValueError("replicate checkpoint is not terminal")
+    return cast(dict[str, Any], result)
+
+
 def _distribution_version(name: str) -> str | None:
     try:
         return importlib.metadata.version(name)
@@ -384,8 +441,10 @@ __all__ = [
     "CSV_FIELDS",
     "STUDY_CSV_FIELDS",
     "sha256_file",
+    "read_replicate_checkpoint",
     "validate_study_manifest",
     "write_adaptation_artifacts",
     "write_adaptive_vs_fixed_artifacts",
+    "write_replicate_checkpoint",
     "write_study_manifest",
 ]

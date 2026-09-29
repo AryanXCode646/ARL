@@ -24,8 +24,10 @@ from adaptive_rl.algorithms.adaptation import (
     run_adaptation_update,
 )
 from adaptive_rl.benchmarking.adaptation_artifacts import (
+    read_replicate_checkpoint,
     write_adaptation_artifacts,
     write_adaptive_vs_fixed_artifacts,
+    write_replicate_checkpoint,
     write_study_manifest,
 )
 from adaptive_rl.benchmarking.adaptation_runtime import EpisodeRecord, evaluate_episode
@@ -34,6 +36,7 @@ from adaptive_rl.config import ExperimentConfig, compute_config_sha256
 from adaptive_rl.environments.registry import make_env
 from adaptive_rl.protocol.adaptation import (
     AdaptationAdapter,
+    Transition,
     build_update_batch,
     validate_block_sequence,
 )
@@ -336,6 +339,27 @@ class ReplicateResult:
         return asdict(self)
 
 
+def _restore_replicate(data: dict[str, Any]) -> ReplicateResult:
+    """Restore only records already accepted by the checkpoint digest check."""
+    episode_fields = (
+        "shared_pre_shift_episodes",
+        "shared_shock_episodes",
+        "adaptive_episodes",
+        "fixed_episodes",
+    )
+    restored = dict(data)
+    for field_name in episode_fields:
+        episodes = []
+        for episode_data in restored.get(field_name, []):
+            episode = dict(episode_data)
+            episode["transitions"] = tuple(
+                Transition(**transition) for transition in episode.get("transitions", [])
+            )
+            episodes.append(EpisodeRecord(**episode))
+        restored[field_name] = episodes
+    return ReplicateResult(**restored)
+
+
 def _run_replicate(
     config: ExperimentConfig,
     training_seed: int,
@@ -530,6 +554,7 @@ def run_adaptation_benchmark(
     environment_factory: EnvironmentFactory = make_env,
     config_path: str | Path | None = None,
     study_run_id: str | None = None,
+    resume: bool = False,
 ) -> dict[str, Any]:
     """Run the selected preregistered replicates and write JSON/CSV artifacts.
 
@@ -594,22 +619,56 @@ def run_adaptation_benchmark(
         if (target_dir / suffix).exists():
             raise FileExistsError(f"refusing to overwrite existing artifact: {target_dir / suffix}")
     training_root = target_dir / "training"
-    for seed in selected_seeds:
-        if (training_root / f"seed_{seed}").exists():
-            raise FileExistsError(f"refusing to overwrite training output for seed {seed}")
+    state_root = target_dir / "replicate_state"
+    if study_run_id is not None and state_root.exists() and not resume:
+        raise FileExistsError("run state already exists; pass --resume to use hashed replicates")
+    if study_run_id is None:
+        for seed in selected_seeds:
+            if (training_root / f"seed_{seed}").exists():
+                raise FileExistsError(f"refusing to overwrite training output for seed {seed}")
 
-    results = [
-        _run_replicate(
+    results: list[ReplicateResult] = []
+    for seed in selected_seeds:
+        training_dir = training_root / f"seed_{seed}"
+        checkpoint_path = state_root / f"seed_{seed}.json"
+        if study_run_id is not None and resume and checkpoint_path.exists():
+            try:
+                checkpoint = read_replicate_checkpoint(checkpoint_path)
+                if checkpoint.get("training_seed") != seed:
+                    raise ValueError("replicate checkpoint seed does not match schedule position")
+                results.append(_restore_replicate(checkpoint))
+            except (OSError, TypeError, ValueError, KeyError) as exc:
+                failed = ReplicateResult(
+                    training_seed=seed,
+                    status="failed",
+                    failure_reason=f"untrusted replicate checkpoint: {type(exc).__name__}: {exc}",
+                )
+                results.append(failed)
+            continue
+        if study_run_id is not None and resume and training_dir.exists():
+            results.append(
+                ReplicateResult(
+                    training_seed=seed,
+                    status="failed",
+                    failure_reason=(
+                        "interrupted replicate has no complete hashed checkpoint; "
+                        "partial training state was not trusted"
+                    ),
+                )
+            )
+            continue
+        replicate = _run_replicate(
             config,
             seed,
-            training_root / f"seed_{seed}",
+            training_dir,
             schedule=schedule,
             smoke=smoke,
             trainer_factory=trainer_factory,
             environment_factory=environment_factory,
         )
-        for seed in selected_seeds
-    ]
+        results.append(replicate)
+        if study_run_id is not None:
+            write_replicate_checkpoint(replicate.to_dict(), state_root / f"seed_{seed}.json")
 
     vectors: dict[str, tuple[list[Optional[float]], list[Optional[float]]]] = {}
     for cell in PRIMARY_CELLS:
@@ -753,8 +812,13 @@ def run_adaptation_benchmark(
         if Path(config_arg).is_absolute():
             raise ValueError("prereg-v1 config path must be repository-relative")
         output_arg = f"--output-dir {Path(output_dir)} " if output_dir is not None else ""
+        executable = Path(sys.argv[0])
+        try:
+            executable_arg = executable.resolve().relative_to(Path.cwd().resolve()).as_posix()
+        except (OSError, ValueError):
+            executable_arg = executable.name
         command = (
-            "adaptive-rl benchmark adaptation "
+            f"{executable_arg} benchmark adaptation "
             f"--config {config_arg} {output_arg}"
             f"--study prereg-v1 --run-id {study_run_id}"
         )

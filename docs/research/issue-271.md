@@ -24,8 +24,12 @@ analysis plan. The treatment is specified by
 The `adaptive-rl benchmark adaptation --study prereg-v1 --run-id RUN_ID`
 entrypoint runs all ten training seeds in preregistered order, rejects subsets
 and smoke mode, requires a clean committed tree, and writes into an immutable
-run directory. A repeated run ID is refused. The JSON stores the raw trajectories,
-protocol analysis, seed schedule, outcomes, runtime invariants, and run status.
+run directory. A repeated completed run ID is refused. `--resume` accepts only
+terminal per-replicate records whose SHA-256 sidecar verifies; it never trusts
+partial training directories. An interrupted seed without a complete checkpoint
+is recorded as failed, and remaining unstarted seeds continue. The JSON stores
+the raw trajectories, protocol analysis, seed schedule, outcomes, runtime
+invariants, and run status.
 The CSV has one row per replicate and arm, with finite-horizon `T_H`, status,
 per-episode return vectors, and seed vectors. `manifest.json` checksums every
 file in the run directory; `validate_study_manifest()` detects missing or
@@ -72,7 +76,9 @@ could not be independently verified. No dependency on unmerged code is used.
 
 ## Execution record
 
-Execution status: **PENDING**. Do not interpret smoke tests as study results.
+Execution status: **COMPLETE** for this one-cell, ten-replicate study. The
+preregistered six-cell family remains **INCONCLUSIVE** because five cells are
+not executable in this checkout. These data do not support H1.
 
 The intended single execution command is:
 
@@ -86,6 +92,61 @@ The intended single execution command is:
 
 The runner enables Torch deterministic algorithms in warn-only mode and cuDNN
 deterministic settings for the study, while recording that cross-hardware and
-cross-library bitwise reproducibility is not claimed. Full run timing, host
-details, commit SHA, status, artifact paths, and artifact digests will be added
-after the execution attempt.
+cross-library bitwise reproducibility is not claimed.
+
+* Run ID: `issue271-prereg-v1-20260929-01`
+* Run status: `COMPLETE`; 10 completed, 0 failed, ordered seeds 31001–31010.
+* Executed commit: `a5250ffa5efaedaf76ad88c398f9087eb5ef49ca`; clean tree.
+* Wall time: approximately 17 minutes 50 seconds (run-directory creation to
+  manifest creation); summed PPO training time was 939.38 seconds.
+* Hardware/runtime: Linux x86_64, 4 logical CPUs, Python 3.14.7, gymnasium
+  1.3.0, stable-baselines3 2.9.0, Torch 2.14.0, NumPy 2.5.3. The platform
+  reported no processor model.
+* Artifacts: `artifacts/issue271/issue271-prereg-v1-20260929-01/`
+  * `adaptive_vs_fixed.json` SHA-256:
+    `e7b681d875e8fdfdcc56acada44a34062ac05c92e8881b16c8a3354633b79265`
+  * `adaptive_vs_fixed.csv` SHA-256:
+    `4d2879f08cf6caa67585576bc67c2cf0d699b617ee8260849c10b7ae7e7ce098`
+  * `manifest.json` SHA-256:
+    `bb5c3e6f5150a329aecca114dfd47f50366d99ddb1c3e84c515f6fa7d5d480ec`
+* Config SHA-256: `0039c298b5048254b2d211cc66967e9d3e1d71275575fcfe28736485c65937b5`.
+  Treatment Card SHA-256: `8383e736f02ff31393474b241b06d2dc92b036910c93c26081c1673c92a317e3`.
+* Independent audit verified the exact seed list and frozen schedule fingerprint,
+  ten passing invariant records, all 100 B5–B14 blocks, 20 tidy CSV rows,
+  all manifest-listed checksums, and no `/home/aryan` path in the JSON.
+
+The run predates the follow-up safe-resume addition; it executed from the clean
+source commit recorded by the manifest and was not resumed. The artifact's
+`execution_command` is normalized to `adaptive-rl` because the entrypoint
+records the command's CLI form; the exact shell invocation above includes the
+virtual-environment path used to select the installed executable.
+
+## Result from the artifact
+
+For every seed, both arms had `T_H = 0`: 4 replicates were `no_degradation` and
+6 were `degradation_below_resolution` in each arm. There were no recovered or
+right-censored replicates and no failures. Thus the censoring count was zero;
+the finite right-censor endpoint remains `T_H = 15` by protocol.
+
+The paired differences were ten zeros. The artifact reports `N_valid = 10`,
+mean difference 0, standard error 0, one-sided paired t statistic 0 on 9 df,
+primary p = 0.5, 95% t interval [0, 0], Cohen's `d_z = 0`, exact sign p = 1,
+exact Wilcoxon p = 1, and bootstrap interval [0, 0]. The cell is evaluable but
+not significant. The six-cell family decision is `INCONCLUSIVE`; no family
+claim is made.
+
+## Final acceptance status
+
+| Acceptance area | Status | Evidence |
+|---|---|---|
+| Ten preregistered PPO replicates and seeds | PASS | JSON seed list, schedule fingerprint, 10 completed records |
+| Shared segments, identical fork, fixed lock, ten causal update blocks | PASS | Every replicate's `invariants.all_passed`; mutation coverage in `tests/test_adaptation_invariants.py` |
+| Recovery and preregistered paired analyses | PASS | Per-replicate recovery plus `paired_analysis` in JSON |
+| Immutable JSON/CSV and validated checksums | PASS | 20-row CSV; `manifest.json`; `validate_study_manifest()` |
+| Safe continuation after interruption | PASS in follow-up code | Digest-verified terminal replicate checkpoints; incomplete directories become recorded failures |
+| Statistical superiority of Adaptive | FAIL | All observed paired differences are zero; p = 0.5 |
+| Six-cell family claim / power ≥ 0.80 | NOT MET | Five cells unavailable; preregistration says power is unquantified at N = 10 |
+
+PR #266 and roadmap issues 4/5 remain unverified live because GitHub was not
+available. The run does not depend on them. This is a one-cell study, not
+evidence for the broader multi-environment claim.

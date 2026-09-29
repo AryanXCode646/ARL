@@ -50,3 +50,23 @@ def test_cli_adaptation_smoke_runs_complete_protocol_and_writes_artifacts(tmp_pa
     assert replicate["fixed_final_fingerprint"] == replicate["frozen_fingerprint"]
     assert artifact["paired_analysis"]["drone_disturbed/ppo"]["status"] == "inconclusive"
     assert (output_dir / "adaptation.csv").is_file()
+
+
+def test_preregistered_study_rejects_subset_before_training(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        app,
+        [
+            "benchmark",
+            "adaptation",
+            "--study",
+            "prereg-v1",
+            "--run-id",
+            "subset-rejection",
+            "--training-seeds",
+            "31001",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "all ten seeds in order" in " ".join(result.output.split())

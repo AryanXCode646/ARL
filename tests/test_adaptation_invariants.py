@@ -8,6 +8,7 @@ import pytest
 
 from adaptive_rl.benchmarking.adaptation_runner import (
     _audit_replicate_invariants,
+    _restore_replicate,
     _return_vector_fingerprint,
 )
 from adaptive_rl.protocol.constants import TRAINING_SEEDS
@@ -83,3 +84,16 @@ def test_each_preregistered_invariant_violation_fails_audit(
     audit = _audit_replicate_invariants(replicate, schedule)
     assert audit[failed_check] is False
     assert audit["all_passed"] is False
+
+
+def test_replicate_restore_reconstructs_terminal_state() -> None:
+    restored = _restore_replicate(
+        {
+            "training_seed": 31001,
+            "status": "failed",
+            "failure_reason": "recorded failure",
+        }
+    )
+    assert restored.training_seed == 31001
+    assert restored.status == "failed"
+    assert restored.failure_reason == "recorded failure"

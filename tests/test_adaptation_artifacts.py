@@ -9,10 +9,12 @@ import numpy as np
 import pytest
 
 from adaptive_rl.benchmarking.adaptation_artifacts import (
+    read_replicate_checkpoint,
     sha256_file,
     validate_study_manifest,
     write_adaptation_artifacts,
     write_adaptive_vs_fixed_artifacts,
+    write_replicate_checkpoint,
     write_study_manifest,
 )
 
@@ -139,3 +141,22 @@ def test_study_csv_has_one_row_per_arm_and_preserves_finite_censoring(tmp_path) 
     assert [row["T_H"] for row in rows] == ["15", "15"]
     assert [row["recovery_status"] for row in rows] == ["right_censored"] * 2
     assert json.loads(rows[0]["post_returns"]) == [2.0, 3.0]
+
+
+def test_replicate_checkpoint_is_terminal_hashed_and_tamper_evident(tmp_path) -> None:
+    checkpoint = tmp_path / "replicate_state" / "seed_31001.json"
+    write_replicate_checkpoint(
+        {"training_seed": 31001, "status": "failed", "failure_reason": "crash"},
+        checkpoint,
+    )
+    assert read_replicate_checkpoint(checkpoint)["failure_reason"] == "crash"
+    original = checkpoint.read_bytes()
+    with pytest.raises(FileExistsError):
+        write_replicate_checkpoint(
+            {"training_seed": 31001, "status": "failed", "failure_reason": "other"},
+            checkpoint,
+        )
+    assert checkpoint.read_bytes() == original
+    checkpoint.write_text('{"training_seed":31001,"status":"completed"}', encoding="utf-8")
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        read_replicate_checkpoint(checkpoint)
