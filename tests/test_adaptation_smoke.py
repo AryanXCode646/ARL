@@ -15,6 +15,7 @@ from adaptive_rl.benchmarking.adaptation_artifacts import (
     write_study_manifest,
 )
 from adaptive_rl.benchmarking.adaptation_runner import (
+    _load_resume_replicates,
     _read_completed_study_artifact,
     _resume_replicate_checkpoint,
     run_adaptation_benchmark,
@@ -170,6 +171,22 @@ def test_checkpoint_resume_helper_rejects_corrupted_terminal_record(
             study_hash="expected-study",
             protocol_hash="expected-protocol",
             training_seed=TRAINING_SEEDS[0],
+        )
+
+
+def test_resume_preflight_rejects_orphan_checkpoint_digest_before_training(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "replicate_state"
+    state_root.mkdir()
+    (state_root / "seed_31001.json.sha256").write_text("0" * 64, encoding="ascii")
+
+    with pytest.raises(ValueError, match="checkpoint or digest is missing for seed 31001"):
+        _load_resume_replicates(
+            state_root,
+            study_hash="study",
+            protocol_hash="protocol",
+            training_seeds=(TRAINING_SEEDS[0], TRAINING_SEEDS[1]),
         )
 
 

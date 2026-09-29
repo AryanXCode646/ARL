@@ -12,9 +12,13 @@ import platform
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Iterable, Mapping, cast
+from typing import Any, Iterable, Mapping, Sequence, cast
 
 import numpy as np
+
+STUDY_MANIFEST_SCHEMA_VERSION = "1.0"
+STUDY_ARTIFACT_SCHEMA_VERSION = "1.0"
+REPLICATE_CHECKPOINT_SCHEMA_VERSION = "1.1"
 
 CSV_FIELDS = (
     "replicate_index",
@@ -274,7 +278,7 @@ def make_study_manifest(inputs: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(plain_inputs, dict):
         raise TypeError("study manifest inputs must be a mapping")
     return {
-        "schema_version": "1.0",
+        "schema_version": STUDY_MANIFEST_SCHEMA_VERSION,
         "study_hash": hashlib.sha256(canonical_json_bytes(plain_inputs)).hexdigest(),
         "inputs": plain_inputs,
     }
@@ -293,7 +297,7 @@ def write_or_verify_study_manifest(
             raise ValueError("cannot resume without a valid immutable study manifest") from exc
         if (
             not isinstance(existing, dict)
-            or existing.get("schema_version") != "1.0"
+            or existing.get("schema_version") != STUDY_MANIFEST_SCHEMA_VERSION
             or not isinstance(existing.get("inputs"), dict)
         ):
             raise ValueError("study manifest has an invalid structure")
@@ -351,8 +355,14 @@ def write_study_manifest(
             diff_hash = hashlib.sha256(diff).hexdigest()
     except (OSError, subprocess.CalledProcessError):
         commit, dirty, diff_hash = None, None, None
+    artifact_files: list[Path] = []
+    for path in sorted(manifest_path.parent.rglob("*")):
+        if path.is_symlink():
+            raise ValueError(f"run directory contains a symlinked artifact: {path.name}")
+        if path.is_file() and path != manifest_path:
+            artifact_files.append(path)
     manifest = {
-        "schema_version": "1.0",
+        "schema_version": STUDY_MANIFEST_SCHEMA_VERSION,
         "study": "adaptive-vs-fixed/prereg-v1",
         "run_id": run_id,
         "commit_sha": commit,
@@ -381,8 +391,7 @@ def write_study_manifest(
         },
         "artifacts": {
             str(path.relative_to(manifest_path.parent).as_posix()): sha256_file(path)
-            for path in sorted(manifest_path.parent.rglob("*"))
-            if path.is_file() and path != manifest_path
+            for path in artifact_files
         },
     }
     study_spec_path = manifest_path.parent / "study_manifest.json"
@@ -408,8 +417,13 @@ def write_study_manifest(
 def validate_study_manifest(manifest_path: str | Path) -> None:
     """Raise when a listed immutable run artifact is missing or has changed."""
     manifest_path = Path(manifest_path)
+    if manifest_path.is_symlink():
+        raise ValueError("study artifact manifest cannot be a symlink")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if not isinstance(manifest, dict) or manifest.get("schema_version") != "1.0":
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema_version") != STUDY_MANIFEST_SCHEMA_VERSION
+    ):
         raise ValueError("unsupported or malformed study artifact manifest")
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict) or not artifacts:
@@ -433,6 +447,8 @@ def validate_study_manifest(manifest_path: str | Path) -> None:
             raise ValueError(
                 f"manifest artifact path escapes the run directory: {relative_path}"
             ) from exc
+        if path.is_symlink():
+            raise ValueError(f"manifest artifact is a symlink: {relative_path}")
         if not path.is_file():
             raise ValueError(f"manifest artifact is missing: {relative_path}")
         actual = sha256_file(path)
@@ -465,17 +481,27 @@ def write_replicate_checkpoint(
     *,
     study_hash: str,
     protocol_hash: str,
+    artifact_root: str | Path | None = None,
+    artifact_directories: Sequence[str | Path] = (),
 ) -> None:
     """Persist a terminal replicate bound to its study and replicate identity."""
     checkpoint_path = Path(checkpoint_path)
     if replicate.get("status") not in {"completed", "failed"}:
         raise ValueError("only terminal replicate states may be checkpointed")
+    if artifact_directories and artifact_root is None:
+        raise ValueError("artifact_root is required when checkpoint artifacts are declared")
     plain = _plain(dict(replicate))
+    artifact_integrity = (
+        _snapshot_artifact_directories(artifact_root, artifact_directories)
+        if artifact_root is not None
+        else []
+    )
     envelope = {
-        "schema_version": "1.0",
+        "schema_version": REPLICATE_CHECKPOINT_SCHEMA_VERSION,
         "study_hash": study_hash,
         "protocol_hash": protocol_hash,
         "replicate_id": plain.get("training_seed"),
+        "artifact_integrity": artifact_integrity,
         "replicate": plain,
     }
     encoded = (json.dumps(envelope, indent=2, sort_keys=True, allow_nan=False) + "\n").encode(
@@ -534,7 +560,7 @@ def read_replicate_checkpoint(
     envelope = json.loads(payload)
     if (
         not isinstance(envelope, dict)
-        or envelope.get("schema_version") != "1.0"
+        or envelope.get("schema_version") != REPLICATE_CHECKPOINT_SCHEMA_VERSION
         or not isinstance(envelope.get("replicate"), dict)
     ):
         raise ValueError("replicate checkpoint envelope is malformed")
@@ -543,12 +569,125 @@ def read_replicate_checkpoint(
     if envelope.get("protocol_hash") != protocol_hash:
         raise ValueError("replicate checkpoint protocol hash mismatch")
     replicate = envelope["replicate"]
+    _validate_checkpoint_artifacts(
+        checkpoint_path.parent.parent,
+        envelope.get("artifact_integrity"),
+    )
     if envelope.get("replicate_id") != training_seed or replicate.get("training_seed") != training_seed:
         raise ValueError("replicate checkpoint identity mismatch")
     result = replicate
     if result.get("status") not in {"completed", "failed"}:
         raise ValueError("replicate checkpoint is not terminal")
     return cast(dict[str, Any], result)
+
+
+def _snapshot_artifact_directories(
+    artifact_root: str | Path,
+    artifact_directories: Sequence[str | Path],
+) -> list[dict[str, Any]]:
+    root = Path(artifact_root).resolve()
+    snapshots: list[dict[str, Any]] = []
+    seen_directories: set[str] = set()
+    for directory_value in artifact_directories:
+        directory = Path(directory_value)
+        if not directory.is_absolute():
+            directory = root / directory
+        if directory.is_symlink():
+            raise ValueError(f"checkpoint artifact directory is a symlink: {directory}")
+        resolved = directory.resolve()
+        try:
+            relative_directory = resolved.relative_to(root).as_posix()
+        except ValueError as exc:
+            raise ValueError(f"checkpoint artifact directory escapes its run: {directory}") from exc
+        if relative_directory in seen_directories:
+            raise ValueError(f"duplicate checkpoint artifact directory: {relative_directory}")
+        seen_directories.add(relative_directory)
+        exists = directory.exists()
+        if exists and not directory.is_dir():
+            raise ValueError(f"checkpoint artifact path is not a directory: {directory}")
+        files: dict[str, str] = {}
+        if exists:
+            for path in sorted(directory.rglob("*")):
+                if path.is_symlink():
+                    raise ValueError(f"checkpoint artifact contains a symlink: {path}")
+                if path.is_file():
+                    relative_path = path.resolve().relative_to(root).as_posix()
+                    files[relative_path] = sha256_file(path)
+        snapshots.append(
+            {"path": relative_directory, "exists": exists, "files": files}
+        )
+    return snapshots
+
+
+def _validate_checkpoint_artifacts(artifact_root: str | Path, snapshots: Any) -> None:
+    if not isinstance(snapshots, list):
+        raise ValueError("replicate checkpoint artifact integrity is malformed")
+    root = Path(artifact_root).resolve()
+    seen_directories: set[str] = set()
+    for snapshot in snapshots:
+        if not isinstance(snapshot, dict):
+            raise ValueError("replicate checkpoint artifact directory record is malformed")
+        relative_directory = snapshot.get("path")
+        exists = snapshot.get("exists")
+        files = snapshot.get("files")
+        if (
+            not isinstance(relative_directory, str)
+            or not relative_directory
+            or Path(relative_directory).is_absolute()
+            or ".." in Path(relative_directory).parts
+            or not isinstance(exists, bool)
+            or not isinstance(files, dict)
+            or relative_directory in seen_directories
+        ):
+            raise ValueError("replicate checkpoint artifact directory record is invalid")
+        seen_directories.add(relative_directory)
+        directory = root / relative_directory
+        try:
+            directory.resolve().relative_to(root)
+        except (OSError, ValueError) as exc:
+            raise ValueError("replicate checkpoint artifact path escapes its run") from exc
+        if not exists:
+            if directory.exists() or directory.is_symlink():
+                raise ValueError("checkpoint artifact directory appeared after checkpointing")
+            if files:
+                raise ValueError("absent checkpoint artifact directory has recorded files")
+            continue
+        if directory.is_symlink() or not directory.is_dir():
+            raise ValueError("checkpoint artifact directory is missing or changed type")
+        expected_files: set[str] = set()
+        for relative_path, expected_hash in files.items():
+            relative = Path(relative_path) if isinstance(relative_path, str) else Path("/")
+            if (
+                not isinstance(relative_path, str)
+                or relative.is_absolute()
+                or ".." in relative.parts
+                or not isinstance(expected_hash, str)
+                or len(expected_hash) != 64
+                or any(character not in "0123456789abcdef" for character in expected_hash)
+            ):
+                raise ValueError("checkpoint artifact file record is invalid")
+            if relative.parts[: len(Path(relative_directory).parts)] != Path(
+                relative_directory
+            ).parts:
+                raise ValueError("checkpoint artifact file is outside its recorded directory")
+            path = root / relative
+            try:
+                path.resolve().relative_to(root)
+            except (OSError, ValueError) as exc:
+                raise ValueError("checkpoint artifact file escapes its run") from exc
+            if path.is_symlink() or not path.is_file():
+                raise ValueError(f"checkpoint artifact file is missing or changed: {relative_path}")
+            if sha256_file(path) != expected_hash:
+                raise ValueError(f"checkpoint artifact checksum mismatch: {relative_path}")
+            expected_files.add(relative_path)
+        actual_files: set[str] = set()
+        for path in directory.rglob("*"):
+            if path.is_symlink():
+                raise ValueError(f"checkpoint artifact directory contains a symlink: {path}")
+            if path.is_file():
+                actual_files.add(path.resolve().relative_to(root).as_posix())
+        if actual_files != expected_files:
+            raise ValueError("checkpoint artifact file set changed after checkpointing")
 
 
 def _distribution_version(name: str) -> str | None:

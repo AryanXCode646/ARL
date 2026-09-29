@@ -25,6 +25,9 @@ from adaptive_rl.algorithms.adaptation import (
     run_adaptation_update,
 )
 from adaptive_rl.benchmarking.adaptation_artifacts import (
+    REPLICATE_CHECKPOINT_SCHEMA_VERSION,
+    STUDY_ARTIFACT_SCHEMA_VERSION,
+    STUDY_MANIFEST_SCHEMA_VERSION,
     canonical_json_bytes,
     read_replicate_checkpoint,
     validate_study_manifest,
@@ -420,6 +423,45 @@ def _resume_replicate_checkpoint(
         ) from exc
 
 
+def _load_resume_replicates(
+    state_root: Path,
+    *,
+    study_hash: str,
+    protocol_hash: str,
+    training_seeds: Sequence[int],
+) -> dict[int, ReplicateResult]:
+    """Validate every stored checkpoint before resuming any unfinished seed."""
+    if state_root.is_symlink():
+        raise ValueError("resume replicate state path is not a regular directory")
+    if not state_root.exists():
+        return {}
+    if not state_root.is_dir():
+        raise ValueError("resume replicate state path is not a regular directory")
+    allowed_names = {
+        name
+        for seed in training_seeds
+        for name in (f"seed_{seed}.json", f"seed_{seed}.json.sha256")
+    }
+    for path in state_root.iterdir():
+        if path.name not in allowed_names or path.is_symlink() or not path.is_file():
+            raise ValueError(f"resume replicate state contains an unexpected entry: {path.name}")
+
+    restored: dict[int, ReplicateResult] = {}
+    for seed in training_seeds:
+        checkpoint_path = state_root / f"seed_{seed}.json"
+        digest_path = checkpoint_path.with_suffix(checkpoint_path.suffix + ".sha256")
+        if checkpoint_path.exists() != digest_path.exists():
+            raise ValueError(f"resume checkpoint or digest is missing for seed {seed}")
+        if checkpoint_path.exists():
+            restored[seed] = _resume_replicate_checkpoint(
+                checkpoint_path,
+                study_hash=study_hash,
+                protocol_hash=protocol_hash,
+                training_seed=seed,
+            )
+    return restored
+
+
 def _read_completed_study_artifact(
     artifact_path: Path,
     manifest_path: Path,
@@ -436,7 +478,7 @@ def _read_completed_study_artifact(
     artifact_paths = artifact.get("artifact_paths") if isinstance(artifact, dict) else None
     if (
         not isinstance(artifact, dict)
-        or artifact.get("schema_version") != "1.0"
+        or artifact.get("schema_version") != STUDY_ARTIFACT_SCHEMA_VERSION
         or artifact.get("run_id") != run_id
         or artifact.get("study_hash") != study_hash
         or artifact.get("run_status") not in {"COMPLETE", "PARTIAL"}
@@ -744,6 +786,9 @@ def run_adaptation_benchmark(
         runtime_identity = _repository_metadata()
         study_inputs = {
             "study": "adaptive-vs-fixed/prereg-v1",
+            "artifact_schema_version": STUDY_ARTIFACT_SCHEMA_VERSION,
+            "manifest_schema_version": STUDY_MANIFEST_SCHEMA_VERSION,
+            "replicate_checkpoint_schema_version": REPLICATE_CHECKPOINT_SCHEMA_VERSION,
             "study_config": config.model_dump(
                 mode="json", exclude={"output_dir", "log_dir"}
             ),
@@ -793,6 +838,15 @@ def run_adaptation_benchmark(
     state_root = target_dir / "replicate_state"
     if study_run_id is not None and state_root.exists() and not resume:
         raise FileExistsError("run state already exists; pass --resume to use hashed replicates")
+    resumed_replicates: dict[int, ReplicateResult] = {}
+    if study_run_id is not None and resume:
+        assert study_hash is not None and protocol_hash is not None
+        resumed_replicates = _load_resume_replicates(
+            state_root,
+            study_hash=study_hash,
+            protocol_hash=protocol_hash,
+            training_seeds=selected_seeds,
+        )
     if study_run_id is None:
         for seed in selected_seeds:
             if (training_root / f"seed_{seed}").exists():
@@ -801,17 +855,8 @@ def run_adaptation_benchmark(
     results: list[ReplicateResult] = []
     for seed in selected_seeds:
         training_dir = training_root / f"seed_{seed}"
-        checkpoint_path = state_root / f"seed_{seed}.json"
-        if study_run_id is not None and resume and checkpoint_path.exists():
-            assert study_hash is not None and protocol_hash is not None
-            results.append(
-                _resume_replicate_checkpoint(
-                    checkpoint_path,
-                    study_hash=study_hash,
-                    protocol_hash=protocol_hash,
-                    training_seed=seed,
-                )
-            )
+        if seed in resumed_replicates:
+            results.append(resumed_replicates[seed])
             continue
         if study_run_id is not None and resume and training_dir.exists():
             results.append(
@@ -842,6 +887,8 @@ def run_adaptation_benchmark(
                 state_root / f"seed_{seed}.json",
                 study_hash=study_hash,
                 protocol_hash=protocol_hash,
+                artifact_root=target_dir,
+                artifact_directories=(training_dir,),
             )
 
     vectors: dict[str, tuple[list[Optional[float]], list[Optional[float]]]] = {}
@@ -900,7 +947,7 @@ def run_adaptation_benchmark(
         for arm in ("adaptive", "fixed")
     }
     artifact: dict[str, Any] = {
-        "schema_version": "1.0",
+        "schema_version": STUDY_ARTIFACT_SCHEMA_VERSION,
         "run_id": study_run_id,
         "study_hash": study_hash,
         "run_status": run_status if study_run_id is not None else None,

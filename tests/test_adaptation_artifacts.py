@@ -208,6 +208,25 @@ def test_manifest_rejects_symlinked_artifact_outside_run_directory(tmp_path) -> 
         validate_study_manifest(manifest_path)
 
 
+def test_manifest_rejects_internal_symlinked_artifact(tmp_path) -> None:
+    target = tmp_path / "target.bin"
+    target.write_bytes(b"bound-bytes")
+    link = tmp_path / "alias.bin"
+    link.symlink_to(target)
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "artifacts": {"alias.bin": sha256_file(target)},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="artifact is a symlink"):
+        validate_study_manifest(manifest_path)
+
+
 def test_study_csv_has_one_row_per_arm_and_preserves_finite_censoring(tmp_path) -> None:
     data = {
         "replicates": [
@@ -291,6 +310,47 @@ def test_replicate_checkpoint_is_terminal_hashed_and_tamper_evident(tmp_path) ->
         )
 
 
+def test_replicate_checkpoint_binds_training_artifact_files(tmp_path) -> None:
+    run_root = tmp_path / "run"
+    training_dir = run_root / "training" / "seed_31001"
+    training_dir.mkdir(parents=True)
+    model_path = training_dir / "model.zip"
+    model_path.write_bytes(b"frozen-model")
+    checkpoint_path = run_root / "replicate_state" / "seed_31001.json"
+    write_replicate_checkpoint(
+        {"training_seed": 31001, "status": "completed"},
+        checkpoint_path,
+        study_hash="study-hash",
+        protocol_hash="protocol-hash",
+        artifact_root=run_root,
+        artifact_directories=(training_dir,),
+    )
+
+    read_replicate_checkpoint(
+        checkpoint_path,
+        study_hash="study-hash",
+        protocol_hash="protocol-hash",
+        training_seed=31001,
+    )
+    model_path.write_bytes(b"changed-model")
+    with pytest.raises(ValueError, match="artifact checksum mismatch"):
+        read_replicate_checkpoint(
+            checkpoint_path,
+            study_hash="study-hash",
+            protocol_hash="protocol-hash",
+            training_seed=31001,
+        )
+    model_path.write_bytes(b"frozen-model")
+    (training_dir / "unexpected.json").write_text("{}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="artifact file set changed"):
+        read_replicate_checkpoint(
+            checkpoint_path,
+            study_hash="study-hash",
+            protocol_hash="protocol-hash",
+            training_seed=31001,
+        )
+
+
 def test_canonical_study_hash_ignores_mapping_order_and_json_formatting(tmp_path) -> None:
     left = {"config": {"seed": 31001, "lr": 0.001}, "schedule": [1, 2, 3]}
     right = {"schedule": [1, 2, 3], "config": {"lr": 0.001, "seed": 31001}}
@@ -301,6 +361,17 @@ def test_canonical_study_hash_ignores_mapping_order_and_json_formatting(tmp_path
     digest = write_or_verify_study_manifest(left, path, resume=False)
     path.write_text(json.dumps(json.loads(path.read_text()), indent=4), encoding="utf-8")
     assert write_or_verify_study_manifest(right, path, resume=True) == digest
+
+
+def test_study_hash_binds_artifact_schema_versions() -> None:
+    base = {
+        "protocol": "prereg-v1",
+        "artifact_schema_version": "1.0",
+        "manifest_schema_version": "1.0",
+        "replicate_checkpoint_schema_version": "1.1",
+    }
+    changed = {**base, "artifact_schema_version": "2.0"}
+    assert make_study_manifest(base)["study_hash"] != make_study_manifest(changed)["study_hash"]
 
 
 def test_study_manifest_material_change_and_tampered_hash_fail_resume(tmp_path) -> None:
