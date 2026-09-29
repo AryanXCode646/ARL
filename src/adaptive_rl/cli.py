@@ -490,6 +490,12 @@ def benchmark_adaptation(
 
     failed = artifact["failure_summary"]["failed_replicates"]
     completed = artifact["failure_summary"]["completed_replicates"]
+    json_artifact_path = Path(artifact["artifact_paths"]["json"])
+    csv_artifact_path = Path(artifact["artifact_paths"]["csv"])
+    if study is not None and run_id is not None:
+        study_dir = (output_dir or exp_config.output_dir) / run_id
+        json_artifact_path = study_dir / json_artifact_path
+        csv_artifact_path = study_dir / csv_artifact_path
     console.print(
         Panel.fit(
             f"[bold]{'Smoke check' if smoke else 'Issue #265 benchmark'} finished[/bold]\n\n"
@@ -497,8 +503,8 @@ def benchmark_adaptation(
             f"• [bold]Algorithm:[/bold] {artifact['experiment']['algorithm']}\n"
             f"• [bold]Completed replicates:[/bold] {completed}\n"
             f"• [bold]Failed replicates:[/bold] {len(failed)}\n"
-            f"• [bold]JSON:[/bold] {artifact['artifact_paths']['json']}\n"
-            f"• [bold]CSV:[/bold] {artifact['artifact_paths']['csv']}\n"
+            f"• [bold]JSON:[/bold] {json_artifact_path}\n"
+            f"• [bold]CSV:[/bold] {csv_artifact_path}\n"
             f"• [bold]Scientific result:[/bold] not established by harness execution",
             title="Online Adaptation Benchmark",
             border_style="yellow" if smoke or failed else "green",

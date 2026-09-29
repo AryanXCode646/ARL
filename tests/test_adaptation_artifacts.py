@@ -125,6 +125,25 @@ def test_manifest_hashes_all_artifacts_and_detects_tampering(tmp_path) -> None:
         validate_study_manifest(manifest_path)
 
 
+def test_manifest_rejects_unlisted_files_added_after_completion(tmp_path) -> None:
+    json_path, csv_path = write_adaptation_artifacts(
+        _artifact(), tmp_path, stem="adaptive_vs_fixed"
+    )
+    manifest_path = tmp_path / "manifest.json"
+    write_study_manifest(
+        json_path,
+        csv_path,
+        manifest_path,
+        run_id="test-run",
+        command="adaptive-rl benchmark adaptation --study prereg-v1 --run-id test-run",
+    )
+    validate_study_manifest(manifest_path)
+
+    (tmp_path / "unexpected.json").write_text("{}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="unlisted artifacts: unexpected.json"):
+        validate_study_manifest(manifest_path)
+
+
 def test_completed_manifest_binds_preexecution_study_hash(tmp_path) -> None:
     spec_path = tmp_path / "study_manifest.json"
     study_hash = write_or_verify_study_manifest(

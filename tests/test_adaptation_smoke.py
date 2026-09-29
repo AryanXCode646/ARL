@@ -8,7 +8,17 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from adaptive_rl.benchmarking.adaptation_runner import run_adaptation_benchmark
+from adaptive_rl.benchmarking.adaptation_artifacts import (
+    write_adaptive_vs_fixed_artifacts,
+    write_or_verify_study_manifest,
+    write_replicate_checkpoint,
+    write_study_manifest,
+)
+from adaptive_rl.benchmarking.adaptation_runner import (
+    _read_completed_study_artifact,
+    _resume_replicate_checkpoint,
+    run_adaptation_benchmark,
+)
 from adaptive_rl.cli import app
 from adaptive_rl.config import load_config
 from adaptive_rl.protocol.constants import TRAINING_SEEDS
@@ -69,6 +79,25 @@ def test_cli_adaptation_rejects_deterministic_ppo_before_creating_outputs(
     assert not output_dir.exists()
 
 
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["--algorithm", "dqn"], "--algorithm must be 'ppo' or 'sac'"),
+        (["--resume"], "--resume requires --study prereg-v1 and --run-id"),
+        (
+            ["--study", "prereg-v1", "--run-id", "hash-mismatch", "--stochastic"],
+            "frozen Issue #271 configuration",
+        ),
+    ],
+)
+def test_cli_adaptation_rejects_invalid_or_mismatched_requests(
+    args: list[str], message: str
+) -> None:
+    result = CliRunner().invoke(app, ["benchmark", "adaptation", *args])
+    assert result.exit_code == 1
+    assert message in " ".join(result.output.split())
+
+
 def test_preregistered_study_rejects_subset_before_training(tmp_path: Path) -> None:
     result = CliRunner().invoke(
         app,
@@ -121,6 +150,72 @@ def test_issue265_rejects_deterministic_ppo_rollout_before_creating_outputs(
             training_seeds=TRAINING_SEEDS[:1],
         )
     assert not output_dir.exists()
+
+
+def test_checkpoint_resume_helper_rejects_corrupted_terminal_record(
+    tmp_path: Path,
+) -> None:
+    checkpoint_path = tmp_path / "seed_31001.json"
+    write_replicate_checkpoint(
+        {"training_seed": TRAINING_SEEDS[0], "status": "completed"},
+        checkpoint_path,
+        study_hash="expected-study",
+        protocol_hash="expected-protocol",
+    )
+    checkpoint_path.write_text("truncated", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="resume rejected invalid checkpoint"):
+        _resume_replicate_checkpoint(
+            checkpoint_path,
+            study_hash="expected-study",
+            protocol_hash="expected-protocol",
+            training_seed=TRAINING_SEEDS[0],
+        )
+
+
+def test_completed_study_reader_returns_stable_persisted_artifact(
+    tmp_path: Path,
+) -> None:
+    study_hash = write_or_verify_study_manifest(
+        {"protocol": "test", "seed": TRAINING_SEEDS[0]},
+        tmp_path / "study_manifest.json",
+        resume=False,
+    )
+    artifact = {
+        "schema_version": "1.0",
+        "run_id": "idempotent-run",
+        "study_hash": study_hash,
+        "run_status": "COMPLETE",
+        "replicates": [],
+        "artifact_paths": {
+            "json": "adaptive_vs_fixed.json",
+            "csv": "adaptive_vs_fixed.csv",
+            "manifest": "manifest.json",
+        },
+    }
+    json_path, csv_path = write_adaptive_vs_fixed_artifacts(artifact, tmp_path)
+    manifest_path = tmp_path / "manifest.json"
+    write_study_manifest(
+        json_path,
+        csv_path,
+        manifest_path,
+        run_id="idempotent-run",
+        command="adaptive-rl benchmark adaptation --study prereg-v1 --run-id idempotent-run",
+    )
+
+    first_result = _read_completed_study_artifact(
+        json_path,
+        manifest_path,
+        run_id="idempotent-run",
+        study_hash=study_hash,
+    )
+    resumed_result = _read_completed_study_artifact(
+        json_path,
+        manifest_path,
+        run_id="idempotent-run",
+        study_hash=study_hash,
+    )
+    assert first_result == resumed_result == json.loads(json_path.read_text(encoding="utf-8"))
 
 
 @pytest.mark.parametrize(

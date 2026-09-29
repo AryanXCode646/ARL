@@ -32,10 +32,15 @@ frozen here. `--resume` recomputes that identity and accepts only terminal
 per-replicate records whose digest, study hash, protocol hash, and seed identity
 verify; it never trusts partial training directories. An interrupted seed
 without a complete checkpoint is recorded as failed, and remaining unstarted
-seeds continue. Repeating resume after finalization validates and returns the
-same immutable result. The JSON stores
+seeds continue. A present but malformed, stale, or mismatched checkpoint aborts
+resume rather than becoming a failed replicate. Final manifest validation also
+rejects files added to the completed run directory after its artifact set was
+recorded. Repeating resume after finalization validates and returns the same
+immutable result. The JSON stores
 the raw trajectories, protocol analysis, seed schedule, outcomes, runtime
 invariants, and run status.
+The runner returns that same persisted JSON on initial completion and repeated
+resume; its artifact paths are stable and relative to the run directory.
 The CSV has one row per replicate and arm, with finite-horizon `T_H`, status,
 per-episode return vectors, and seed vectors. `manifest.json` checksums every
 file in the run directory, including the pre-execution study manifest and

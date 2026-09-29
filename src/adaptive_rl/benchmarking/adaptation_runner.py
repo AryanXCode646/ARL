@@ -398,6 +398,59 @@ def _restore_replicate(data: dict[str, Any]) -> ReplicateResult:
     return ReplicateResult(**restored)
 
 
+def _resume_replicate_checkpoint(
+    checkpoint_path: Path,
+    *,
+    study_hash: str,
+    protocol_hash: str,
+    training_seed: int,
+) -> ReplicateResult:
+    """Restore one authenticated terminal replicate or fail the whole resume."""
+    try:
+        checkpoint = read_replicate_checkpoint(
+            checkpoint_path,
+            study_hash=study_hash,
+            protocol_hash=protocol_hash,
+            training_seed=training_seed,
+        )
+        return _restore_replicate(checkpoint)
+    except (OSError, TypeError, ValueError, KeyError) as exc:
+        raise ValueError(
+            f"resume rejected invalid checkpoint for seed {training_seed}: {exc}"
+        ) from exc
+
+
+def _read_completed_study_artifact(
+    artifact_path: Path,
+    manifest_path: Path,
+    *,
+    run_id: str,
+    study_hash: str,
+) -> dict[str, Any]:
+    """Return the persisted result only after validating its immutable envelope."""
+    validate_study_manifest(manifest_path)
+    try:
+        artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("completed study artifact is malformed") from exc
+    artifact_paths = artifact.get("artifact_paths") if isinstance(artifact, dict) else None
+    if (
+        not isinstance(artifact, dict)
+        or artifact.get("schema_version") != "1.0"
+        or artifact.get("run_id") != run_id
+        or artifact.get("study_hash") != study_hash
+        or artifact.get("run_status") not in {"COMPLETE", "PARTIAL"}
+        or artifact_paths
+        != {
+            "json": "adaptive_vs_fixed.json",
+            "csv": "adaptive_vs_fixed.csv",
+            "manifest": "manifest.json",
+        }
+    ):
+        raise ValueError("completed study artifact has an invalid schema or study identity")
+    return artifact
+
+
 def _run_replicate(
     config: ExperimentConfig,
     training_seed: int,
@@ -655,11 +708,15 @@ def run_adaptation_benchmark(
             raise ValueError("prereg-v1 config differs from the frozen Issue #271 configuration")
         if card_sha != ISSUE271_TREATMENT_CARD_SHA256:
             raise ValueError("prereg-v1 Treatment Card differs from the frozen treatment")
-        if config.evaluation.deterministic:
-            raise ValueError(
-                "PPO adaptation requires stochastic behavior-policy action sampling; "
-                "deterministic mean actions are not valid on-policy rollout data"
-            )
+    if (
+        config.algorithm.name.strip().lower() == "ppo"
+        and config.evaluation.deterministic
+    ):
+        raise ValueError(
+            "PPO adaptation requires stochastic behavior-policy action sampling; "
+            "deterministic mean actions are not valid on-policy rollout data"
+        )
+    if study_run_id is not None:
         try:
             dirty = subprocess.check_output(
                 ["git", "status", "--porcelain"], text=True, stderr=subprocess.DEVNULL
@@ -670,17 +727,7 @@ def run_adaptation_benchmark(
             ) from exc
         if dirty:
             raise RuntimeError("prereg-v1 execution requires a clean, committed working tree")
-        determinism = _enable_study_determinism()
-    else:
-        determinism = None
-        if (
-            config.algorithm.name.strip().lower() == "ppo"
-            and config.evaluation.deterministic
-        ):
-            raise ValueError(
-                "PPO adaptation requires stochastic behavior-policy action sampling; "
-                "deterministic mean actions are not valid on-policy rollout data"
-            )
+    determinism = _enable_study_determinism() if study_run_id is not None else None
 
     config_file = Path(config_path).resolve() if config_path is not None else None
     config_file_sha = _sha256_file(config_file) if config_file is not None else None
@@ -727,18 +774,12 @@ def run_adaptation_benchmark(
         ).hexdigest()
         final_paths = [target_dir / suffix for suffix in (*suffixes, "manifest.json")]
         if resume and all(path.is_file() for path in final_paths):
-            validate_study_manifest(final_paths[-1])
-            try:
-                completed_artifact = json.loads(final_paths[0].read_text(encoding="utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise ValueError("completed study artifact is malformed") from exc
-            if (
-                not isinstance(completed_artifact, dict)
-                or completed_artifact.get("run_id") != study_run_id
-                or completed_artifact.get("study_hash") != study_hash
-            ):
-                raise ValueError("completed study artifact does not match the expected study hash")
-            return completed_artifact
+            return _read_completed_study_artifact(
+                final_paths[0],
+                final_paths[-1],
+                run_id=study_run_id,
+                study_hash=study_hash,
+            )
         for path in final_paths:
             if path.exists():
                 raise FileExistsError(
@@ -762,22 +803,15 @@ def run_adaptation_benchmark(
         training_dir = training_root / f"seed_{seed}"
         checkpoint_path = state_root / f"seed_{seed}.json"
         if study_run_id is not None and resume and checkpoint_path.exists():
-            try:
-                assert study_hash is not None and protocol_hash is not None
-                checkpoint = read_replicate_checkpoint(
+            assert study_hash is not None and protocol_hash is not None
+            results.append(
+                _resume_replicate_checkpoint(
                     checkpoint_path,
                     study_hash=study_hash,
                     protocol_hash=protocol_hash,
                     training_seed=seed,
                 )
-                results.append(_restore_replicate(checkpoint))
-            except (OSError, TypeError, ValueError, KeyError) as exc:
-                failed = ReplicateResult(
-                    training_seed=seed,
-                    status="failed",
-                    failure_reason=f"untrusted replicate checkpoint: {type(exc).__name__}: {exc}",
-                )
-                results.append(failed)
+            )
             continue
         if study_run_id is not None and resume and training_dir.exists():
             results.append(
@@ -939,11 +973,6 @@ def run_adaptation_benchmark(
         json_path, csv_path = write_adaptive_vs_fixed_artifacts(artifact, target_dir)
     else:
         json_path, csv_path = write_adaptation_artifacts(artifact, target_dir, stem=stem)
-    artifact["artifact_paths"] = {
-        "json": str(json_path),
-        "csv": str(csv_path),
-        **({"manifest": str(target_dir / "manifest.json")} if study_run_id else {}),
-    }
     if study_run_id is not None:
         output_arg = f"--output-dir {Path(output_dir)} " if output_dir is not None else ""
         executable = Path(sys.argv[0])
@@ -956,14 +985,21 @@ def run_adaptation_benchmark(
             f"--config {config_arg} {output_arg}"
             f"--study prereg-v1 --run-id {study_run_id}"
         )
-        manifest = write_study_manifest(
+        write_study_manifest(
             json_path,
             csv_path,
             target_dir / "manifest.json",
             run_id=study_run_id,
             command=command,
         )
-        artifact["manifest"] = manifest
+        assert study_hash is not None
+        return _read_completed_study_artifact(
+            json_path,
+            target_dir / "manifest.json",
+            run_id=study_run_id,
+            study_hash=study_hash,
+        )
+    artifact["artifact_paths"] = {"json": str(json_path), "csv": str(csv_path)}
     return artifact
 
 

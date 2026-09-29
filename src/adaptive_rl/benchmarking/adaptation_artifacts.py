@@ -414,6 +414,7 @@ def validate_study_manifest(manifest_path: str | Path) -> None:
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict) or not artifacts:
         raise ValueError("manifest must list at least one artifact checksum")
+    root = manifest_path.parent.resolve()
     for relative_path, expected in artifacts.items():
         if (
             not isinstance(relative_path, str)
@@ -427,7 +428,7 @@ def validate_study_manifest(manifest_path: str | Path) -> None:
             raise ValueError(f"manifest artifact path escapes the run directory: {relative_path}")
         path = manifest_path.parent / relative
         try:
-            path.resolve().relative_to(manifest_path.parent.resolve())
+            path.resolve().relative_to(root)
         except (OSError, ValueError) as exc:
             raise ValueError(
                 f"manifest artifact path escapes the run directory: {relative_path}"
@@ -437,6 +438,15 @@ def validate_study_manifest(manifest_path: str | Path) -> None:
         actual = sha256_file(path)
         if actual != expected:
             raise ValueError(f"manifest checksum mismatch: {relative_path}")
+    actual_artifacts = {
+        path.relative_to(manifest_path.parent).as_posix()
+        for path in manifest_path.parent.rglob("*")
+        if path != manifest_path and (path.is_file() or path.is_symlink())
+    }
+    unlisted_artifacts = actual_artifacts - set(artifacts)
+    if unlisted_artifacts:
+        names = ", ".join(sorted(unlisted_artifacts))
+        raise ValueError(f"run directory contains unlisted artifacts: {names}")
     if "study_hash" in manifest:
         spec_path = manifest_path.parent / "study_manifest.json"
         if not spec_path.is_file() or "study_manifest.json" not in artifacts:
