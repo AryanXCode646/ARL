@@ -23,6 +23,7 @@ def test_cli_adaptation_smoke_runs_complete_protocol_and_writes_artifacts(tmp_pa
             "benchmark",
             "adaptation",
             "--smoke",
+            "--stochastic",
             "--output-dir",
             str(output_dir),
         ],
@@ -53,6 +54,19 @@ def test_cli_adaptation_smoke_runs_complete_protocol_and_writes_artifacts(tmp_pa
     assert replicate["fixed_final_fingerprint"] == replicate["frozen_fingerprint"]
     assert artifact["paired_analysis"]["drone_disturbed/ppo"]["status"] == "inconclusive"
     assert (output_dir / "adaptation.csv").is_file()
+
+
+def test_cli_adaptation_rejects_deterministic_ppo_before_creating_outputs(
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "invalid-deterministic-ppo"
+    result = CliRunner().invoke(
+        app,
+        ["benchmark", "adaptation", "--smoke", "--output-dir", str(output_dir)],
+    )
+    assert result.exit_code == 1
+    assert "not valid on-policy rollout data" in result.output
+    assert not output_dir.exists()
 
 
 def test_preregistered_study_rejects_subset_before_training(tmp_path: Path) -> None:
@@ -88,12 +102,25 @@ def test_preregistered_study_rejects_changed_scientific_config_before_training()
 
 
 def test_preregistered_study_rejects_deterministic_ppo_rollout_before_training() -> None:
-    with pytest.raises(ValueError, match="not sampled from the behavior distribution"):
+    with pytest.raises(ValueError, match="not valid on-policy rollout data"):
         run_adaptation_benchmark(
             load_config("configs/drone_distribution_shift.yaml"),
             study_run_id="deterministic-ppo-rejection",
             training_seeds=TRAINING_SEEDS,
         )
+
+
+def test_issue265_rejects_deterministic_ppo_rollout_before_creating_outputs(
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "must-not-be-created"
+    with pytest.raises(ValueError, match="not valid on-policy rollout data"):
+        run_adaptation_benchmark(
+            load_config("configs/drone_distribution_shift.yaml"),
+            output_dir=output_dir,
+            training_seeds=TRAINING_SEEDS[:1],
+        )
+    assert not output_dir.exists()
 
 
 @pytest.mark.parametrize(

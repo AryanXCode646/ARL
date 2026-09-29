@@ -412,7 +412,9 @@ def benchmark_adaptation(
         help="Reuse only complete hashed replicate checkpoints for an unfinished study run",
     ),
     deterministic: Optional[bool] = typer.Option(
-        None, "--deterministic/--stochastic", help="Override action selection for all evaluations"
+        None,
+        "--deterministic/--stochastic",
+        help="Override evaluation action selection; PPO adaptation requires stochastic actions",
     ),
     smoke: bool = typer.Option(
         False,

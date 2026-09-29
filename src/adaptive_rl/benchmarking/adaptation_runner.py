@@ -657,8 +657,8 @@ def run_adaptation_benchmark(
             raise ValueError("prereg-v1 Treatment Card differs from the frozen treatment")
         if config.evaluation.deterministic:
             raise ValueError(
-                "prereg-v1 cannot run native PPO adaptation with deterministic mean actions; "
-                "the recorded actions are not sampled from the behavior distribution"
+                "PPO adaptation requires stochastic behavior-policy action sampling; "
+                "deterministic mean actions are not valid on-policy rollout data"
             )
         try:
             dirty = subprocess.check_output(
@@ -673,6 +673,14 @@ def run_adaptation_benchmark(
         determinism = _enable_study_determinism()
     else:
         determinism = None
+        if (
+            config.algorithm.name.strip().lower() == "ppo"
+            and config.evaluation.deterministic
+        ):
+            raise ValueError(
+                "PPO adaptation requires stochastic behavior-policy action sampling; "
+                "deterministic mean actions are not valid on-policy rollout data"
+            )
 
     config_file = Path(config_path).resolve() if config_path is not None else None
     config_file_sha = _sha256_file(config_file) if config_file is not None else None

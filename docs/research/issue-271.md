@@ -112,9 +112,12 @@ mean action with its Gaussian density recorded as `behavior_log_prob` does not
 have that sampling distribution, so the stored rollout is not a valid on-policy
 PPO sample. The current preregistration does not define an action-sampling rule
 that resolves this conflict. No treatment or analysis change is made here; the
-prereg-v1 runner now rejects the frozen deterministic PPO configuration before
-training. The PPO treatment must not be described as scientifically validated
-until a prospective protocol amendment resolves the action-selection contract.
+adaptation runner now rejects deterministic PPO collection before training,
+including the frozen prereg-v1 configuration. Issue #265's general PPO CLI can
+run a machinery check with explicit stochastic collection, but that does not
+resolve the conflict with this study's deterministic-evaluation rule. The PPO
+treatment must not be described as scientifically validated until a prospective
+protocol amendment resolves the action-selection contract.
 This limitation does not change the previously recorded artifact or its
 descriptive statistics; its `COMPLETE` status describes harness execution, not
 valid on-policy PPO evidence.

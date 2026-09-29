@@ -39,9 +39,16 @@ Run a reduced, explicitly labeled machinery check:
 ```bash
 adaptive-rl benchmark adaptation \
   --config configs/drone_distribution_shift.yaml \
+  --stochastic \
   --smoke \
   --output-dir artifacts/issue265_smoke_ppo
 ```
+
+PPO adaptation requires stochastic behavior-policy actions: deterministic mean
+actions do not form valid on-policy PPO rollout data. The runner rejects
+deterministic PPO collection before training. This machinery check does not
+resolve the separate conflict between that requirement and Issue #271's frozen
+deterministic-evaluation rule; it is not a valid run of the preregistered study.
 
 Run the smoke path for SAC:
 
@@ -53,12 +60,18 @@ adaptive-rl benchmark adaptation \
   --output-dir artifacts/issue265_smoke_sac
 ```
 
-Run the complete ten-seed PPO experiment (the same command accepts `--algorithm
-sac` for SAC):
+For an Issue #265 PPO run, explicitly select stochastic evaluation actions (the
+same command accepts `--algorithm sac` for SAC):
+
+The stochastic PPO setting conflicts with Issue #271's frozen deterministic
+evaluation rule. Treat this command as Issue #265 machinery/diagnostic output;
+do not report it as a valid preregistered-study result without a prospective
+protocol amendment.
 
 ```bash
 adaptive-rl benchmark adaptation \
   --config configs/drone_distribution_shift.yaml \
+  --stochastic \
   --output-dir artifacts/issue265_ppo
 ```
 
