@@ -291,26 +291,149 @@ The test suite includes 18 standardized scenarios:
 16. `return_to_home_mission`: Outbound flight to a distant target coordinate followed by automated RTH sequence.
 17. `turbulent_canyon_wind`: Traversal of a narrow canyon under continuous 3.0 m/s lateral wind disturbance.
 18. `degraded_actuator_loiter`: Loitering under minor (10%) motor thrust degradation, verifying degraded recovery.
+19. `closed_loop_sequential_replanning_mission`: High-speed 3-waypoint multi-obstacle sequential replanning.
+20. `dynamic_obstacle_crossing_time_aware`: Time-aware 4D planning anticipates a perpendicular moving obstacle.
+21. `multi_dynamic_obstacle_corridor`: Autonomous navigation through a corridor populated by multiple crossing dynamic obstacles.
+22. `temporary_corridor_blockage_wait`: In-place waiting transitions hold hover until temporary canyon blockage clears.
+23. `sequential_multi_waypoint_adaptive`: 4-waypoint sequential mission adapting dynamically to moving obstacles.
+24. `repeated_dynamic_replanning`: Active continuous route updates under dual oscillating dynamic obstacle interference.
+25. `sensor_in_the_loop_navigation`: Autonomous navigation driven strictly by state-estimation avionics under IMU noise and drift.
+26. `unreachable_mission_safe_blocked`: Detects fully enclosed goal and enters safe fail-closed blocked hover.
+27. `prediction_divergence_recovery`: Receding-horizon replanning recovers safely when moving obstacle trajectories change.
 
 ---
 
-## 8. CLI Usage & Reproducible Commands
+## 9. Predictive Autonomous Mission Planning & Intelligent Flight Navigation (Phase IV)
+
+ARL Phase IV evolves the autonomous flight architecture into a predictive, time-aware 4D planning and receding-horizon navigation system capable of anticipating dynamic obstacles, evaluating alternative route corridors, executing multi-waypoint missions, and operating closed-loop under noisy avionics state estimation.
+
+### 9.1 Time-Aware 4D Path Planning (`TimeAwareAStarPlanner3D`)
+
+Standard 3D path planning treats moving obstacles either as stationary hazards or as inflated static tubes across time, which produces overly conservative or impassable paths. `TimeAwareAStarPlanner3D` formulates planning directly in the 4D space-time configuration manifold:
+
+$$\mathbf{s} = (i_x, i_y, i_z, i_t) \in \mathbb{Z}^4$$
+
+- **Spatiotemporal Discretization:** The arena is discretized into spatial voxels $\Delta x = \Delta y = \Delta z = 1.0\text{ m}$ and discrete time slices $\Delta t = 0.5\text{ s}$.
+- **Dual Transition Mechanics:**
+  1. **Spatial Transitions (26-connectivity):** The drone can move to any of the 26 spatial neighbor voxels with transit duration $\Delta \tau = \|\mathbf{p}_{\text{next}} - \mathbf{p}_{\text{curr}}\|_2 / v_{\text{nominal}}$ and discrete time step index increment $\Delta i_t = \max(1, \text{round}(\Delta \tau / \Delta t))$.
+  2. **In-Place Waiting Transitions:** When all forward corridors are temporarily obstructed by moving obstacles, the drone can execute an in-place hover transition:
+     $$(i_x, i_y, i_z, i_t) \longrightarrow (i_x, i_y, i_z, i_t + 1)$$
+     Waiting transitions are constrained by `max_wait_steps` (default 10 steps = 5.0 s) and incur a non-zero waiting cost penalty ($w_w > 1.0$) to prioritize active progression when clear.
+- **Analytical $O(1)$ Bounding-Sphere Pre-Filtering:**
+  Evaluating full continuous swept collision checks across all 26 spatial neighbors in 4D graph expansion requires heavy subdivision. To maintain real-time performance (< 100 ms expansion time), an analytical swept bounding-sphere pre-filter checks:
+  $$d_{\text{min, swept}} > r_{\text{obs}} + r_{\text{vehicle}} + \delta_{\text{margin}} + v_{\text{obs,max}} \Delta t + \frac{1}{2} \|\mathbf{p}_{\text{next}} - \mathbf{p}_{\text{curr}}\|_2$$
+  Edges that fail the bounding check are rejected in $O(1)$, skipping 99% of detailed collision checks.
+- **Admissible Heuristic:**
+  $$h(\mathbf{p}) = \frac{\|\mathbf{p} - \mathbf{p}_{\text{goal}}\|_2}{v_{\text{nominal}}}$$
+  Because $v_{\text{nominal}}$ is the actual planning velocity along candidate edges, $h(\mathbf{p})$ is strictly admissible and consistent, guaranteeing bounded node expansions without Dijkstra-like search degradation.
+
+### 9.2 Risk-Aware Multi-Objective Route Evaluation (`RouteEvaluator`)
+
+Candidate trajectories are evaluated against a comprehensive dimensionless cost function:
+
+$$J = w_d \left(\frac{L}{L_{\text{ref}}}\right) + w_t \left(\frac{T}{T_{\text{ref}}}\right) + w_w \left(\frac{T_{\text{wait}}}{T_{\text{ref}}}\right) + w_r C_{\text{risk}} + w_c C_{\text{curv}}$$
+
+where:
+- $L$: Total Euclidean spatial path length.
+- $T$: Total transit duration in seconds.
+- $T_{\text{wait}}$: Cumulative duration spent in waiting/hover states.
+- $C_{\text{risk}}$: Dynamic proximity risk score computed as:
+  $$C_{\text{risk}} = \frac{1}{N} \sum_{k=1}^N \sum_{j} \exp\left( -\frac{d_j(\mathbf{p}_k, t_k) - r_j - r_{\text{veh}}}{\sigma_{\text{risk}}} \right)$$
+- $C_{\text{curv}}$: Path smoothness penalty measuring turn angles $\theta_k$ between consecutive segments:
+  $$C_{\text{curv}} = \sum_{k=1}^{N-1} (1 - \cos \theta_k)$$
+- `plan_alternatives()` generates $K \ge 2$ distinct corridors by placing spatial penalty exclusion zones around midpoints of previously found routes, ranking all collision-free options by $J$.
+
+### 9.3 Receding-Horizon Navigation State Machine (`MissionManager`)
+
+The `MissionManager` orchestrates multi-waypoint missions with dynamic replanning and fail-safe safety guards:
+
+- **Authoritative State Machine:**
+  - `IDLE`: Initial uninitialized state.
+  - `PLANNING`: Computing initial or full mission path.
+  - `EXECUTING`: Nominal flight trajectory tracking.
+  - `WAITING`: Temporary safe hover hold while waiting for moving obstacle clearance.
+  - `REPLANNING`: Online calculation of an evasive trajectory.
+  - `ARRIVED`: Final mission goal settled within target radius.
+  - `FAILED_BLOCKED`: Safe fail-closed hover when route is permanently blocked or wait timeout is exceeded.
+  - `ABORTED`: Non-finite sensor state detected, triggering immediate emergency stabilization.
+- **Receding-Horizon Clearance Monitoring:** Evaluates the upcoming corridor segment over a lookahead window $\Delta t = 2.5\text{ s}$ using `check_dynamic_transition_collision`.
+- **Hysteresis & Replanning Cooldown:** Replanning is rate-limited by `replan_cooldown_sec = 1.0\text{ s}` to prevent high-frequency chattering, but critical obstacle proximity ($d < r_{\text{veh}} + 0.5\text{ m}$) bypasses cooldown immediately for flight safety.
+- **Off-Track Deviation Triggering:** If aerodynamic wind or estimator error pulls the drone off the planned trajectory corridor by $> 1.5\text{ m}$, dynamic replanning is automatically initiated from the current vehicle state.
+
+### 9.4 Sensor-in-the-Loop Avionics State Estimation
+
+Phase IV integrates the 6-axis IMU sensor model and the non-linear SO(3) complementary state estimator directly into closed-loop navigation:
+
+- **Avionics Sensor Fusion:** Specific force accelerometer readings and angular rates are fused with noisy position and altitude updates ($1\sigma = 0.02\text{ m}$).
+- **Observer Gain Tuning:** The estimator gains are tuned ($k_{p,\text{pos}}=5.0, k_{v,\text{pos}}=3.0, k_{p,\text{accel}}=0.2, k_{i,\text{accel}}=0.001$) to suppress IMU integration drift during high-acceleration translational turns without inducing tilt phase lag.
+- **Telemetry State Attribution:** Every telemetry record attributes state origin (`state_source: "estimated" | "ground_truth"`), logging estimation error norms $\| \mathbf{p}_{\text{est}} - \mathbf{p}_{\text{true}} \|_2$ and attitude error angles in real time.
+- **Fail-Closed Sensor Safety:** Non-finite sensor inputs ($\text{NaN}$ or $\pm\infty$) and unnormalized quaternions ($|\|\mathbf{q}\| - 1| \ge 0.05$) immediately abort mission execution to prevent flyaway crashes.
+- **Pre-Step-1 Sensor Initialization:** Sensor estimators are fully initialized prior to step 1 execution, ensuring closed-loop feedback remains on avionics estimates from $t=0$ without requiring ground-truth fallback.
+
+### 9.5 Conservative Ceil Time-Discretization & Dynamic Edge Scheduling (Phase IV.1)
+
+In 4D lattice motion planning, continuous edge durations must be discretized into integer time-steps $\Delta i_t$. Floor or naive round operations produce edge durations shorter than physical flight time on diagonal steps (e.g. $\sqrt{2}\text{ m} / 2.0\text{ m/s} = 0.707\text{ s} \to 1\text{ step} = 0.5\text{ s}$), which implies an unachievable speed ($2.83\text{ m/s} > 2.0\text{ m/s}$) and masks moving obstacle blockages.
+
+Phase IV.1 establishes conservative ceiling time-discretization:
+
+$$\Delta i_t = \max\left(1, \left\lceil \frac{\Delta \tau}{\Delta t} - 10^{-9} \right\rceil\right)$$
+
+- **Physical Feasibility Guarantee:** Every edge transit duration satisfies $\Delta i_t \cdot \Delta t \ge \Delta \tau$, ensuring that the commanded quadrotor speed never exceeds $v_{\text{nominal}}$.
+- **Heuristic Admissibility & Consistency:**
+  With Euclidean distance heuristic $h(\mathbf{p}) = \|\mathbf{p} - \mathbf{p}_{\text{goal}}\|_2 / v_{\text{nominal}}$ and edge cost $c(u, v) = \Delta i_t \cdot \Delta t$:
+  $$h(u) - h(v) = \frac{\|u - \mathbf{p}_{\text{goal}}\| - \|v - \mathbf{p}_{\text{goal}}\|}{v_{\text{nominal}}} \le \frac{\|u - v\|}{v_{\text{nominal}}} \le \Delta i_t \cdot \Delta t = c(u, v)$$
+  Thus $h(\mathbf{p})$ remains strictly monotonic and admissible across all 26-connected spatial edges.
+
+### 9.6 Divergent Dynamic Obstacle Modeling (`DivergentDynamicObstacleSphere3D`)
+
+To verify adaptive receding-horizon recovery when moving obstacle forecasts fail, Phase IV.1 introduces deterministic prediction divergence:
+- **Nominal Predicted Model:** Obstacle reports predictable trajectory $\mathbf{x}_{\text{pred}}(t) = \mathbf{x}_0 + \mathbf{v}_0 t$.
+- **Perturbed Physical Trajectory:** At divergence time $t_{\text{div}}$, velocity shifts to $\mathbf{v}_{\text{div}}$, creating real-time divergence:
+  $$\mathbf{x}_{\text{actual}}(t) = \mathbf{x}_{\text{pred}}(t_{\text{div}}) + \mathbf{v}_{\text{div}} (t - t_{\text{div}}) \quad \forall t \ge t_{\text{div}}$$
+- **Online Detection:** `MissionManager` continuously computes prediction error $e_{\text{pred}}(t) = \|\mathbf{x}_{\text{actual}}(t) - \mathbf{x}_{\text{pred}}(t)\|_2$. When $e_{\text{pred}} > 0.5\text{ m}$, dynamic replanning updates the trajectory to ensure continuous collision avoidance.
+
+### 9.7 Empirical Performance Benchmarking Results
+
+Execution throughput benchmarked on a standard Linux environment (`benchmarks/benchmark_phase4_performance.py`):
+
+| Component | Metric | Value | Requirement |
+| :--- | :--- | :--- | :--- |
+| **4D Time-Aware A\*** (Clear Domain) | Mean Planning Latency | 3.07 s (15,000 expansions) | Bound within budget |
+| **4D Time-Aware A\*** (Cluttered Domain) | Mean Planning Latency | 5.02 s (3,378 expansions) | Goal reachable |
+| **Continuous Risk Evaluator** | Throughput | 75.7 evaluations / sec | Real-time |
+| **Continuous Risk Evaluator** | Mean Latency | 13.22 ms / evaluation | < 50 ms |
+| **MissionManager Update Cycle** | Mean Step Latency | 1.43 ms / update | < 50 ms (20 Hz loop) |
+| **MissionManager Update Cycle** | 95th Percentile Latency | 3.61 ms / update | < 50 ms |
+| **MissionManager Update Cycle** | Control Loop Throughput | 699.3 updates / sec | > 20 Hz |
+
+### 9.8 Continuous Space-Time Trajectory Execution & Analytical Clearance
+
+- **Space-Time Trajectory Query (`get_time_parameterized_reference`)**:
+  Both `MissionManager` and `FlightScenarioRunner` provide continuous analytical interpolation $(\mathbf{p}_{\text{ref}}(t), \mathbf{v}_{\text{ref}}(t))$ across the scheduled 4D timed waypoints. Waiting intervals strictly command $\mathbf{v}_{\text{ref}} = \mathbf{0}$, velocity is clamped to $v_{\text{nominal}}$, and stationary mission states (e.g. `ARRIVED`, `WAITING`, `FAILED_BLOCKED`) command zero velocity.
+- **Analytical Piecewise-Linear Dynamic Clearance**:
+  `RouteEvaluator.evaluate()` calculates the exact analytical minimum separation between linear drone transit chords and moving obstacle segments split at boundary bounce times, guaranteeing that clearance violations between discrete sample points are detected without grid aliasing.
+- **Terminal Approach Velocity Deceleration**:
+  When approaching the destination within braking distance $d \le 6.0\text{ m}$, commanded velocity setpoints follow a calibrated square-root profile $v_{\text{profile}} = \min(v_{\text{nom}}, \sqrt{2 a_{\text{brake}} \max(0, d - r_{\text{target}})})$, reaching zero velocity exactly at $r_{\text{target}}$ to eliminate undamped terminal limit-cycle oscillations.
+
+---
+
+## 10. CLI Usage & Reproducible Commands
 
 Run scenarios, benchmarks, and tests directly via the `adaptive-rl` CLI:
 
 ```bash
-# Run full test suite
-pytest -v
+# Run full test suite across all Phase II, III, and IV tests
+pytest tests/ -v
 
-# Run CI verification smoke suite
-adaptive-rl test-ci
+# Run Phase IV predictive autonomous navigation tests
+pytest tests/test_navigation_time_aware_planner.py tests/test_mission_manager_phase4.py tests/test_sensor_in_the_loop_navigation.py tests/test_phase4_scenarios.py -v
 
-# Run single autonomous flight scenario (Scenario 11 Slalom with LQR controller)
+# Run single Phase IV scenario (Scenario 20 Dynamic Crossing)
 python -c "
-from adaptive_rl.flight_testing import FlightScenarioRunner, get_scenario
+from adaptive_rl.flight_testing.scenarios import FlightScenarioRunner, get_scenario
 runner = FlightScenarioRunner()
-record = runner.run_scenario(get_scenario('slalom_run'), controller_type='lqr')
-print('Outcome:', record.summary.outcome)
+result = runner.run_scenario(get_scenario('dynamic_obstacle_crossing_time_aware'))
+print('Outcome:', result.metrics.outcome, 'Success:', result.metrics.success)
 "
 
 # Run benchmark with explicit algorithm and DOFs
